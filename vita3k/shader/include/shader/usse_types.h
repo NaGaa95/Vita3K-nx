@@ -48,7 +48,9 @@ enum class ExtPredicate : uint8_t {
     P3,
     NEGP0,
     NEGP1,
-    PN
+    PN,
+    // Keep hardware predicate values through PN unchanged; NEGP2 is vector-only.
+    NEGP2
 };
 
 enum class ExtVecPredicate : uint8_t {
@@ -99,10 +101,7 @@ inline ExtPredicate ext_vec_predicate_to_ext(ExtVecPredicate pred) {
     case ExtVecPredicate::NEGP1:
         return ExtPredicate::NEGP1;
     case ExtVecPredicate::NEGP2:
-        // TODO
-        assert(false);
-        LOG_CRITICAL("ExtVecPredicate::NEGP2 case hit, report this to devs.");
-        [[fallthrough]];
+        return ExtPredicate::NEGP2;
     default:
         return ExtPredicate::NONE;
     }

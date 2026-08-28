@@ -51,6 +51,7 @@ const char *e_predicate_str(ExtPredicate p) {
     case ExtPredicate::NEGP0: return "!p0 ";
     case ExtPredicate::NEGP1: return "!p1 ";
     case ExtPredicate::PN: return "pN ";
+    case ExtPredicate::NEGP2: return "!p2 ";
     default: return "invalid";
     }
 }
