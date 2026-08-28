@@ -746,6 +746,11 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
     }
 }
 
+// Tiled depth-stencil allocations include the full final 32-row tile.
+static int32_t ds_rows_allocated(SurfaceTiling tiling, int32_t memory_height) {
+    return (tiling == SurfaceTiling::Tiled) ? align(memory_height, 32) : memory_height;
+}
+
 SurfaceRetrieveResult VKSurfaceCache::retrieve_depth_stencil_for_framebuffer(SceGxmDepthStencilSurface *depth_stencil, const uint32_t width, const uint32_t height) {
     // when writing we use the render target size which is already upscaled
     int32_t memory_width = static_cast<int32_t>(width / state.res_multiplier);
@@ -825,7 +830,7 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_depth_stencil_for_framebuffer(Sce
         bytes_per_sample = 4;
         break;
     }
-    cached_info->total_bytes = bytes_per_sample * depth_stencil->get_stride() * memory_height;
+    cached_info->total_bytes = bytes_per_sample * depth_stencil->get_stride() * ds_rows_allocated(tiling, memory_height);
 
     vkutil::Image &image = cached_info->texture;
 
@@ -935,7 +940,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_tex
 
             // note: we don't support sampling the stencil from a D24S8 depth-stencil
             // so we can assume any stencil uses only 1 byte per sample
-            uint32_t surface_bytes = it->second->stride_samples * it->second->memory_height * 1;
+            uint32_t surface_bytes = it->second->stride_samples * ds_rows_allocated(it->second->tiling, it->second->memory_height) * 1;
 
             // the texture must be contained entirely in the stencil surface
             if (address + total_bytes <= it->first + surface_bytes) {
