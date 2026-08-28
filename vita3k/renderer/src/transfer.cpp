@@ -15,6 +15,8 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <vector>
+
 #include <gxm/functions.h>
 #include <gxm/types.h>
 #include <renderer/commands.h>
@@ -56,14 +58,30 @@ static void perform_transfer_copy_impl(MemState &mem, const SceGxmTransferImage 
         }
     };
 
-    for (uint32_t dx = 0; dx < src.width; dx++) {
-        for (uint32_t dy = 0; dy < src.height; dy++) {
+    // Snapshot overlapping linear sources; tiled and swizzled offsets need different bounds.
+    std::vector<T> src_copy;
+    const T *safe_src = src_ptr;
+    if constexpr (src_type == SCE_GXM_TRANSFER_LINEAR) {
+        const uintptr_t src_start = reinterpret_cast<uintptr_t>(src_ptr);
+        const uintptr_t dst_start = reinterpret_cast<uintptr_t>(dst_ptr);
+        const size_t src_span = (src.y + src.height) * (src.stride ? src.stride : src.width * sizeof(T));
+        const size_t dst_span = (dst.y + dst.height) * (dst.stride ? dst.stride : dst.width * sizeof(T));
+        const bool overlaps = src_start < dst_start + dst_span && dst_start < src_start + src_span;
+
+        if (overlaps) {
+            src_copy.assign(src_ptr, src_ptr + src_span / sizeof(T));
+            safe_src = src_copy.data();
+        }
+    }
+
+    for (uint32_t dy = 0; dy < src.height; dy++) {
+        for (uint32_t dx = 0; dx < src.width; dx++) {
             // compute offset depending on the texture type used
             // the function compute_offset gets inlined
             uint32_t src_offset = compute_offset(src.x + dx, src.y + dy, src, src_type);
             uint32_t dst_offset = compute_offset(dst.x + dx, dst.y + dy, dst, dst_type);
 
-            T value = src_ptr[src_offset];
+            T value = safe_src[src_offset];
             if constexpr (mode == SCE_GXM_TRANSFER_COLORKEY_PASS) {
                 if ((value & key_mask) != key_value)
                     continue;
