@@ -36,7 +36,7 @@ constexpr int NB_TEXTURE_STAGING_BUFFERS = 16;
 
 struct TextureStagingBuffer {
     vkutil::Buffer buffer;
-    uint32_t used_so_far;
+    uint32_t used_so_far = 0;
     bool is_coherent = false;
     uint64_t scene_timestamp = ~0;
     uint64_t frame_timestamp = ~0;
