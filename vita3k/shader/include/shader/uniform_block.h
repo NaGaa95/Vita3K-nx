@@ -50,6 +50,7 @@ struct UniformBlockExtended {
     T base_block;
 
     uint64_t buffer_addresses[SCE_GXM_REAL_MAX_UNIFORM_BUFFER] = {};
+    std::pair<int32_t, int32_t> buffer_bounds[SCE_GXM_REAL_MAX_UNIFORM_BUFFER] = {};
     std::pair<float, float> viewport_ratio[SCE_GXM_MAX_TEXTURE_UNITS] = {};
     std::pair<float, float> viewport_offset[SCE_GXM_MAX_TEXTURE_UNITS] = {};
     bool changed = false;
@@ -79,8 +80,19 @@ struct UniformBlockExtended {
         }
     }
 
+    void set_buffer_bounds(int idx, const std::pair<int32_t, int32_t> &bounds) {
+        if (buffer_bounds[idx] != bounds) {
+            changed = true;
+            buffer_bounds[idx] = bounds;
+        }
+    }
+
     static constexpr uint32_t get_buffer_addresses_offset(uint16_t buffer_count, uint16_t texture_count) {
         return align(sizeof(T), 8);
+    }
+
+    static constexpr uint32_t get_buffer_bounds_offset(uint16_t buffer_count, uint16_t texture_count) {
+        return get_buffer_addresses_offset(buffer_count, texture_count) + buffer_count * sizeof(uint64_t);
     }
 
     void set_viewport_ratio(int idx, const std::pair<float, float> &ratio) {
@@ -91,7 +103,7 @@ struct UniformBlockExtended {
     }
 
     static uint32_t get_viewport_ratio_offset(uint16_t buffer_count, uint16_t texture_count) {
-        return get_buffer_addresses_offset(buffer_count, texture_count) + buffer_count * sizeof(uint64_t);
+        return get_buffer_bounds_offset(buffer_count, texture_count) + buffer_count * sizeof(buffer_bounds[0]);
     }
 
     void set_viewport_offset(int idx, const std::pair<float, float> &offset) {
@@ -108,6 +120,7 @@ struct UniformBlockExtended {
     static constexpr uint32_t get_size(const uint16_t buffer_count, const uint16_t texture_count) {
         uint32_t size = align(sizeof(T), 8);
         size += buffer_count * sizeof(uint64_t);
+        size += buffer_count * sizeof(buffer_bounds[0]);
         size += texture_count * 4 * sizeof(uint32_t);
         return size;
     }
@@ -127,6 +140,9 @@ struct UniformBlockExtended {
         // buffer addresses
         memcpy(buffer, buffer_addresses, buffer_count * sizeof(uint64_t));
         buffer += buffer_count * sizeof(uint64_t);
+
+        memcpy(buffer, buffer_bounds, buffer_count * sizeof(buffer_bounds[0]));
+        buffer += buffer_count * sizeof(buffer_bounds[0]);
 
         // texture viewport fields
         memcpy(buffer, viewport_ratio, texture_count * sizeof(viewport_ratio[0]));

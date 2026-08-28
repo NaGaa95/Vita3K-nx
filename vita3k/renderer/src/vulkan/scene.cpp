@@ -40,11 +40,13 @@ void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *
             context.state.buffer_trapping.access_buffer(data.address(), data_size_upload, mem, false, true);
         }
 
-        const uint64_t buffer_address = context.state.get_matching_device_address(data.address());
+        const auto [buffer_address, lower_bound, upper_bound] = context.state.get_matching_device_address(data.address());
         if (vertex_shader) {
             context.curr_vert_ublock.set_buffer_address(block_num, buffer_address);
+            context.curr_vert_ublock.set_buffer_bounds(block_num, { lower_bound, upper_bound });
         } else {
             context.curr_frag_ublock.set_buffer_address(block_num, buffer_address);
+            context.curr_frag_ublock.set_buffer_bounds(block_num, { lower_bound, upper_bound });
         }
     } else {
         const uint32_t offset_start_upload = offset * 4;

@@ -177,8 +177,8 @@ struct VKState : public renderer::State {
     void unmap_memory(MemState &mem, Ptr<void> address) override;
     // return the matching buffer and offset for the memory location
     std::tuple<vk::Buffer, uint32_t> get_matching_mapping(const Ptr<void> address);
-    // return the GPU buffer device address matching this one
-    uint64_t get_matching_device_address(const Address address);
+    // return the GPU buffer device address and valid relative byte range
+    std::tuple<uint64_t, int32_t, int32_t> get_matching_device_address(const Address address);
 #ifdef __ANDROID__
     bool support_custom_drivers() override;
     void set_turbo_mode(bool set) override;

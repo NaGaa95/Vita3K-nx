@@ -86,8 +86,11 @@ struct SpirvShaderParameters {
 
     // ids for the given fields in the uniform block container
     int buffer_addresses_id;
+    int buffer_bounds_id;
     int viewport_ratio_id;
     int viewport_offset_id;
+
+    int buffer_count = 0;
 
     // when using a thread, texture or literal buffer, if not -1, this fields contain the sa register
     // with the matching address, this assumes of course that this address is not copied somewhere

@@ -978,14 +978,19 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
 
     const spv::Id f32 = b.makeFloatType(32);
     const spv::Id v4 = b.makeVectorType(f32, 4);
+    const spv::Id i32 = b.makeIntType(32);
+    const spv::Id ivec2 = b.makeVectorType(i32, 2);
     const spv::Id u32 = b.makeUintType(32);
     const spv::Id uvec2 = b.makeVectorType(u32, 2);
     const spv::Id vec2 = b.makeVectorType(f32, 2);
     spv::Id buffer_addresses_type = 0;
+    spv::Id buffer_bounds_type = 0;
     if (buffer_count > 0) {
         buffer_addresses_type = b.makeArrayType(uvec2, b.makeUintConstant(buffer_count), 0);
+        buffer_bounds_type = b.makeArrayType(ivec2, b.makeUintConstant(buffer_count), 0);
         // we are using the standard layout, so only an 8-bytes stride
         b.addDecoration(buffer_addresses_type, spv::DecorationArrayStride, 8);
+        b.addDecoration(buffer_bounds_type, spv::DecorationArrayStride, 8);
     }
     spv::Id viewport_fields_type = 0;
     if (texture_count > 0) {
@@ -1000,11 +1005,15 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
     const uint16_t uniform_buffer_count = features.enable_memory_mapping ? buffer_count : 0;
     const uint16_t uniform_texture_count = features.use_texture_viewport ? texture_count : 0;
 
+    spv_params.buffer_count = uniform_buffer_count;
+
     if (program_type == SceGxmProgramType::Vertex) {
         // Create the default reg uniform buffer
         std::vector<spv::Id> uniform_composition = { v4, f32, f32, f32, f32, f32 };
-        if (uniform_buffer_count > 0)
+        if (uniform_buffer_count > 0) {
             uniform_composition.push_back(buffer_addresses_type);
+            uniform_composition.push_back(buffer_bounds_type);
+        }
         if (uniform_texture_count > 0) {
             uniform_composition.push_back(viewport_fields_type);
             uniform_composition.push_back(viewport_fields_type);
@@ -1035,6 +1044,7 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
 
         if (uniform_buffer_count > 0) {
             ADD_EXT_UNIFORM_MEMBER(buffer_addresses);
+            ADD_EXT_UNIFORM_MEMBER(buffer_bounds);
         }
         if (uniform_texture_count > 0) {
             ADD_EXT_UNIFORM_MEMBER(viewport_ratio);
@@ -1052,8 +1062,10 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
 
     if (program_type == SceGxmProgramType::Fragment) {
         std::vector<spv::Id> uniform_composition = { f32, f32, f32, f32, f32 };
-        if (uniform_buffer_count > 0)
+        if (uniform_buffer_count > 0) {
             uniform_composition.push_back(buffer_addresses_type);
+            uniform_composition.push_back(buffer_bounds_type);
+        }
         if (uniform_texture_count > 0) {
             uniform_composition.push_back(viewport_fields_type);
             uniform_composition.push_back(viewport_fields_type);
@@ -1087,6 +1099,7 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
 
         if (uniform_buffer_count > 0) {
             ADD_EXT_UNIFORM_MEMBER(buffer_addresses);
+            ADD_EXT_UNIFORM_MEMBER(buffer_bounds);
         }
         if (uniform_texture_count > 0) {
             ADD_EXT_UNIFORM_MEMBER(viewport_ratio);

@@ -43,6 +43,7 @@
 #include <overlay/display_manager.h>
 
 #include <algorithm>
+#include <limits>
 #include <mutex>
 #include <unordered_set>
 
@@ -1833,15 +1834,25 @@ std::tuple<vk::Buffer, uint32_t> VKState::get_matching_mapping(const Ptr<void> a
         mapped_memory->second.buffer_offset + address.address() - mapped_memory->first);
 }
 
-uint64_t VKState::get_matching_device_address(const Address address) {
+std::tuple<uint64_t, int32_t, int32_t> VKState::get_matching_device_address(const Address address) {
     auto mapped_memory = mapped_memories.lower_bound(address);
     if (mapped_memory == mapped_memories.end()
-        || mapped_memory->first + mapped_memory->second.size <= address) {
+        || static_cast<uint64_t>(mapped_memory->first) + mapped_memory->second.size <= address) {
         LOG_ERROR("Could not find matching mapped buffer for vertex stream");
-        return 0;
+        return { 0, 0, 0 };
     }
 
-    return mapped_memory->second.buffer_address + address - mapped_memory->first;
+    const int64_t offset = address - mapped_memory->first;
+    const int64_t lower_bound = -offset;
+    const int64_t upper_bound = static_cast<int64_t>(mapped_memory->second.size) - offset;
+    constexpr int64_t min_bound = std::numeric_limits<int32_t>::min();
+    constexpr int64_t max_bound = std::numeric_limits<int32_t>::max();
+
+    return {
+        mapped_memory->second.buffer_address + offset,
+        static_cast<int32_t>(std::clamp(lower_bound, min_bound, max_bound)),
+        static_cast<int32_t>(std::clamp(upper_bound, min_bound, max_bound))
+    };
 }
 
 int VKState::get_max_anisotropic_filtering() {
