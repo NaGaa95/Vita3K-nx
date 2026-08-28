@@ -1118,7 +1118,9 @@ void free(MemState &state, Address address) {
 
     AllocMemPage &page = state.alloc_table[page_num];
     if (!page.allocated) {
-        LOG_CRITICAL("Freeing unallocated page");
+        // The stale size may span pages now owned by other allocations.
+        LOG_CRITICAL("Freeing unallocated page at 0x{:X}", address);
+        return;
     }
     const uint32_t allocation_page_count = page.size;
     const Address region_start = page_num * STANDARD_PAGE_SIZE;
