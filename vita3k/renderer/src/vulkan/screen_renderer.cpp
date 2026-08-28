@@ -612,20 +612,19 @@ void ScreenRenderer::swap_window() {
         = { vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eTransfer };
     submit_info.setWaitSemaphores(wait_semaphores);
     submit_info.setWaitDstStageMask(dst_masks);
-    submit_info.setSignalSemaphores(image_ready_semaphores[current_frame]);
+    submit_info.setSignalSemaphores(image_ready_semaphores[swapchain_image_idx]);
     submit_info.setCommandBuffers(current_cmd_buffer);
 
     // then present the surface
     vk::PresentInfoKHR present_info{
         .waitSemaphoreCount = 1,
-        .pWaitSemaphores = &image_ready_semaphores[current_frame],
+        .pWaitSemaphores = &image_ready_semaphores[swapchain_image_idx],
         .swapchainCount = 1,
         .pSwapchains = &swapchain,
         .pImageIndices = &swapchain_image_idx,
     };
 
-    // The present waits on image_ready_semaphores[current_frame], which this
-    // submission signals. Keep both operations adjacent on the shared queue.
+    // Image reacquisition synchronizes present-semaphore reuse; keep submit and present adjacent.
     auto result = state.submit_and_present_general(submit_info,
         fences[swapchain_image_idx], present_info);
     if (result == vk::Result::eSuboptimalKHR) {
