@@ -30,11 +30,11 @@ enum VertUniformFieldId : uint32_t {
 };
 
 struct RenderFragUniformBlock {
-    float back_disabled;
-    float front_disabled;
-    float writing_mask;
-    float use_raw_image;
-    float res_multiplier;
+    float back_disabled = 0.0f;
+    float front_disabled = 0.0f;
+    float writing_mask = 0.0f;
+    float use_raw_image = 0.0f;
+    float res_multiplier = 1.0f;
 };
 
 enum FragUniformFieldId : uint32_t {
