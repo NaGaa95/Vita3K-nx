@@ -4927,8 +4927,9 @@ EXPORT(int, sceGxmSyncObjectDestroy, Ptr<SceGxmSyncObject> syncObject) {
         std::lock_guard<std::mutex> lock(emuenv.gxm.sync_objects_mutex);
         emuenv.gxm.sync_objects.erase(syncObject.get(emuenv.mem));
     }
-    renderer::destroy(syncObject.get(emuenv.mem), *emuenv.renderer);
-    free(emuenv.mem, syncObject);
+    renderer::destroy(syncObject.get(emuenv.mem), *emuenv.renderer, [&mem = emuenv.mem, syncObject]() {
+        free(mem, syncObject);
+    });
 
     return 0;
 }
