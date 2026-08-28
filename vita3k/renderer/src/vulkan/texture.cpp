@@ -578,6 +578,10 @@ void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, ui
 }
 
 void VKTextureCache::upload_done() {
+    // No transfer command buffer exists if every mip was skipped.
+    if (!is_texture_transfer_ready)
+        return;
+
     // transition the texture back to read only
     vk::ImageSubresourceRange range{
         .aspectMask = vk::ImageAspectFlagBits::eColor,

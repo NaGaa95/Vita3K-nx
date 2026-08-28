@@ -55,6 +55,12 @@ uint64_t hash_texture_data(const SceGxmTexture &texture, uint32_t texture_size, 
     const Ptr<const void> data(texture.data_addr << 2);
     uint64_t data_hash = 0;
 
+    // Queued binds may reference memory the guest has already unmapped.
+    if (data.address() && !is_valid_addr_range(mem, data.address(), data.address() + texture_size)) {
+        LOG_WARN_ONCE("Texture data not in valid memory (addr=0x{:08X} size={}), not hashing", data.address(), texture_size);
+        return 0;
+    }
+
     if (data.address()) {
         data_hash = hash_data(data.get(mem), texture_size);
     }
@@ -437,6 +443,16 @@ void TextureCache::upload_texture(const SceGxmTexture &gxm_texture, MemState &me
         }
         pixels_per_stride = align(pixels_per_stride, align_width);
         memory_height = align(memory_height, align_height);
+
+        {
+            // bpp may retain the expanded palette size from the previous mip.
+            const uint32_t src_read_size = (pixels_per_stride * memory_height * gxm::bits_per_pixel(base_format)) / 8;
+            const Address src_address = (gxm_texture.data_addr << 2) + total_source_so_far;
+            if (!is_valid_addr_range(mem, src_address, src_address + src_read_size)) {
+                LOG_WARN_ONCE("Texture upload source is not in valid memory (addr=0x{:08X} size={}), skipping upload", src_address, src_read_size);
+                break;
+            }
+        }
 
         // perform all needed conversions (formats not supported by modern GPUs)
         switch (base_format) {
