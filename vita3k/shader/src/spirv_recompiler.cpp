@@ -888,14 +888,18 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
     spv::Id pred_arr_type = b.makeArrayType(b_type, b.makeIntConstant(REG_PRED_COUNT / 4), 0);
     spv::Id o_arr_type = b.makeArrayType(f32_v4_type, b.makeIntConstant(REG_O_COUNT / 4), 0);
 
-    // Create register banks
-    spv_params.ins = b.createVariable(spv::NoPrecision, spv::StorageClassPrivate, pa_arr_type, "pa");
-    spv_params.uniforms = b.createVariable(spv::NoPrecision, spv::StorageClassPrivate, sa_arr_type, "sa");
-    spv_params.internals = b.createVariable(spv::NoPrecision, spv::StorageClassPrivate, i_arr_type, "internals");
-    spv_params.temps = b.createVariable(spv::NoPrecision, spv::StorageClassPrivate, temp_arr_type, "r");
-    spv_params.predicates = b.createVariable(spv::NoPrecision, spv::StorageClassPrivate, pred_arr_type, "p");
-    spv_params.indexes = b.createVariable(spv::NoPrecision, spv::StorageClassPrivate, index_arr_type, "idx");
-    spv_params.outs = b.createVariable(spv::NoPrecision, spv::StorageClassPrivate, o_arr_type, "outs");
+    // Unwritten guest registers must read as zero.
+    auto make_zeroed_bank = [&](spv::Id arr_type, const char *name) {
+        return b.createVariable(spv::NoPrecision, spv::StorageClassPrivate, arr_type, name, b.makeNullConstant(arr_type));
+    };
+
+    spv_params.ins = make_zeroed_bank(pa_arr_type, "pa");
+    spv_params.uniforms = make_zeroed_bank(sa_arr_type, "sa");
+    spv_params.internals = make_zeroed_bank(i_arr_type, "internals");
+    spv_params.temps = make_zeroed_bank(temp_arr_type, "r");
+    spv_params.predicates = make_zeroed_bank(pred_arr_type, "p");
+    spv_params.indexes = make_zeroed_bank(index_arr_type, "idx");
+    spv_params.outs = make_zeroed_bank(o_arr_type, "outs");
 
     SamplerMap samplers;
 
