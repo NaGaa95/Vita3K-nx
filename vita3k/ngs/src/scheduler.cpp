@@ -151,6 +151,9 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
         if (finished) {
             voice->is_keyed_off = true;
             voice->transition(mem, VOICE_STATE_FINALIZING);
+            // Stop first because the callback may restart the voice.
+            voice->is_keyed_off = false;
+            stop(mem, voice);
             if (voice->finished_callback) {
                 voice_lock.unlock();
                 scheduler_lock.unlock();
@@ -158,9 +161,6 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
                 scheduler_lock.lock();
                 voice_lock.lock();
             }
-            voice->is_keyed_off = false;
-
-            stop(mem, voice);
         }
 
         for (size_t i = 0; i < voice->rack->vdef->output_count; i++) {

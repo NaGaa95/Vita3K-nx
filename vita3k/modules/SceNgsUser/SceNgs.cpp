@@ -778,6 +778,9 @@ EXPORT(SceInt32, sceNgsVoiceInit, ngs::Voice *voice, const SceNgsVoicePreset *pr
 
     if (init_flags == SCE_NGS_VOICE_INIT_BASE || init_flags == SCE_NGS_VOICE_INIT_ALL) {
         voice->state = ngs::VoiceState::VOICE_STATE_AVAILABLE;
+        voice->is_paused = false;
+        voice->is_pending = false;
+        voice->is_keyed_off = false;
     }
 
     if (init_flags & SCE_NGS_VOICE_INIT_ROUTING) {
@@ -824,12 +827,12 @@ EXPORT(SceInt32, sceNgsVoiceKeyOff, ngs::Voice *voice) {
 
     voice->is_keyed_off = true;
     voice->rack->system->voice_scheduler.off(emuenv.mem, voice);
-
-    // call the finish callback, I got no idea what the module id should be in this case
-    voice->invoke_callback(emuenv.kernel, emuenv.mem, thread_id, voice->finished_callback, voice->finished_callback_user_data, 0);
-
     voice->is_keyed_off = false;
     voice->rack->system->voice_scheduler.stop(emuenv.mem, voice);
+
+    // call the finish callback, I got no idea what the module id should be in this case
+    // Stop first because the callback may restart the voice.
+    voice->invoke_callback(emuenv.kernel, emuenv.mem, thread_id, voice->finished_callback, voice->finished_callback_user_data, 0);
     return SCE_NGS_OK;
 }
 
@@ -954,6 +957,7 @@ EXPORT(SceUInt32, sceNgsVoicePlay, ngs::Voice *voice) {
 
     voice->is_pending = true;
     if (!voice->rack->system->voice_scheduler.play(emuenv.mem, voice)) {
+        voice->is_pending = false;
         return RET_ERROR(SCE_NGS_ERROR);
     }
     voice->is_pending = false;
