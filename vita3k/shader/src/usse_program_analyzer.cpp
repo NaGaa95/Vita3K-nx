@@ -445,12 +445,19 @@ void analyze(USSEBlockNode &root, USSEOffset end_offset, const AnalyzeReadFuncti
                         current_code->size = baddr - current_code->offset;
                         request.block_node->add_children(current_code_inst);
 
-                        baddr = branch_from_result->second.dest - 1;
+                        const std::uint32_t follow_dest = branch_from_result->second.dest;
 
-                        std::unique_ptr<USSEBaseNode> current_code_inst = std::make_unique<USSECodeNode>(request.block_node);
-                        USSECodeNode *current_code = reinterpret_cast<USSECodeNode *>(current_code_inst.get());
+                        if (follow_dest > request.end_offset) {
+                            current_code_inst = nullptr;
+                            break;
+                        }
 
-                        current_code->offset = baddr;
+                        baddr = follow_dest - 1;
+
+                        current_code_inst = std::make_unique<USSECodeNode>(request.block_node);
+                        current_code = reinterpret_cast<USSECodeNode *>(current_code_inst.get());
+
+                        current_code->offset = follow_dest;
                     } else {
                         bool else_exist = false;
                         auto branch_from_else_result = branches_from.find(branch_from_result->second.dest - 1);
