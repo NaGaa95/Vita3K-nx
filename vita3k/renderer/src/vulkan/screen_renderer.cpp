@@ -17,6 +17,9 @@
 
 #include "renderer/vulkan/screen_renderer.h"
 
+#ifdef __SWITCH__
+#include "renderer/vulkan/lsfg.h"
+#endif
 #include "renderer/vulkan/state.h"
 #include "util/log.h"
 #include "vkutil/vkutil.h"
@@ -132,6 +135,17 @@ bool ScreenRenderer::create() {
         create_info.display = static_cast<struct wl_display *>(handle->display);
         create_info.surface = static_cast<struct wl_surface *>(handle->surface);
         this->surface = state.instance.createWaylandSurfaceKHR(create_info);
+        surface_created = true;
+#endif
+    } else if (const auto *handle = std::get_if<renderer::SwitchDisplayHandle>(&display_handle)) {
+#ifdef __SWITCH__
+        if (!handle->nwindow) {
+            LOG_ERROR("Switch NWindow handle is null");
+            return false;
+        }
+        vk::ViSurfaceCreateInfoNN create_info{};
+        create_info.window = handle->nwindow;
+        this->surface = state.instance.createViSurfaceNN(create_info);
         surface_created = true;
 #endif
     } else if (const auto *handle = std::get_if<renderer::X11DisplayHandle>(&display_handle)) {
@@ -259,6 +273,10 @@ void ScreenRenderer::create_swapchain() {
     if (surface_capabilities.maxImageCount != 0)
         swapchain_size = std::min(swapchain_size, surface_capabilities.maxImageCount);
 
+#ifdef __SWITCH__
+    bool lsfg_compatible = lsfg::is_session_prepared();
+#endif
+
     // Create Swapchain
     {
         vk::ImageUsageFlags surface_usage = vk::ImageUsageFlagBits::eColorAttachment;
@@ -271,6 +289,32 @@ void ScreenRenderer::create_swapchain() {
         if (surface_capabilities.supportedUsageFlags & vk::ImageUsageFlagBits::eStorage)
             // needed for FSR
             surface_usage |= fsr_flags;
+
+#ifdef __SWITCH__
+        if (lsfg_compatible) {
+            constexpr vk::ImageUsageFlags transfer_usage =
+                vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst;
+            constexpr vk::FormatFeatureFlags transfer_features =
+                vk::FormatFeatureFlagBits::eTransferSrc | vk::FormatFeatureFlagBits::eTransferDst;
+            const vk::FormatProperties swapchain_properties =
+                state.physical_device.getFormatProperties(surface_format.format);
+            const vk::FormatProperties rgba_properties =
+                state.physical_device.getFormatProperties(vk::Format::eR8G8B8A8Unorm);
+            if ((surface_capabilities.supportedUsageFlags & transfer_usage) != transfer_usage
+                || (swapchain_properties.optimalTilingFeatures & transfer_features) != transfer_features
+                || (rgba_properties.optimalTilingFeatures & transfer_features) != transfer_features) {
+                lsfg::disable_session("The VI swapchain does not support LSFG transfer operations");
+                lsfg_compatible = false;
+            } else {
+                surface_usage |= transfer_usage;
+                uint32_t desired_count = swapchain_size + 2;
+                if (surface_capabilities.maxImageCount != 0)
+                    desired_count = std::min(desired_count, surface_capabilities.maxImageCount);
+                swapchain_size = desired_count;
+                present_mode = vk::PresentModeKHR::eFifo;
+            }
+        }
+#endif
 
         vk::CompositeAlphaFlagBitsKHR comp_alpha = vk::CompositeAlphaFlagBitsKHR::eOpaque;
         if (!(surface_capabilities.supportedCompositeAlpha & comp_alpha))
@@ -337,9 +381,17 @@ void ScreenRenderer::create_swapchain() {
     }
 
     create_layout_sync();
+
+#ifdef __SWITCH__
+    if (lsfg_compatible && lsfg::is_session_prepared())
+        lsfg::register_swapchain(state, swapchain, extent, swapchain_images);
+#endif
 }
 
 void ScreenRenderer::destroy_swapchain() {
+#ifdef __SWITCH__
+    lsfg::unregister_swapchain();
+#endif
     for (vk::Framebuffer framebuffer : swapchain_framebuffers)
         state.device.destroy(framebuffer);
     swapchain_framebuffers.clear();
@@ -355,7 +407,11 @@ void ScreenRenderer::destroy_swapchain() {
 }
 
 void ScreenRenderer::cleanup() {
-    state.device.waitIdle();
+    state.wait_device_idle();
+
+#ifdef __SWITCH__
+    lsfg::unregister_swapchain();
+#endif
 
     filter.reset();
 
@@ -410,7 +466,16 @@ void ScreenRenderer::cleanup() {
     surface = nullptr;
 }
 
+#ifdef __SWITCH__
+// VI may stop releasing swapchain images while the applet is backgrounded or
+// exiting. Keep the render thread responsive so session teardown can join it.
+// VK_TIMEOUT does not acquire an image or signal the semaphore, so retrying on
+// the next flip is safe. RPCS3's Switch path uses the same 100 ms bound.
+static constexpr uint64_t next_image_timeout = 100'000'000;
+#else
 static constexpr uint64_t next_image_timeout = std::numeric_limits<uint64_t>::max();
+#endif
+static constexpr uint64_t frame_fence_timeout = std::numeric_limits<uint64_t>::max();
 
 bool ScreenRenderer::acquire_swapchain_image() {
     if (!window_has_drawable_size(state)) {
@@ -460,7 +525,7 @@ bool ScreenRenderer::acquire_swapchain_image() {
         need_rebuild = !surface_matches_window_size();
 
     // wait for the previous frame using this image to finish
-    auto result = state.device.waitForFences(fences[swapchain_image_idx], VK_TRUE, next_image_timeout);
+    auto result = state.device.waitForFences(fences[swapchain_image_idx], VK_TRUE, frame_fence_timeout);
     if (result != vk::Result::eSuccess) {
         LOG_ERROR("Could not wait for fences.");
         return false;
@@ -549,7 +614,6 @@ void ScreenRenderer::swap_window() {
     submit_info.setWaitDstStageMask(dst_masks);
     submit_info.setSignalSemaphores(image_ready_semaphores[current_frame]);
     submit_info.setCommandBuffers(current_cmd_buffer);
-    state.general_queue.submit(submit_info, fences[swapchain_image_idx]);
 
     // then present the surface
     vk::PresentInfoKHR present_info{
@@ -560,7 +624,10 @@ void ScreenRenderer::swap_window() {
         .pImageIndices = &swapchain_image_idx,
     };
 
-    auto result = state.general_queue.presentKHR(&present_info);
+    // The present waits on image_ready_semaphores[current_frame], which this
+    // submission signals. Keep both operations adjacent on the shared queue.
+    auto result = state.submit_and_present_general(submit_info,
+        fences[swapchain_image_idx], present_info);
     if (result == vk::Result::eSuboptimalKHR) {
         need_rebuild = !surface_matches_window_size();
     } else if (result == vk::Result::eErrorOutOfDateKHR || result == vk::Result::eErrorSurfaceLostKHR) {
@@ -714,18 +781,28 @@ bool ScreenRenderer::rebuild_swapchain_if_visible() {
     if (!window_has_drawable_size(state))
         return false;
 
-    state.device.waitIdle();
-    destroy_swapchain();
+    // getSurfaceCapabilitiesKHR and createSwapchainKHR throw straight back out on
+    // a lost surface. Horizon drops the applet's surface on HOME, sleep and exit,
+    // so an uncaught one terminates the process during teardown. ensure_swapchain()
+    // already retries a failed rebuild on the next frame.
+    try {
+        state.wait_device_idle();
+        destroy_swapchain();
 
 #ifdef __ANDROID__
-    if (!create())
-        return false;
+        if (!create())
+            return false;
 #else
-    if (need_surface_recreate && !create())
-        return false;
+        if (need_surface_recreate && !create())
+            return false;
 #endif
 
-    create_swapchain();
+        create_swapchain();
+    } catch (const vk::SystemError &error) {
+        LOG_WARN_ONCE("Swapchain rebuild failed: {}", error.what());
+        return false;
+    }
+
     return static_cast<bool>(swapchain);
 }
 

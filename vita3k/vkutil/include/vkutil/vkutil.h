@@ -32,6 +32,9 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #define VK_USE_PLATFORM_WIN32_KHR
+#elif defined(__SWITCH__)
+// Nintendo Switch (Horizon): VK_NN_vi_surface over a libnx NWindow
+#define VK_USE_PLATFORM_VI_NN
 #else
 #if defined(HAVE_X11)
 #define VK_USE_PLATFORM_XLIB_KHR
@@ -43,6 +46,13 @@
 #define VK_NO_PROTOTYPES
 #define VULKAN_HPP_NO_CONSTRUCTORS
 #define VULKAN_HPP_NO_SPACESHIP_OPERATOR
+#ifdef __SWITCH__
+// The Mesa NVK driver is statically linked and the dispatcher is seeded directly
+// with vkGetInstanceProcAddr (see renderer.cpp). vulkan.hpp's DynamicLoader
+// (which dlopens libvulkan and has no Horizon platform case → "#error unsupported
+// platform") is never used, so compile it out.
+#define VULKAN_HPP_ENABLE_DYNAMIC_LOADER_TOOL 0
+#endif
 #include <vulkan/vulkan.hpp>
 
 #undef VK_USE_PLATFORM_ANDROID_KHR
@@ -50,6 +60,7 @@
 #undef VK_USE_PLATFORM_WIN32_KHR
 #undef VK_USE_PLATFORM_XLIB_KHR
 #undef VK_USE_PLATFORM_WAYLAND_KHR
+#undef VK_USE_PLATFORM_VI_NN
 #undef VK_ENABLE_BETA_EXTENSIONS
 
 #ifdef None
@@ -172,6 +183,21 @@ static constexpr vma::AllocationCreateInfo vma_mapped_alloc = {
     .flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite | vma::AllocationCreateFlagBits::eMapped,
     .usage = vma::MemoryUsage::eAuto,
     .preferredFlags = vk::MemoryPropertyFlagBits::eHostCoherent
+};
+
+// For staging paths that already flush explicitly when the memory is not
+// coherent. On Tegra the only HOST_COHERENT type is CPU-uncached, so
+// preferring it there trades every CPU access for a slow uncached one;
+// cached memory plus the existing flush is far faster. Callers that never
+// flush must keep vma_mapped_alloc.
+static constexpr vma::AllocationCreateInfo vma_mapped_alloc_cached = {
+    .flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite | vma::AllocationCreateFlagBits::eMapped,
+    .usage = vma::MemoryUsage::eAuto,
+#ifdef __SWITCH__
+    .preferredFlags = vk::MemoryPropertyFlagBits::eHostCached
+#else
+    .preferredFlags = vk::MemoryPropertyFlagBits::eHostCoherent
+#endif
 };
 
 static constexpr vma::AllocationCreateInfo vma_host_visible = {

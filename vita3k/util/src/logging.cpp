@@ -32,6 +32,8 @@
 #include <spdlog/sinks/stdout_color_sinks.h>
 #endif
 
+#include <algorithm>
+#include <atomic>
 #include <functional>
 #include <iostream>
 #include <mutex>
@@ -43,6 +45,12 @@ static const fs::path &LOG_FILE_NAME = "vita3k.log";
 static const char *LOG_PATTERN = "%^[%H:%M:%S.%e] |%L| [%!]: %v%$";
 static constexpr size_t ASYNC_LOG_QUEUE_SIZE = 65536;
 static std::vector<spdlog::sink_ptr> sinks;
+static std::vector<spdlog::sink_ptr> file_sinks;
+static fs::path primary_log_path;
+// Only ever holds a string literal, so reading it needs no allocation and stays
+// valid however badly the heap has been damaged by the time terminate runs.
+static std::atomic<const char *> g_crash_breadcrumb{ nullptr };
+static bool file_logging_enabled = true;
 static std::once_flag s_async_logging_once;
 
 static std::function<void(std::string, int)> s_log_callback;
@@ -78,6 +86,10 @@ protected:
 
 using callback_sink_mt = callback_sink<std::mutex>;
 
+void set_crash_breadcrumb(const char *stage) {
+    g_crash_breadcrumb.store(stage, std::memory_order_relaxed);
+}
+
 void set_log_callback(std::function<void(std::string, int)> cb) {
     const std::lock_guard<std::mutex> lock(s_log_callback_mutex);
     s_log_callback = std::move(cb);
@@ -85,6 +97,8 @@ void set_log_callback(std::function<void(std::string, int)> cb) {
 
 ExitCode init(const Root &root_paths, bool use_stdout) {
     sinks.clear();
+    file_sinks.clear();
+    primary_log_path = root_paths.get_log_path() / LOG_FILE_NAME;
     if (use_stdout)
 #ifdef __ANDROID__
         sinks.push_back(std::make_shared<spdlog::sinks::android_sink_mt>());
@@ -96,7 +110,7 @@ ExitCode init(const Root &root_paths, bool use_stdout) {
     sinks.push_back(std::make_shared<callback_sink_mt>());
 #endif
 
-    if (add_sink(root_paths.get_log_path() / LOG_FILE_NAME) != Success)
+    if (add_sink(primary_log_path) != Success)
         return InitConfigFailed;
 
     spdlog::set_error_handler([](const std::string &msg) {
@@ -131,6 +145,8 @@ ExitCode init(const Root &root_paths, bool use_stdout) {
         } catch (...) {
             LOG_CRITICAL("Unhandled C++ exception. UNKNOWN");
         }
+        if (const char *stage = g_crash_breadcrumb.load(std::memory_order_relaxed))
+            LOG_CRITICAL("Last recorded stage: {}", stage);
         flush();
         if (old_terminate)
             old_terminate();
@@ -143,12 +159,20 @@ void set_level(spdlog::level::level_enum log_level) {
 }
 
 ExitCode add_sink(const fs::path &log_path) {
+    if (!file_logging_enabled) {
+        rebuild_default_logger();
+        return Success;
+    }
+
+    spdlog::sink_ptr file_sink;
     try {
-        sinks.push_back(std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_path.generic_path().native(), true));
+        file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_path.generic_path().native(), true);
     } catch (const spdlog::spdlog_ex &ex) {
         std::cerr << "File log initialization failed: " << ex.what() << std::endl;
         return InitConfigFailed;
     }
+    sinks.push_back(file_sink);
+    file_sinks.push_back(std::move(file_sink));
 
 #ifdef _MSC_VER
     sinks.push_back(std::make_shared<spdlog::sinks::msvc_sink_mt>());
@@ -158,20 +182,53 @@ ExitCode add_sink(const fs::path &log_path) {
     return Success;
 }
 
+ExitCode set_file_logging_enabled(bool enabled) {
+    if (file_logging_enabled == enabled)
+        return Success;
+
+    file_logging_enabled = enabled;
+    if (enabled) {
+        if (primary_log_path.empty())
+            return Success;
+        return add_sink(primary_log_path);
+    }
+
+    for (const auto &file_sink : file_sinks)
+        sinks.erase(std::remove(sinks.begin(), sinks.end(), file_sink), sinks.end());
+    file_sinks.clear();
+    rebuild_default_logger();
+    return Success;
+}
+
 void rebuild_default_logger() {
+#ifndef __SWITCH__
+    // The Switch logger is synchronous (below); building the async pool there
+    // would park an unused worker on a ~16 MB preallocated ring, dead weight on
+    // a heap whose failure mode is fragmentation.
     std::call_once(s_async_logging_once, []() {
         spdlog::init_thread_pool(ASYNC_LOG_QUEUE_SIZE, 1);
     });
+#endif
 
     auto duplicate_filter = std::make_shared<spdlog::sinks::dup_filter_sink_mt>(std::chrono::seconds(2));
     for (const auto &sink : sinks)
         duplicate_filter->add_sink(sink);
 
+#ifdef __SWITCH__
+    // On Horizon a guest fault is delivered as a process-killing exception with no
+    // chance to drain the async logging queue, so the last (and most important)
+    // lines before a crash are lost. Keep logging synchronous, but flush only on
+    // errors: flushing every guest warning performs heavy SD-card I/O and can race
+    // process teardown. An error flush also commits all earlier buffered lines.
+    auto logger = std::make_shared<spdlog::logger>("vita3k logger", duplicate_filter);
+    logger->flush_on(spdlog::level::err); // set_default_logger does not propagate the registry flush level
+#else
     auto logger = std::make_shared<spdlog::async_logger>(
         "vita3k logger",
         duplicate_filter,
         spdlog::thread_pool(),
         spdlog::async_overflow_policy::overrun_oldest);
+#endif
     spdlog::set_default_logger(std::move(logger));
     spdlog::set_pattern(LOG_PATTERN);
 }

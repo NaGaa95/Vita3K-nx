@@ -27,6 +27,12 @@
 #include <util/align.h>
 #include <vkutil/vkutil.h>
 
+#ifdef __SWITCH__
+extern "C" {
+#include <switch/arm/cache.h>
+}
+#endif
+
 namespace renderer::vulkan {
 
 // return if this format can be used to read a depth stencil buffer
@@ -199,7 +205,7 @@ void VKTextureCache::prepare_staging_buffer(bool is_configure) {
 
             vk::SubmitInfo submit_info{};
             submit_info.setCommandBuffers(context->cmdbuffers_to_submit);
-            state.general_queue.submit(submit_info, current_fence);
+            state.submit_general(submit_info, current_fence, "texture staging submission");
             context->cmdbuffers_to_submit.clear();
 
             auto result = state.device.waitForFences(current_fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
@@ -247,7 +253,8 @@ void VKTextureCache::prepare_staging_buffer(bool is_configure) {
             staging_buffer->buffer.destroy();
 
             staging_buffer->buffer.size = current_texture->memory_needed;
-            staging_buffer->buffer.init_buffer(vk::BufferUsageFlagBits::eTransferSrc, vkutil::vma_mapped_alloc);
+            staging_buffer->buffer.init_buffer(vk::BufferUsageFlagBits::eTransferSrc, vkutil::vma_mapped_alloc_cached);
+            staging_buffer->is_coherent = staging_buffer->buffer.is_host_coherent();
         }
     }
 
@@ -396,7 +403,10 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
         memory_needed += memory_needed / 2;
     if (is_cube)
         memory_needed *= 6;
-    current_texture->memory_needed = align(memory_needed, 16);
+    // Every mip and cube face starts at a 16-byte aligned staging offset.
+    // Reserve the worst-case padding as well as the texture bytes themselves.
+    const uint32_t upload_count = mip_count * (is_cube ? 6U : 1U);
+    current_texture->memory_needed = align(memory_needed + upload_count * 15U, 16);
     vkutil::Image &image = current_texture->texture;
 
     // In case the cache is full, no need to put the previous image in the destroy queue
@@ -427,7 +437,19 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
         .initialLayout = vk::ImageLayout::eUndefined,
     };
 
+#ifdef __SWITCH__
+    try {
+        std::tie(image.image, image.allocation) = state.allocator.createImage(image_info, vkutil::vma_auto_alloc);
+    } catch (const vk::SystemError &error) {
+        LOG_ERROR("createImage(texture) failed ({}): {}x{}x{} fmt={} mips={} layers={} type={} flags={}",
+            error.what(), image_info.extent.width, image_info.extent.height, image_info.extent.depth,
+            vk::to_string(image_info.format), image_info.mipLevels, image_info.arrayLayers,
+            vk::to_string(image_info.imageType), vk::to_string(image_info.flags));
+        throw;
+    }
+#else
     std::tie(image.image, image.allocation) = state.allocator.createImage(image_info, vkutil::vma_auto_alloc);
+#endif
 
     // create image view
     vk::ImageSubresourceRange range{
@@ -513,12 +535,23 @@ void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, ui
         upload_size = pixels_per_stride * height * bytes_per_pixel;
     }
 
-    if (staging_buffer.used_so_far + upload_size > staging_buffer.buffer.size) {
-        LOG_ERROR("Staging buffer size left ({}) is too small for texture size {}!", staging_buffer.buffer.size - staging_buffer.used_so_far, upload_size);
+    const vk::DeviceSize upload_offset = align(static_cast<vk::DeviceSize>(staging_buffer.used_so_far), vk::DeviceSize{ 16 });
+    if (upload_offset + upload_size > staging_buffer.buffer.size) {
+        LOG_ERROR("Staging buffer size left ({}) is too small for texture size {}!", staging_buffer.buffer.size - upload_offset, upload_size);
         return;
     }
 
-    memcpy(static_cast<uint8_t *>(staging_buffer.buffer.mapped_data) + staging_buffer.used_so_far, text_data, upload_size);
+    auto *const upload_destination = static_cast<uint8_t *>(staging_buffer.buffer.mapped_data) + upload_offset;
+    memcpy(upload_destination, text_data, upload_size);
+
+#ifdef __SWITCH__
+    // NVK can expose a cached CPU mapping even when the Vulkan allocation is
+    // reported as HOST_COHERENT. Clean it explicitly before the GPU copy reads
+    // the staging bytes.
+    armDCacheFlush(upload_destination, upload_size);
+#endif
+    if (!staging_buffer.is_coherent)
+        staging_buffer.buffer.flush(upload_offset, upload_size);
 
     vk::ImageSubresourceLayers layer{
         .aspectMask = vk::ImageAspectFlagBits::eColor,
@@ -527,7 +560,7 @@ void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, ui
         .layerCount = 1
     };
     vk::BufferImageCopy region{
-        .bufferOffset = staging_buffer.used_so_far,
+        .bufferOffset = upload_offset,
         .bufferRowLength = pixels_per_stride,
         .bufferImageHeight = buffer_height,
         .imageSubresource = layer,
@@ -535,7 +568,7 @@ void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, ui
         .imageExtent = { width, height, 1 }
     };
     cmd_buffer.copyBufferToImage(staging_buffer.buffer.buffer, image.image, vk::ImageLayout::eTransferDstOptimal, region);
-    staging_buffer.used_so_far += upload_size;
+    staging_buffer.used_so_far = static_cast<uint32_t>(align(upload_offset + upload_size, vk::DeviceSize{ 16 }));
 }
 
 void VKTextureCache::upload_done() {
@@ -649,7 +682,19 @@ void VKTextureCache::import_configure_impl(SceGxmTextureBaseFormat base_format, 
         .initialLayout = vk::ImageLayout::eUndefined,
     };
 
+#ifdef __SWITCH__
+    try {
+        std::tie(image.image, image.allocation) = state.allocator.createImage(image_info, vkutil::vma_auto_alloc);
+    } catch (const vk::SystemError &error) {
+        LOG_ERROR("createImage(texture) failed ({}): {}x{}x{} fmt={} mips={} layers={} type={} flags={}",
+            error.what(), image_info.extent.width, image_info.extent.height, image_info.extent.depth,
+            vk::to_string(image_info.format), image_info.mipLevels, image_info.arrayLayers,
+            vk::to_string(image_info.imageType), vk::to_string(image_info.flags));
+        throw;
+    }
+#else
     std::tie(image.image, image.allocation) = state.allocator.createImage(image_info, vkutil::vma_auto_alloc);
+#endif
 
     // create image view
     vk::ImageSubresourceRange range{

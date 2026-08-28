@@ -437,6 +437,12 @@ EXPORT(SceInt32, _sceAppMgrLoadExec, const char *appPath, Ptr<char> const argv[]
 
         emuenv.kernel.request_process_exit(0, AppLaunchRequest{ .app_path = emuenv.io.app_path, .self_path = std::move(exec_path), .argv = std::move(exec_argv), .reason = AppLaunchReason::LoadExec });
 
+        // On hardware this replaces the process and never returns. Letting the
+        // caller run the code that follows sends it into unmapped memory, where
+        // it can no longer be exited and the teardown above never completes.
+        if (const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id))
+            thread->exit(0);
+
         return SCE_KERNEL_OK;
     }
 

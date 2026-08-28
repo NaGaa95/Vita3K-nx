@@ -1,0 +1,22 @@
+diff --git a/lightweightsemaphore.h b/lightweightsemaphore.h
+index a0414751905e5b578a69f3768fa0a6193f08db8b..3355fe8267fc35e832614e1ad363af61f6fb4a9c 100644
+--- a/lightweightsemaphore.h
++++ b/lightweightsemaphore.h
+@@ -26,7 +26,7 @@ extern "C" {
+ #include <mach/mach.h>
+ #elif defined(__MVS__)
+ #include <zos-semaphore.h>
+-#elif defined(__unix__)
++#elif defined(__unix__) || defined(__SWITCH__)
+ #include <semaphore.h>
+ 
+ #if defined(__GLIBC_PREREQ) && defined(_GNU_SOURCE)
+@@ -167,7 +167,7 @@ public:
+ 		}
+ 	}
+ };
+-#elif defined(__unix__) || defined(__MVS__)
++#elif defined(__unix__) || defined(__MVS__) || defined(__SWITCH__)
+ //---------------------------------------------------------
+ // Semaphore (POSIX, Linux, zOS)
+ //---------------------------------------------------------

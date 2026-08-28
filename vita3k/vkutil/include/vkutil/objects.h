@@ -84,6 +84,9 @@ struct Buffer {
     Buffer &operator=(Buffer const &) = delete;
 
     void init_buffer(vk::BufferUsageFlags usage_flags, const vma::AllocationCreateInfo &alloc_create_info = vma_auto_alloc);
+    bool is_host_coherent() const;
+    void flush(vk::DeviceSize offset, vk::DeviceSize size) const;
+    void invalidate(vk::DeviceSize offset, vk::DeviceSize size) const;
     // called by ~Image
     void destroy();
 };

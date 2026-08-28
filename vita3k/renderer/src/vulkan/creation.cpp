@@ -183,12 +183,13 @@ VKRenderTarget::VKRenderTarget(VKState &state, const SceGxmRenderTargetParams &p
     depthstencil.init_image(vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eTransientAttachment);
 
     // transition images to their right state
-    vk::CommandBuffer cmd_buffer = vkutil::create_single_time_command(state.device, state.general_command_pool);
+    auto one_time_command = state.create_one_time_command();
+    const vk::CommandBuffer cmd_buffer = one_time_command.buffer;
     // color
     color.transition_to_discard(cmd_buffer, vkutil::ImageLayout::ColorAttachmentReadWrite);
     // depth stencil
     depthstencil.transition_to_discard(cmd_buffer, vkutil::ImageLayout::DepthStencilAttachment, vkutil::ds_subresource_range);
-    vkutil::end_single_time_command(state.device, state.general_queue, state.general_command_pool, cmd_buffer);
+    state.submit_one_time_command(std::move(one_time_command));
 
     constexpr uint16_t SCE_GXM_MAX_SCENES_PER_RENDERTARGET = 8;
     // hopefully this will always be enough

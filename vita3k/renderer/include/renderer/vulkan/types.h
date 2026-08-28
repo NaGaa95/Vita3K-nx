@@ -22,6 +22,8 @@
 #include <shader/uniform_block.h>
 #include <vkutil/objects.h>
 
+#include <vector>
+
 struct MemState;
 
 namespace renderer::vulkan {
@@ -35,6 +37,7 @@ constexpr int NB_TEXTURE_STAGING_BUFFERS = 16;
 struct TextureStagingBuffer {
     vkutil::Buffer buffer;
     uint32_t used_so_far;
+    bool is_coherent = false;
     uint64_t scene_timestamp = ~0;
     uint64_t frame_timestamp = ~0;
     vk::Fence waiting_fence;
@@ -127,6 +130,24 @@ struct MappedMemory {
     vk::Buffer buffer;
     uint32_t size;
     uint64_t buffer_address;
+    // Byte offset of the guest-visible start inside buffer. Page-table mappings
+    // may have to move forward within a VMA allocation to obtain 4 KiB host
+    // alignment; Vulkan vertex/index/transfer bindings need the same offset as
+    // buffer-device-address users.
+    uint32_t buffer_offset = 0;
+#ifdef __SWITCH__
+    // Horizon cannot write-protect guest RAM and resume from a fault, so the
+    // desktop Double Buffer dirty tracker cannot run. Keep lightweight hashes
+    // of guest blocks instead. A valid hash describes the CPU bytes last copied
+    // to the Vulkan buffer; GPU writes deliberately do not change it.
+    std::vector<uint64_t> cpu_block_hashes;
+    std::vector<uint64_t> cpu_block_hash_valid;
+    // Scene epoch in which each block was last verified. Within one scene
+    // the guest cannot rewrite data the GPU may still read (the contract
+    // GXM's deferred pipeline is built on), so a verified block needs no
+    // second hash walk until the next scene.
+    std::vector<uint32_t> cpu_block_scene;
+#endif
 };
 
 enum struct BufferType {
@@ -137,14 +158,14 @@ enum struct BufferType {
 };
 
 struct TrappedBuffer {
-    uint32_t size;
+    uint32_t size = 0;
     // used by the index buffer to keep the max index
-    uint32_t extra;
+    uint32_t extra = ~0U;
     // no need for it to be atomic
     bool dirty = false;
-    uint8_t *mapped_location;
+    uint8_t *mapped_location = nullptr;
 
-    TrappedBuffer() {}
+    TrappedBuffer() = default;
 };
 
 // structure to track which buffer were trapped and if they have been modified

@@ -1,0 +1,94 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index a2fcacc11b815cc5b23367dabf85636a7f2ad958..c60a379cf085dda64892c1f1935beac3f4a0132a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2946,6 +2946,28 @@ elseif(N3DS)
+   set(HAVE_SDL_LOCALE TRUE)
+ 
+   sdl_glob_sources("${SDL3_SOURCE_DIR}/src/io/n3ds/*.c")
++elseif(NINTENDO_SWITCH)
++  # Nintendo Switch (Horizon / libnx). There is no dedicated SDL video/audio
++  # backend yet: the emulator creates its Vulkan surface directly from the libnx
++  # NWindow (VK_NN_vi_surface), so SDL video falls back to dummy, and audio is
++  # dummy until a libnx audout backend is added. Threads use pthreads (newlib/
++  # libnx), timers/time use the generic unix backends, and FS ops use posix.
++  set(SDL_PTHREADS ON)
++  CheckPTHREAD()
++
++  set(SDL_TIMER_UNIX 1)
++  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/timer/unix/*.c")
++  set(HAVE_SDL_TIMERS TRUE)
++
++  set(SDL_TIME_UNIX 1)
++  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/time/unix/*.c")
++  set(HAVE_SDL_TIME TRUE)
++
++  # Use the dummy filesystem + dummy fsops backend (Vita3K does its own file I/O
++  # through std::filesystem). Note: the posix fsops backend must NOT be used here
++  # because the dummy filesystem backend also defines SDL_SYS_GetCurrentDirectory,
++  # which would collide at link time. Leaving HAVE_SDL_FSOPS unset makes SDL fall
++  # back to dummy fsops (see the SDL_FSOPS_DUMMY block later in this file).
+ endif()
+ 
+ sdl_sources(${SDL3_SOURCE_DIR}/src/dialog/SDL_dialog.c)
+diff --git a/cmake/sdlchecks.cmake b/cmake/sdlchecks.cmake
+index d321e7108d1586ccb88ed0c524d4f555172ee6ea..2247270b4d1601f1673ffb26085e962132071b5d 100644
+--- a/cmake/sdlchecks.cmake
++++ b/cmake/sdlchecks.cmake
+@@ -842,6 +842,11 @@ macro(CheckPTHREAD)
+       set(PTHREAD_LDFLAGS "-pthread")
+     elseif(QNX)
+       # pthread support is baked in
++    elseif(NINTENDO_SWITCH)
++      # devkitA64 newlib/libnx provide pthreads via -lnx (already linked by the
++      # switch.specs); no separate libpthread or -pthread flag exists.
++      set(PTHREAD_CFLAGS "-D_REENTRANT")
++      set(PTHREAD_LDFLAGS "")
+     else()
+       set(PTHREAD_CFLAGS "-D_REENTRANT")
+       set(PTHREAD_LDFLAGS "-lpthread")
+diff --git a/src/dynapi/SDL_dynapi.h b/src/dynapi/SDL_dynapi.h
+index 99ef9a9e93f0f74360c5b0b42836f9d6f79f95c3..996fada0d45cd7ea8fe45e5ecceb506b20752f29 100644
+--- a/src/dynapi/SDL_dynapi.h
++++ b/src/dynapi/SDL_dynapi.h
+@@ -61,6 +61,8 @@
+ #define SDL_DYNAMIC_API 0 // Turn off for static analysis, so reports are more clear.
+ #elif defined(SDL_PLATFORM_VITA)
+ #define SDL_DYNAMIC_API 0 // vitasdk doesn't support dynamic linking
++#elif defined(__SWITCH__)
++#define SDL_DYNAMIC_API 0 // Nintendo Switch homebrew (libnx) is statically linked
+ #elif defined(SDL_PLATFORM_3DS)
+ #define SDL_DYNAMIC_API 0 // devkitARM doesn't support dynamic linking
+ #elif defined(DYNAPI_NEEDS_DLOPEN) && !defined(HAVE_DLOPEN)
+diff --git a/src/thread/pthread/SDL_systhread.c b/src/thread/pthread/SDL_systhread.c
+index ae4a94c2e273a78e468de9c42fac73acf698811a..b1c90f2258a83a0be0eadd8b0e5b68bfd230eaa3 100644
+--- a/src/thread/pthread/SDL_systhread.c
++++ b/src/thread/pthread/SDL_systhread.c
+@@ -185,8 +185,10 @@ SDL_ThreadID SDL_GetCurrentThreadID(void)
+ 
+ bool SDL_SYS_SetThreadPriority(SDL_ThreadPriority priority)
+ {
+-#ifdef SDL_PLATFORM_RISCOS
+-    // FIXME: Setting thread priority does not seem to be supported
++#if defined(SDL_PLATFORM_RISCOS) || defined(__SWITCH__)
++    // Thread priority scheduling APIs (pthread_{get,set}schedparam,
++    // sched_get_priority_*) are not provided by newlib on Horizon.
++    (void)priority;
+     return true;
+ #else
+     struct sched_param sched;
+diff --git a/src/time/unix/SDL_systime.c b/src/time/unix/SDL_systime.c
+index bb3aa4b852e7cd6262b944bddc2049ee05c37f05..53559e5ab722f47cc3fdaa4b9d8a08dd003c4cf2 100644
+--- a/src/time/unix/SDL_systime.c
++++ b/src/time/unix/SDL_systime.c
+@@ -194,7 +194,9 @@ bool SDL_TimeToDateTime(SDL_Time ticks, SDL_DateTime *dt, bool localTime)
+          * The notable exception is Solaris, where the timezone offset must still be retrieved in the strictly POSIX.1-2008
+          * compliant way.
+          */
+-#if (_POSIX_VERSION >= 202405L) || (!defined(sun) && !defined(__sun))
++#if defined(__SWITCH__)
++        dt->utc_offset = 0; // newlib struct tm has no tm_gmtoff
++#elif (_POSIX_VERSION >= 202405L) || (!defined(sun) && !defined(__sun))
+         dt->utc_offset = (int)tm->tm_gmtoff;
+ #else
+         if (localTime) {

@@ -41,4 +41,20 @@ struct CPUState {
     std::atomic<bool> abort_pending{ false };
     std::atomic<uint32_t> abort_fault_addr{ 0 };
     std::atomic<bool> abort_is_write{ false };
+
+#ifdef __SWITCH__
+    // Guest wait-hint (WFE/YIELD) spin tracking. Only the owning thread writes
+    // the first two; the totals are read by the hang reporter.
+    uint32_t wait_hints = 0;
+    uint64_t last_wait_hint_tick = 0;
+
+    // WFE event register: SEV advances the global sequence, SEVL sets only
+    // the local flag, and WFE consumes whichever is pending before waiting.
+    bool wfe_local_event = false;
+    uint32_t wfe_last_seen = 0;
+
+    // Incremented on every import; the preemption watchdog treats a thread whose
+    // count is frozen across a quantum as spinning in translated code.
+    std::atomic<uint64_t> import_serial{ 0 };
+#endif
 };

@@ -97,6 +97,9 @@ void mid_scene_flush(VKContext &context, const SceGxmNotification notification) 
         context.stop_recording(notification, empty_notification, submit);
         context.start_recording();
         context.scene_timestamp++;
+#ifdef __SWITCH__
+        context.state.texture_cache.memo_scene = context.scene_timestamp;
+#endif
     }
 }
 
@@ -396,6 +399,12 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         // We don't want to defer cases where we draw a whole quad over the screen as these draws could be necessary
         // to be able to see anything
         bool can_be_whole_quad = instance_count == 1 && count <= 6;
+#ifdef __SWITCH__
+        // Compiling a pipeline on the render thread stalls frame production and
+        // preempts a guest core for the whole NAK compile. Let the async workers
+        // take even the whole-screen quads; the draw skips until it is ready.
+        can_be_whole_quad = false;
+#endif
         vk::Pipeline new_pipeline = context.state.pipeline_cache.retrieve_pipeline(context, type, !can_be_whole_quad, mem);
 
         if (new_pipeline != context.current_pipeline) {

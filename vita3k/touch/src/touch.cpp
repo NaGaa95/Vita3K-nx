@@ -27,6 +27,8 @@
 
 #include <SDL3/SDL_events.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstring>
 
 void set_rear_touchscreen(TouchState &state, bool is_back) {
@@ -88,6 +90,43 @@ static SceTouchData recover_touchpad_events(const EmuEnvState &emuenv) {
 
     return touch_data;
 }
+
+#ifdef __SWITCH__
+// Sony's rear-panel convention for the pad buttons the Vita lacks: L2/R2 on the
+// top quadrants, L3/R3 on the bottom. Panel space is x 0..1919, y 108..889.
+static void apply_rear_trigger_touch(TouchState &touch, const uint64_t timestamp) {
+    SceTouchData &data = touch.touch_buffers[(touch.touch_buffer_idx + 1) % MAX_TOUCH_BUFFER_SAVED][SCE_TOUCH_PORT_BACK];
+    constexpr int16_t quadrant_x[4] = { 480, 1440, 480, 1440 };
+    constexpr int16_t quadrant_y[4] = { 300, 300, 695, 695 };
+
+    for (int quadrant = 0; quadrant < 4; quadrant++) {
+        if (!touch.rear_touch_held[quadrant]) {
+            touch.rear_touch_id[quadrant] = -1;
+            continue;
+        }
+
+        if (touch.rear_touch_id[quadrant] < 0) {
+            touch.curr_touch_id[SCE_TOUCH_PORT_BACK]++;
+            touch.curr_touch_id[SCE_TOUCH_PORT_BACK] %= 128;
+            touch.rear_touch_id[quadrant] = touch.curr_touch_id[SCE_TOUCH_PORT_BACK];
+        }
+
+        if (data.reportNum >= SCE_TOUCH_MAX_REPORT)
+            continue;
+
+        // Reports persist between frames on this path; write every field.
+        SceTouchReport &report = data.report[data.reportNum];
+        report = SceTouchReport{};
+        report.x = quadrant_x[quadrant];
+        report.y = quadrant_y[quadrant];
+        report.id = static_cast<SceUInt8>(touch.rear_touch_id[quadrant]);
+        report.force = 128;
+        ++data.reportNum;
+    }
+
+    data.timeStamp = timestamp;
+}
+#endif
 
 void touch_vsync_update(EmuEnvState &emuenv) {
     auto &touch = emuenv.touch;
@@ -180,6 +219,10 @@ void touch_vsync_update(EmuEnvState &emuenv) {
             }
         }
     }
+
+#ifdef __SWITCH__
+    apply_rear_trigger_touch(touch, timestamp);
+#endif
 
     touch.touch_buffer_idx++;
     touch.touch_buffer_idx %= MAX_TOUCH_BUFFER_SAVED;

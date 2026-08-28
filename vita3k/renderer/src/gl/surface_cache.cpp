@@ -725,7 +725,9 @@ GLuint GLSurfaceCache::retrieve_framebuffer_handle(const State &state, const Mem
 
     glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
     glClearDepthf(1.0f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glStencilMask(0xFFu);
+    glClearStencil(0);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
     if (color_texture_handle) {

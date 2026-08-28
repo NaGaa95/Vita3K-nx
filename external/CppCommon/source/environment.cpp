@@ -15,13 +15,15 @@
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
 extern char **environ;
-#elif defined(unix) || defined(__unix) || defined(__unix__)
+#elif defined(unix) || defined(__unix) || defined(__unix__) || defined(__SWITCH__)
 #include <cstring>
 #include <fstream>
 #include <regex>
 #include <stdlib.h>
 #include <sys/stat.h>
-#include <sys/utsname.h>
+#ifndef __SWITCH__
+#include <sys/utsname.h> // newlib has no uname()
+#endif
 extern char **environ;
 #endif
 #if defined(_WIN32) || defined(_WIN64) || defined(__CYGWIN__)
@@ -274,6 +276,8 @@ std::string Environment::OSVersion() {
     os << " (build " << osvi.dwBuildNumber << ")";
 
     return os.str();
+#elif defined(__SWITCH__)
+    return "Horizon (Nintendo Switch)";
 #else
 #error Unsupported platform
 #endif

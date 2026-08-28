@@ -127,11 +127,21 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(PhysicalKeyCode, "keyboard-alternate-pinch-in-alt", PhysicalKeyCode::Unbound, keyboard_alternate_pinch_in_alt)                \
     code(PhysicalKeyCode, "keyboard-alternate-pinch-out-alt", PhysicalKeyCode::Unbound, keyboard_alternate_pinch_out_alt)
 
+// Logging is synchronous on Horizon; anything below warn turns routine guest
+// IO into blocking SD-card writes. The launcher pins warn as well - this makes
+// a direct hbmenu boot without a config safe too.
+#ifdef __SWITCH__
+#define VITA3K_DEFAULT_LOG_LEVEL 3 /*SPDLOG_LEVEL_WARN*/
+#else
+#define VITA3K_DEFAULT_LOG_LEVEL 0 /*SPDLOG_LEVEL_TRACE*/
+#endif
+
 #define CONFIG_INDIVIDUAL(code)                                                                         \
     code(bool, "initial-setup", false, initial_setup)                                                   \
     code(bool, "gdbstub", false, gdbstub)                                                               \
     code(bool, "log-active-shaders", false, log_active_shaders)                                         \
     code(bool, "log-uniforms", false, log_uniforms)                                                     \
+    code(bool, "shader-debug-dump", false, shader_debug_dump)                                           \
     code(bool, "log-compat-warn", false, log_compat_warn)                                               \
     code(bool, "validation-layer", true, validation_layer)                                              \
     code(bool, "pstv-mode", false, pstv_mode)                                                           \
@@ -141,6 +151,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(bool, "stretch_the_display_area", false, stretch_the_display_area)                             \
     code(bool, "fullscreen_hd_res_pixel_perfect", false, fullscreen_hd_res_pixel_perfect)               \
     code(bool, "archive-log", false, archive_log)                                                       \
+    code(bool, "file-logging", false, file_logging)                                                      \
     code(std::string, "backend-renderer", "Vulkan", backend_renderer)                                   \
     code(std::string, "custom-driver-name", "", custom_driver_name)                                     \
     code(bool, "turbo-mode", false, turbo_mode)                                                         \
@@ -173,8 +184,11 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(int, "delay-background", 4, delay_background)                                                  \
     code(int, "delay-start", 30, delay_start)                                                           \
     code(float, "background-alpha", .300f, background_alpha)                                            \
-    code(int, "log-level", 0 /*SPDLOG_LEVEL_TRACE*/, log_level)                                         \
+    code(int, "log-level", VITA3K_DEFAULT_LOG_LEVEL, log_level)                                         \
     code(bool, "cpu-opt", true, cpu_opt)                                                                \
+    code(bool, "switch-lsfg-enabled", false, switch_lsfg_enabled)                                       \
+    code(float, "switch-lsfg-flow-scale", 0.25f, switch_lsfg_flow_scale)                                \
+    code(bool, "switch-lsfg-performance", true, switch_lsfg_performance)                                \
     code(std::string, "pref-path", std::string{}, vita_fs_path)                                         \
     code(bool, "discord-rich-presence", true, discord_rich_presence)                                    \
     code(bool, "wait-for-debugger", false, wait_for_debugger)                                           \
@@ -185,6 +199,13 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(int, "screenshot-format", static_cast<int>(JPEG), screenshot_format)                           \
     code(bool, "disable-motion", false, disable_motion)                                                 \
     code(float, "controller-analog-multiplier", 1.0f, controller_analog_multiplier)                     \
+    code(int, "switch-stick-deadzone", 15, switch_stick_deadzone)                                      \
+    code(std::string, "switch-rear-touch", "zl", switch_rear_touch)                                   \
+    code(bool, "switch-rear-touch-triggers", true, switch_rear_touch_triggers)                        \
+    code(std::string, "switch-button-a", "circle", switch_button_a)                                   \
+    code(std::string, "switch-button-b", "cross", switch_button_b)                                    \
+    code(std::string, "switch-button-x", "triangle", switch_button_x)                                 \
+    code(std::string, "switch-button-y", "square", switch_button_y)                                   \
     CONFIG_KEYBOARD(code)                                                                               \
     code(std::string, "user-id", std::string{}, user_id)                                                \
     code(bool, "user-auto-connect", false, auto_user_login)                                             \

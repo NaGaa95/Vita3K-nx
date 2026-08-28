@@ -660,6 +660,9 @@ void SettingsDialog::build_desired_config(Config &desired) const {
     desired.log_compat_warn = m_ui->log_compat_warn->isChecked();
     current.texture_cache = m_ui->texture_cache->isChecked();
     desired.archive_log = m_ui->archive_log->isChecked();
+    // The Switch launcher owns this option. Preserve manually configured values
+    // when the desktop settings dialog writes the shared configuration.
+    desired.file_logging = emuenv.cfg.file_logging;
 #ifdef USE_DISCORD
     desired.discord_rich_presence = m_ui->discord_rich_presence->isChecked();
 #endif

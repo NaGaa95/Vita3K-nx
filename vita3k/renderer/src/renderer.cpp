@@ -63,6 +63,7 @@ void State::update_overlays() {
     {
         const bool is_paused = paused.load(std::memory_order_relaxed);
         overlay_manager->set_paused(is_paused);
+#ifndef __SWITCH__
         if (is_paused) {
             if (!overlay_manager->get<overlay::pause_overlay>())
                 overlay_manager->create<overlay::pause_overlay>();
@@ -70,6 +71,7 @@ void State::update_overlays() {
             if (overlay_manager->get<overlay::pause_overlay>())
                 overlay_manager->remove<overlay::pause_overlay>();
         }
+#endif
     }
 
     if (perf_overlay.enabled && perf_overlay.fps > 0) {
@@ -142,43 +144,110 @@ void State::init_overlay_font_dirs() {
         LOG_DEBUG("  system font dir: {}", d);
 }
 
+#ifdef __SWITCH__
+// Value states carry their whole payload, so equality makes a re-set redundant.
+// The stencil function is the exception: its handler branches on
+// record.is_maskupdate, so set_program drops that slot on a program change.
+static constexpr int SCALAR_SLOT_STENCIL_FUNC = 5;
+
+static bool scalar_state_repeated(Context *ctx, const bool is_front, const int slot, const uint64_t packed) {
+    if (!ctx || !ctx->emission_dedup_valid)
+        return false;
+    const int side = is_front ? 0 : 1;
+    const uint16_t bit = static_cast<uint16_t>(1u << slot);
+    if ((ctx->dedup_scalar_set[side] & bit) && ctx->dedup_scalar[side][slot] == packed)
+        return true;
+    ctx->dedup_scalar_set[side] |= bit;
+    ctx->dedup_scalar[side][slot] = packed;
+    return false;
+}
+#define SCALAR_STATE_DEDUP(ctx, is_front, slot, packed) \
+    if (scalar_state_repeated(ctx, is_front, slot, packed)) \
+    return
+#else
+#define SCALAR_STATE_DEDUP(ctx, is_front, slot, packed)
+#endif
+
 void set_depth_bias(State &state, Context *ctx, bool is_front, int factor, int units) {
+    SCALAR_STATE_DEDUP(ctx, is_front, 0, (static_cast<uint64_t>(static_cast<uint32_t>(factor)) << 32) | static_cast<uint32_t>(units));
     renderer::add_state_set_command(ctx, renderer::GXMState::DepthBias, is_front, factor, units);
 }
 
 void set_depth_func(State &state, Context *ctx, bool is_front, SceGxmDepthFunc depth_func) {
+    SCALAR_STATE_DEDUP(ctx, is_front, 1, static_cast<uint64_t>(depth_func));
     renderer::add_state_set_command(ctx, renderer::GXMState::DepthFunc, is_front, depth_func);
 }
 
 void set_depth_write_enable_mode(State &state, Context *ctx, bool is_front, SceGxmDepthWriteMode enable) {
+    SCALAR_STATE_DEDUP(ctx, is_front, 2, static_cast<uint64_t>(enable));
     renderer::add_state_set_command(ctx, renderer::GXMState::DepthWriteEnable, is_front, enable);
 }
 
 void set_point_line_width(State &state, Context *ctx, bool is_front, unsigned int width) {
+    SCALAR_STATE_DEDUP(ctx, is_front, 3, static_cast<uint64_t>(width));
     renderer::add_state_set_command(ctx, renderer::GXMState::PointLineWidth, is_front, width);
 }
 
 void set_polygon_mode(State &state, Context *ctx, bool is_front, SceGxmPolygonMode mode) {
+    SCALAR_STATE_DEDUP(ctx, is_front, 4, static_cast<uint64_t>(mode));
     renderer::add_state_set_command(ctx, renderer::GXMState::PolygonMode, is_front, mode);
 }
 
 void set_stencil_func(State &state, Context *ctx, bool is_front, SceGxmStencilFunc func, SceGxmStencilOp stencilFail, SceGxmStencilOp depthFail, SceGxmStencilOp depthPass, unsigned char compareMask, unsigned char writeMask) {
+    SCALAR_STATE_DEDUP(ctx, is_front, SCALAR_SLOT_STENCIL_FUNC,
+        (static_cast<uint64_t>(func) << 40) | (static_cast<uint64_t>(stencilFail & 0xFF) << 32)
+            | (static_cast<uint64_t>(depthFail & 0xFF) << 24) | (static_cast<uint64_t>(depthPass & 0xFF) << 16)
+            | (static_cast<uint64_t>(compareMask) << 8) | static_cast<uint64_t>(writeMask));
     renderer::add_state_set_command(ctx, renderer::GXMState::StencilFunc, is_front, func, stencilFail, depthFail, depthPass, compareMask, writeMask);
 }
 
 void set_stencil_ref(State &state, Context *ctx, bool is_front, unsigned char sref) {
+    SCALAR_STATE_DEDUP(ctx, is_front, 6, static_cast<uint64_t>(sref));
     renderer::add_state_set_command(ctx, renderer::GXMState::StencilRef, is_front, sref);
 }
 
 void set_program(State &state, Context *ctx, Ptr<const void> program, const bool is_fragment) {
+#ifdef __SWITCH__
+    if (ctx && ctx->emission_dedup_valid) {
+        uint32_t &last = ctx->dedup_program_addr[is_fragment ? 1 : 0];
+        if (last == program.address() && program.address() != 0)
+            return;
+        last = program.address();
+#ifdef __SWITCH__
+        // is_maskupdate comes from the program, and the stencil-function handler
+        // branches on it, so identical arguments mean different things either
+        // side of a change.
+        if (is_fragment) {
+            constexpr uint16_t stencil_bit = static_cast<uint16_t>(1u << SCALAR_SLOT_STENCIL_FUNC);
+            ctx->dedup_scalar_set[0] &= static_cast<uint16_t>(~stencil_bit);
+            ctx->dedup_scalar_set[1] &= static_cast<uint16_t>(~stencil_bit);
+        }
+#endif
+    }
+#endif
     renderer::add_state_set_command(ctx, renderer::GXMState::Program, program, is_fragment);
 }
 
 void set_cull_mode(State &state, Context *ctx, SceGxmCullMode cull) {
+    SCALAR_STATE_DEDUP(ctx, true, 7, static_cast<uint64_t>(cull));
     renderer::add_state_set_command(ctx, renderer::GXMState::CullMode, cull);
 }
 
 void set_texture(State &state, Context *ctx, const std::uint32_t tex_index, const SceGxmTexture tex) {
+#ifdef __SWITCH__
+    static_assert(sizeof(SceGxmTexture) == 16);
+    if (ctx && ctx->emission_dedup_valid && tex_index < SCE_GXM_MAX_TEXTURE_UNITS * 2) {
+        uint64_t packed[2];
+        memcpy(packed, &tex, sizeof(packed));
+        uint64_t *const last = ctx->dedup_texture[tex_index];
+        const uint64_t bit = uint64_t{ 1 } << tex_index;
+        if ((ctx->dedup_texture_set & bit) && last[0] == packed[0] && last[1] == packed[1])
+            return;
+        ctx->dedup_texture_set |= bit;
+        last[0] = packed[0];
+        last[1] = packed[1];
+    }
+#endif
     renderer::add_state_set_command(ctx, renderer::GXMState::Texture, tex_index, tex);
 }
 
@@ -282,6 +351,25 @@ void destroy_render_target_during_shutdown(State &state, std::unique_ptr<RenderT
 void set_uniform_buffer(State &state, Context *ctx, const bool is_vertex_uniform, const int block_number, const std::uint16_t block_size, const Ptr<const void> buffer) {
     // Calculate the number of bytes
     std::uint32_t bytes_to_copy_and_pad = ((block_size + 15) / 16) * 16;
+
+#ifdef __SWITCH__
+    // This is the only place uniform memory is synchronised: access_buffer()
+    // covers vertex and index data at draw time, uniforms only from here. A
+    // skipped re-set therefore also skips the upload, which holds only while
+    // the bytes at that address are unchanged. Suspect this first if a title
+    // renders with stale constants.
+    if (ctx && ctx->emission_dedup_valid && block_number >= 0 && block_number < 16) {
+        const int side = is_vertex_uniform ? 0 : 1;
+        uint32_t &last_addr = ctx->dedup_uniform_addr[side][block_number];
+        uint16_t &last_size = ctx->dedup_uniform_size[side][block_number];
+        const uint32_t bit = 1u << block_number;
+        if ((ctx->dedup_uniform_set[side] & bit) && last_addr == buffer.address() && last_size == block_size)
+            return;
+        ctx->dedup_uniform_set[side] |= bit;
+        last_addr = buffer.address();
+        last_size = block_size;
+    }
+#endif
 
     renderer::add_state_set_command(ctx, renderer::GXMState::UniformBuffer, buffer, is_vertex_uniform, block_number, bytes_to_copy_and_pad);
 }

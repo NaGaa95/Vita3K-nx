@@ -16,10 +16,12 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <ngs/rate_resampler.h>
+
 #include <util/log.h>
 
 extern "C" {
 #include <libavutil/channel_layout.h>
+#include <libavutil/opt.h>
 #include <libavutil/samplefmt.h>
 #include <libswresample/swresample.h>
 }
@@ -32,6 +34,12 @@ namespace {
 constexpr uint32_t stereo_channels = 2;
 constexpr uint32_t history_safety_margin_frames = 128;
 constexpr uint32_t history_compact_threshold_frames = 1024;
+
+// swresample's defaults build a 1024-phase, 32-tap Kaiser bank; every tap costs
+// a bessel() series, which a pitch-modulated voice pays on every update. 64
+// phases with linear interpolation is inaudible here and far cheaper to build.
+constexpr int64_t resampler_filter_size = 16;
+constexpr int64_t resampler_phase_shift = 6;
 
 bool create_stereo_rate_resampler(StereoRateResamplerRuntimeState &runtime, const int source_rate,
     const int dest_rate) {
@@ -46,6 +54,10 @@ bool create_stereo_rate_resampler(StereoRateResamplerRuntimeState &runtime, cons
         runtime.context = nullptr;
         return false;
     }
+
+    av_opt_set_int(runtime.context, "filter_size", resampler_filter_size, 0);
+    av_opt_set_int(runtime.context, "phase_shift", resampler_phase_shift, 0);
+    av_opt_set_int(runtime.context, "linear_interp", 1, 0);
 
     const int init_result = swr_init(runtime.context);
     if (init_result < 0) {
@@ -135,10 +147,12 @@ bool ensure_stereo_rate_resampler(StereoRateResamplerRuntimeState &runtime, Ster
         return false;
     }
 
-    const bool needs_recreate = logical.needs_reset || !runtime.context || runtime.source_rate != source_rate
-        || runtime.dest_rate != dest_rate;
-
-    if (!needs_recreate) {
+    // A reset means the playback parameters moved, but the resampler only cares
+    // about the rates they resolve to. If neither changed, the filter bank would
+    // be rebuilt identically; only the history has to go.
+    const bool rates_changed = runtime.source_rate != source_rate || runtime.dest_rate != dest_rate;
+    if (!rates_changed && runtime.context) {
+        logical.needs_reset = false;
         return true;
     }
 

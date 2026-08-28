@@ -175,6 +175,10 @@ bool do_command_push_data(CommandHelper &helper, Head arg1, Args... args2) {
 template <typename... Args>
 Command *make_command(CommandAllocFunc alloc_func, CommandFreeFunc free_func, const CommandOpcode opcode, int *status, Args... arguments) {
     Command *new_command = alloc_func();
+    // A deferred context's allocator returns null when the game's VDM callback
+    // runs out of memory; every caller already handles a null command.
+    if (!new_command)
+        return nullptr;
 
     new_command->opcode = opcode;
     new_command->status = status;

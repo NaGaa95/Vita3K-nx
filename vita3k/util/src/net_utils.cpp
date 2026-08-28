@@ -26,9 +26,20 @@
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <netinet/in.h>
+#ifdef __SWITCH__
+#include <switch.h>
+#ifdef BIT
+#undef BIT
+#endif
+#ifdef BITL
+#undef BITL
+#endif
+#else
+// newlib/libnx has no ifaddrs.h / net/if.h; interface enumeration is stubbed.
 #include <ifaddrs.h>
 #include <net/if.h>
-#include <netinet/in.h>
+#endif
 #endif
 
 #include <condition_variable>
@@ -428,6 +439,30 @@ std::vector<AssignedAddr> get_all_assigned_addrs() {
         }
     } else {
         LOG_CRITICAL("GetAdaptersInfo failed with error: {}", dwRetVal);
+    }
+#elif defined(__SWITCH__)
+    // Horizon has no getifaddrs(). NIFM exposes the active IPv4 configuration
+    // used by BSD sockets, which is the interface Vita networking APIs need.
+    const Result nifm_rc = nifmInitialize(NifmServiceType_User);
+    if (R_SUCCEEDED(nifm_rc)) {
+        u32 address = 0;
+        u32 netmask = 0;
+        u32 gateway = 0;
+        u32 primary_dns = 0;
+        u32 secondary_dns = 0;
+        const Result config_rc = nifmGetCurrentIpConfigInfo(
+            &address, &netmask, &gateway, &primary_dns, &secondary_dns);
+        if (R_SUCCEEDED(config_rc) && address != 0) {
+            const in_addr address_in{ .s_addr = address };
+            const in_addr netmask_in{ .s_addr = netmask };
+            char address_text[INET_ADDRSTRLEN]{};
+            char netmask_text[INET_ADDRSTRLEN]{};
+            if (inet_ntop(AF_INET, &address_in, address_text, sizeof(address_text))
+                && inet_ntop(AF_INET, &netmask_in, netmask_text, sizeof(netmask_text))) {
+                out_addrs.push_back({ "Nintendo Switch (NIFM)", address_text, netmask_text });
+            }
+        }
+        nifmExit();
     }
 #else
     struct ifaddrs *ifAddrStruct = NULL;

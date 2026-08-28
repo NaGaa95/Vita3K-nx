@@ -928,8 +928,12 @@ EXPORT(int, sceNgsVoicePause, ngs::Voice *voice) {
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
     }
 
+    // sceNgsVoiceResume treats an already-resumed voice as success; pausing an
+    // already-paused one is the same no-op and has to answer the same way. Jak
+    // and Daxter asserts outright on the error, trapping its audio thread while
+    // it holds the sound mutex and deadlocking the whole game behind it.
     if (voice->is_paused)
-        return RET_ERROR(SCE_NGS_ERROR_INVALID_STATE);
+        return SCE_NGS_OK;
 
     if (!voice->rack->system->voice_scheduler.pause(emuenv.mem, voice)) {
         return RET_ERROR(SCE_NGS_ERROR);

@@ -60,6 +60,9 @@ struct Config {
      */
     struct CurrentConfig {
         bool cpu_opt = true;
+        bool switch_lsfg_enabled = false;
+        float switch_lsfg_flow_scale = 0.25f;
+        bool switch_lsfg_performance = true;
         int modules_mode = ModulesMode::AUTOMATIC;
         std::vector<std::string> lle_modules = {};
         std::string audio_backend = "SDL";
@@ -97,6 +100,7 @@ struct Config {
         std::vector<uint64_t> ime_langs = { 4 };
         bool log_active_shaders = false;
         bool log_uniforms = false;
+        bool shader_debug_dump = false;
         bool color_surface_debug = false;
         bool validation_layer = true;
         bool tracy_primitive_impl = false;

@@ -557,7 +557,10 @@ EXPORT(int, sceAppMgrSaveDataDataRemove, Ptr<SceAppMgrSaveDataDataDelete> data) 
     TRACY_FUNC(sceAppMgrSaveDataDataRemove, data);
     for (int i = 0; i < data.get(emuenv.mem)->fileNum; i++) {
         const auto file = fs::path(construct_savedata0_path(data.get(emuenv.mem)->files.get(emuenv.mem)[i].dataPath.get(emuenv.mem)));
-        if (fs::is_regular_file(file)) {
+        // Guest path: see sceAppUtilSaveDataDataRemove. Throwing here aborts the
+        // emulator on Horizon, where "savedata0:" hits a real device lookup.
+        boost::system::error_code file_ec;
+        if (fs::is_regular_file(file, file_ec)) {
             remove_file(emuenv.io, file.string().c_str(), emuenv.vita_fs_path, export_name);
         } else
             remove_dir(emuenv.io, file.string().c_str(), emuenv.vita_fs_path, export_name);

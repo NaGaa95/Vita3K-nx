@@ -51,6 +51,64 @@ target_include_directories(renderer PUBLIC include)
 target_link_libraries(renderer PUBLIC display mem stb shader glutil threads config util vkutil overlay)
 target_link_libraries(renderer PRIVATE dialog ddspp SDL3::SDL3 stb ffmpeg xxHash::xxhash concurrentqueue)
 
+if(SWITCH)
+	# The unified Horizon SDK provides native NVC0 OpenGL and Zink alongside NVK.
+	# The `vulkan` interface already carries OpenGL::GL's complete unified static
+	# rescan group. Do not link it again here: NVK, EGL, Nouveau, and Zink must
+	# share one archive instance and one Horizon runtime.
+	target_sources(renderer PRIVATE src/vulkan/lsfg.cpp)
+	set(LSFG_ROOT "${CMAKE_SOURCE_DIR}/external/lsfg-vk")
+	add_library(vita3k_switch_lsfg STATIC
+		"${LSFG_ROOT}/bridge/lsfg_bridge.cpp"
+		"${LSFG_ROOT}/lsfg-vk-common/src/helpers/errors.cpp"
+		"${LSFG_ROOT}/lsfg-vk-common/src/vulkan/buffer.cpp"
+		"${LSFG_ROOT}/lsfg-vk-common/src/vulkan/command_buffer.cpp"
+		"${LSFG_ROOT}/lsfg-vk-common/src/vulkan/descriptor_pool.cpp"
+		"${LSFG_ROOT}/lsfg-vk-common/src/vulkan/descriptor_set.cpp"
+		"${LSFG_ROOT}/lsfg-vk-common/src/vulkan/fence.cpp"
+		"${LSFG_ROOT}/lsfg-vk-common/src/vulkan/image.cpp"
+		"${LSFG_ROOT}/lsfg-vk-common/src/vulkan/sampler.cpp"
+		"${LSFG_ROOT}/lsfg-vk-common/src/vulkan/semaphore.cpp"
+		"${LSFG_ROOT}/lsfg-vk-common/src/vulkan/shader.cpp"
+		"${LSFG_ROOT}/lsfg-vk-common/src/vulkan/timeline_semaphore.cpp"
+		"${LSFG_ROOT}/lsfg-vk-common/src/vulkan/vulkan.cpp"
+		"${LSFG_ROOT}/lsfg-vk-backend/src/extraction/dll_reader.cpp"
+		"${LSFG_ROOT}/lsfg-vk-backend/src/extraction/shader_registry.cpp"
+		"${LSFG_ROOT}/lsfg-vk-backend/src/helpers/limits.cpp"
+		"${LSFG_ROOT}/lsfg-vk-backend/src/helpers/managed_shader.cpp"
+		"${LSFG_ROOT}/lsfg-vk-backend/src/helpers/utils.cpp"
+		"${LSFG_ROOT}/lsfg-vk-backend/src/lsfgvk.cpp"
+		"${LSFG_ROOT}/lsfg-vk-backend/src/shaderchains/alpha0.cpp"
+		"${LSFG_ROOT}/lsfg-vk-backend/src/shaderchains/alpha1.cpp"
+		"${LSFG_ROOT}/lsfg-vk-backend/src/shaderchains/beta0.cpp"
+		"${LSFG_ROOT}/lsfg-vk-backend/src/shaderchains/beta1.cpp"
+		"${LSFG_ROOT}/lsfg-vk-backend/src/shaderchains/delta0.cpp"
+		"${LSFG_ROOT}/lsfg-vk-backend/src/shaderchains/delta1.cpp"
+		"${LSFG_ROOT}/lsfg-vk-backend/src/shaderchains/gamma0.cpp"
+		"${LSFG_ROOT}/lsfg-vk-backend/src/shaderchains/gamma1.cpp"
+		"${LSFG_ROOT}/lsfg-vk-backend/src/shaderchains/generate.cpp"
+		"${LSFG_ROOT}/lsfg-vk-backend/src/shaderchains/mipmaps.cpp"
+	)
+	target_include_directories(vita3k_switch_lsfg PUBLIC
+		"${LSFG_ROOT}/bridge"
+		"${LSFG_ROOT}/lsfg-vk-common/include"
+		"${LSFG_ROOT}/lsfg-vk-backend/include"
+		"${LSFG_ROOT}/lsfg-vk-backend/src"
+	)
+	target_compile_options(vita3k_switch_lsfg PRIVATE -fexceptions)
+	target_compile_definitions(vita3k_switch_lsfg PRIVATE
+		USE_VULKAN=1
+		VK_NO_PROTOTYPES=1
+		LSFG_VITA3K_STATIC_VULKAN_LOADER=1
+		# LSFG's common library calls its private C-Vulkan wrapper namespace
+		# `vk`, which would violate the ODR beside Vita3K's Vulkan-Hpp `vk`
+		# namespace once the Switch executable is merged by LTO.
+		vk=lsfg_internal_vk
+	)
+	target_link_libraries(vita3k_switch_lsfg PRIVATE vulkan)
+	target_link_libraries(renderer PRIVATE vita3k_switch_lsfg)
+endif()
+
 if(ANDROID)
 	target_link_libraries(renderer PRIVATE android adrenotools)
 endif()

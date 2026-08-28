@@ -1,0 +1,1 @@
+VITA3K_NX_VERSION := 1.0.0

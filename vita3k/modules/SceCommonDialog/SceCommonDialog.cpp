@@ -34,7 +34,7 @@
 
 #include <mutex>
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__SWITCH__)
 #include <ime/keyboard.h>
 #endif
 
@@ -182,7 +182,7 @@ EXPORT(int, sceImeDialogAbort) {
     emuenv.common_dialog.active_ime = nullptr;
     emuenv.common_dialog.status = SCE_COMMON_DIALOG_STATUS_FINISHED;
     emuenv.common_dialog.result = SCE_COMMON_DIALOG_RESULT_ABORTED;
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__SWITCH__)
     ime::set_keyboard_active(false);
 #endif
     return 0;
@@ -243,7 +243,7 @@ EXPORT(int, sceImeDialogInit, const Ptr<SceImeDialogParam> param) {
     }
     emuenv.common_dialog.active_ime = &emuenv.ime;
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__SWITCH__)
     ime::set_keyboard_active(true);
 #endif
 
@@ -272,7 +272,7 @@ EXPORT(int, sceImeDialogTerm) {
         emuenv.ime.event_id = SCE_IME_EVENT_OPEN;
     }
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__SWITCH__)
     ime::set_keyboard_active(false);
 #endif
 

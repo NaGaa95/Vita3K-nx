@@ -21,6 +21,11 @@
 constexpr unsigned char THUMB_BREAKPOINT[2] = { 0x00, 0xBE };
 constexpr unsigned char ARM_BREAKPOINT[4] = { 0x70, 0x00, 0x20, 0xE1 };
 
+bool Debugger::owns_breakpoint(Address addr) {
+    const auto lock = std::lock_guard(mutex);
+    return breakpoints.contains(addr & ~1u);
+}
+
 void Debugger::add_breakpoint(MemState &mem, uint32_t addr, bool thumb_mode) {
     const auto lock = std::lock_guard(mutex);
     Breakpoint bk;

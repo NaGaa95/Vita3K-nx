@@ -108,7 +108,8 @@ bool OverlayRenderer::init(VKState &state) {
     m_dummy_texture.init_image(vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst);
 
     {
-        vk::CommandBuffer cmd = vkutil::create_single_time_command(device, state.general_command_pool);
+        auto one_time_command = state.create_one_time_command();
+        const vk::CommandBuffer cmd = one_time_command.buffer;
         m_dummy_texture.transition_to_discard(cmd, vkutil::ImageLayout::TransferDst);
 
         const uint32_t white_pixel = 0xFFFFFFFF;
@@ -127,7 +128,7 @@ bool OverlayRenderer::init(VKState &state) {
         cmd.copyBufferToImage(staging.buffer, m_dummy_texture.image, vk::ImageLayout::eTransferDstOptimal, region);
         m_dummy_texture.transition_to(cmd, vkutil::ImageLayout::SampledImage);
 
-        vkutil::end_single_time_command(device, state.general_queue, state.general_command_pool, cmd);
+        state.submit_one_time_command(std::move(one_time_command));
         staging.destroy();
     }
 
@@ -172,7 +173,8 @@ bool OverlayRenderer::init(VKState &state) {
         };
         m_dummy_array_view = device.createImageView(view_info);
 
-        vk::CommandBuffer cmd = vkutil::create_single_time_command(device, state.general_command_pool);
+        auto one_time_command = state.create_one_time_command();
+        const vk::CommandBuffer cmd = one_time_command.buffer;
         vk::ImageSubresourceRange range{
             .aspectMask = vk::ImageAspectFlagBits::eColor,
             .baseMipLevel = 0,
@@ -207,7 +209,7 @@ bool OverlayRenderer::init(VKState &state) {
             vkutil::ImageLayout::TransferDst, vkutil::ImageLayout::SampledImage, range);
         m_dummy_texture_array.layout = vkutil::ImageLayout::SampledImage;
 
-        vkutil::end_single_time_command(device, state.general_queue, state.general_command_pool, cmd);
+        state.submit_one_time_command(std::move(one_time_command));
         staging.destroy();
     }
 
@@ -384,7 +386,7 @@ void OverlayRenderer::destroy() {
         return;
 
     vk::Device device = m_state->device;
-    device.waitIdle();
+    m_state->wait_device_idle();
 
     destroy_pipeline();
 

@@ -86,26 +86,33 @@ target_include_directories(miniz PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/miniz")
 add_subdirectory(sdl)
 
 # Cubeb setup, from https://github.com/RPCS3/rpcs3/blob/master/3rdparty/cubeb/CMakeLists.txt
-set(BUILD_SHARED_LIBS FALSE CACHE BOOL "Don't build shared libs")
-set(BUILD_TESTS FALSE CACHE BOOL "Don't build tests")
-set(BUILD_RUST_LIBS FALSE CACHE BOOL "Don't build rust libs")
-set(BUILD_TOOLS FALSE CACHE BOOL "Don't build tools")
-set(BUNDLE_SPEEX TRUE CACHE BOOL "Bundle the speex library")
-set(LAZY_LOAD_LIBS TRUE CACHE BOOL "Lazily load shared libraries")
-set(USE_SANITIZERS FALSE CACHE BOOL "Dont't use sanitizers")
+if(SWITCH)
+	# cubeb has no Horizon backend; Vita3K audio uses its SDL backend (or a
+	# direct libnx audout backend) on Switch. Provide a stub target so the audio
+	# module still links.
+	add_library(cubeb INTERFACE)
+else()
+	set(BUILD_SHARED_LIBS FALSE CACHE BOOL "Don't build shared libs")
+	set(BUILD_TESTS FALSE CACHE BOOL "Don't build tests")
+	set(BUILD_RUST_LIBS FALSE CACHE BOOL "Don't build rust libs")
+	set(BUILD_TOOLS FALSE CACHE BOOL "Don't build tools")
+	set(BUNDLE_SPEEX TRUE CACHE BOOL "Bundle the speex library")
+	set(LAZY_LOAD_LIBS TRUE CACHE BOOL "Lazily load shared libraries")
+	set(USE_SANITIZERS FALSE CACHE BOOL "Dont't use sanitizers")
 
-add_subdirectory(cubeb EXCLUDE_FROM_ALL)
+	add_subdirectory(cubeb EXCLUDE_FROM_ALL)
 
-if (ARCHITECTURE STREQUAL "arm64")
-	target_compile_definitions(speex PUBLIC
-		#_USE_NEON
-	)
-elseif (ARCHITECTURE STREQUAL "x86_64")
-	target_compile_definitions(speex PUBLIC
-		_USE_SSE
-		_USE_SSE2
-	)
-endif ()
+	if (ARCHITECTURE STREQUAL "arm64")
+		target_compile_definitions(speex PUBLIC
+			#_USE_NEON
+		)
+	elseif (ARCHITECTURE STREQUAL "x86_64")
+		target_compile_definitions(speex PUBLIC
+			_USE_SSE
+			_USE_SSE2
+		)
+	endif ()
+endif()
 
 if(ANDROID)
 	if(ARCHITECTURE STREQUAL "arm64")
@@ -127,6 +134,14 @@ endif()
 set(DYNARMIC_TESTS OFF CACHE BOOL "")
 set(DYNARMIC_NO_BUNDLED_FMT ON CACHE BOOL "")
 set(DYNARMIC_FRONTENDS "A32" CACHE STRING "")
+if(SWITCH)
+	# Horizon has no RWX memory: the JIT code buffer is W^X (libnx Jit dual view).
+	# Enabling NO_EXECUTE_SUPPORT makes dynarmic bracket code emission with
+	# CodeBlock::unprotect()/protect(), which map to jitTransitionToWritable/
+	# Executable in oaknut. The generic (no-op) exception handler is selected
+	# automatically because the NintendoSwitch platform does not set UNIX.
+	set(DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT ON CACHE BOOL "" FORCE)
+endif()
 add_subdirectory(dynarmic)
 
 if(MSVC)
@@ -226,6 +241,11 @@ add_library(CLI11 INTERFACE)
 target_include_directories(CLI11 INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/cli11")
 
 add_library(vulkan INTERFACE)
+if(SWITCH AND SWITCH_VULKAN_INCLUDE_DIR)
+	# Keep the headers paired with the loaderless driver. The packaged 26.2 SDK
+	# currently carries newer Vulkan headers than Vita3K's VMA submodule.
+	target_include_directories(vulkan SYSTEM BEFORE INTERFACE "${SWITCH_VULKAN_INCLUDE_DIR}")
+endif()
 target_include_directories(vulkan INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/VulkanMemoryAllocator-Hpp/Vulkan-Headers/include")
 if(APPLE)
 	if(NOT EXISTS "${CMAKE_BINARY_DIR}/external/MoltenVK-macos.tar")
@@ -265,6 +285,17 @@ elseif(ANDROID AND NOT (CMAKE_BUILD_TYPE STREQUAL "Release"))
 	endif()
 endif()
 
+if(SWITCH)
+	# Link the prebuilt Mesa NVK (nouveau) static Vulkan driver. The archive set
+	# and its --start-group wrapping is computed in cmake/switch.cmake. The Vita3K
+	# renderer only calls Vulkan through vkGetInstanceProcAddr (statically linked
+	# from this driver), so no loader/dlopen is involved.
+	if(SWITCH_VULKAN_LINK_LIBS)
+		target_link_libraries(vulkan INTERFACE ${SWITCH_VULKAN_LINK_LIBS})
+		add_dependencies(vulkan vita3k_mesa_vulkan_local)
+	endif()
+endif()
+
 add_library(vma INTERFACE)
 target_include_directories(vma INTERFACE
 	"${CMAKE_CURRENT_SOURCE_DIR}/VulkanMemoryAllocator-Hpp/include"
@@ -275,6 +306,24 @@ if(ANDROID)
 endif()
 add_subdirectory(ffmpeg)
 
+if(SWITCH)
+	# cmake/switch.cmake validates the pinned aarch64-none-elf build before this
+	# directory is entered. Imported targets let psvpfstools and all other
+	# consumers share the same static crypto/TLS implementation.
+	add_library(OpenSSL::Crypto STATIC IMPORTED GLOBAL)
+	set_target_properties(OpenSSL::Crypto PROPERTIES
+		IMPORTED_LOCATION "${SWITCH_OPENSSL_DIR}/libcrypto.a"
+		INTERFACE_INCLUDE_DIRECTORIES "${SWITCH_OPENSSL_DIR}/include")
+	add_library(OpenSSL::SSL STATIC IMPORTED GLOBAL)
+	set_target_properties(OpenSSL::SSL PROPERTIES
+		IMPORTED_LOCATION "${SWITCH_OPENSSL_DIR}/libssl.a"
+		INTERFACE_INCLUDE_DIRECTORIES "${SWITCH_OPENSSL_DIR}/include"
+		INTERFACE_LINK_LIBRARIES OpenSSL::Crypto)
+	add_library(crypto INTERFACE)
+	target_link_libraries(crypto INTERFACE OpenSSL::Crypto)
+	add_library(ssl INTERFACE)
+	target_link_libraries(ssl INTERFACE OpenSSL::SSL)
+else()
 if(APPLE OR NOT FORCE_BUILD_OPENSSL_MAC)
 	execute_process(
 		COMMAND brew --prefix openssl
@@ -361,10 +410,24 @@ add_library(ssl INTERFACE)
 target_link_libraries(ssl INTERFACE OpenSSL::SSL)
 add_library(crypto INTERFACE)
 target_link_libraries(crypto INTERFACE OpenSSL::Crypto)
+endif() # SWITCH
 
 # Must be after openssl
 add_subdirectory(psvpfstools)
+if(SWITCH)
+	# Route psvpfsparser's filesystem layer through boost::filesystem (proven on
+	# the sdmc: devoptab) instead of std::filesystem, which throws on "sdmc:"
+	# paths. PUBLIC so consumers that include LocalFilesystem.h see the same
+	# psvpfs = boost::filesystem alias.
+	target_link_libraries(psvpfsparser PUBLIC Boost::filesystem)
+	target_compile_definitions(psvpfsparser PUBLIC PSVPFS_BOOST)
+endif()
 
+if(SWITCH)
+	# Use the devkitPro switch-curl portlib.
+	add_library(libcurl INTERFACE)
+	target_link_libraries(libcurl INTERFACE "${SWITCH_PORTLIBS}/lib/libcurl.a")
+elseif(NOT SWITCH)
 find_package(CURL QUIET)
 if(NOT CURL_FOUND)
 	message("System curl not found, compiling curl from source")
@@ -393,6 +456,7 @@ else()
 	add_library(libcurl INTERFACE)
 	target_link_libraries(libcurl INTERFACE CURL::libcurl)
 endif()
+endif() # SWITCH curl portlib
 
 
 file(GLOB LIBATRAC9_SOURCES
@@ -467,8 +531,9 @@ endif()
 # Use XDG desktop portals on Linux
 set(NFD_PORTAL ON)
 
-if(NOT ANDROID)
-	# nativefiledialog-extended
+if(NOT ANDROID AND NOT SWITCH)
+	# nativefiledialog-extended (desktop-only; Switch/Android provide their own
+	# file browser via the platform frontend)
 	add_subdirectory(nativefiledialog-extended)
 
 	# Create alias to prevent the need of multiple changes in case the target name changes

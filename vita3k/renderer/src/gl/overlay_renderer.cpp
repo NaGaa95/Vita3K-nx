@@ -434,6 +434,17 @@ void OverlayRenderer::render(const overlay::display_manager &manager,
     glGetIntegerv(GL_BLEND_EQUATION_ALPHA, &last_blend_eq_alpha);
     GLboolean last_color_mask[4];
     glGetBooleanv(GL_COLOR_WRITEMASK, last_color_mask);
+    // The Vulkan overlay gets these from its pipeline; on GL they are global and
+    // the game leaves them set. sync_polygon_mode() puts GL_LINE or GL_POINT here
+    // for the Vita's line and point polygon modes, which turns every overlay quad
+    // into its own outline - the overlay appears as hollow text and stray
+    // diagonals where the glyph quads' triangles meet.
+    GLint last_polygon_mode[2];
+    glGetIntegerv(GL_POLYGON_MODE, last_polygon_mode);
+    GLboolean last_stencil = glIsEnabled(GL_STENCIL_TEST);
+    GLboolean last_poly_offset_fill = glIsEnabled(GL_POLYGON_OFFSET_FILL);
+    GLfloat last_line_width;
+    glGetFloatv(GL_LINE_WIDTH, &last_line_width);
 
     glBindFramebuffer(GL_FRAMEBUFFER, default_fbo);
     glViewport(static_cast<GLint>(viewport_x), static_cast<GLint>(viewport_y),
@@ -448,6 +459,10 @@ void OverlayRenderer::render(const overlay::display_manager &manager,
     glScissor(static_cast<GLint>(viewport_x), static_cast<GLint>(viewport_y),
         static_cast<GLsizei>(viewport_w), static_cast<GLsizei>(viewport_h));
     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    glDisable(GL_STENCIL_TEST);
+    glDisable(GL_POLYGON_OFFSET_FILL);
+    glLineWidth(1.f);
 
     glUseProgram(*m_program);
     glBindVertexArray(m_vao);
@@ -519,6 +534,18 @@ void OverlayRenderer::render(const overlay::display_manager &manager,
     else
         glDisable(GL_SCISSOR_TEST);
     glColorMask(last_color_mask[0], last_color_mask[1], last_color_mask[2], last_color_mask[3]);
+    // GL_POLYGON_MODE reports front and back separately, but only the combined
+    // setter exists in core profiles; the game always sets them together.
+    glPolygonMode(GL_FRONT_AND_BACK, static_cast<GLenum>(last_polygon_mode[0]));
+    if (last_stencil)
+        glEnable(GL_STENCIL_TEST);
+    else
+        glDisable(GL_STENCIL_TEST);
+    if (last_poly_offset_fill)
+        glEnable(GL_POLYGON_OFFSET_FILL);
+    else
+        glDisable(GL_POLYGON_OFFSET_FILL);
+    glLineWidth(last_line_width);
 }
 
 } // namespace renderer::gl

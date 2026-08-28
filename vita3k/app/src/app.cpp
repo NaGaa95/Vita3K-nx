@@ -44,7 +44,10 @@ namespace {
 constexpr uint32_t perf_frames_size = 20;
 
 bool has_installed_firmware_content(const fs::path &path) {
-    return fs::exists(path) && fs::is_directory(path) && !fs::is_empty(path);
+    // Non-throwing is_empty: on the Switch sdmc: fsdev, exists()/is_empty() can
+    // disagree on a just-created directory; the throwing overload aborts init.
+    boost::system::error_code ec;
+    return fs::exists(path) && fs::is_directory(path) && !fs::is_empty(path, ec) && !ec;
 }
 
 } // namespace

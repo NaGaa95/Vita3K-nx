@@ -1,0 +1,981 @@
+diff --git a/externals/oaknut/include/oaknut/code_block.hpp b/externals/oaknut/include/oaknut/code_block.hpp
+index bfa87d96..6fdf1d25 100644
+--- a/externals/oaknut/include/oaknut/code_block.hpp
++++ b/externals/oaknut/include/oaknut/code_block.hpp
+@@ -17,10 +17,263 @@
+ #    include <pthread.h>
+ #    include <sys/mman.h>
+ #    include <unistd.h>
++#elif defined(__SWITCH__)
++// Horizon forbids RWX mappings. libnx's Jit object provides a writable alias
++// (rw_addr) and a separate executable alias (rx_addr) of the same physical
++// pages. Code is written through rw_addr and executed from rx_addr after the
++// CodeMemory object has been transitioned to executable state.
++#    include <switch.h>
++// libnx defines function-like macros BIT()/BITL() that collide with oaknut's own
++// BIT identifier (used throughout its instruction encoders). Drop them; oaknut
++// and the Vita3K sources use their own definitions.
++#    ifdef BIT
++#        undef BIT
++#    endif
++#    ifdef BITL
++#        undef BITL
++#    endif
++#    include <chrono>
++#    include <condition_variable>
++#    include <iterator>
++#    include <map>
++#    include <memory>
++#    include <mutex>
++#    include <utility>
++#    include <vector>
+ #else
+ #    include <sys/mman.h>
+ #endif
+ 
++#if defined(__SWITCH__)
++// Last jitCreate() Horizon Result from the shared code pool, so Vita3K can log
++// WHY the region failed to allocate. Inline so the symbol lives in the dynarmic
++// library (avoids a circular static-link dependency on the cpu library).
++inline volatile unsigned int g_switch_last_jit_rc = 0;
++
++namespace oaknut::switch_detail {
++
++// Horizon caps how many concurrent code-memory objects a process may hold. On a
++// SystemResourceSize=0 hbloader NRO that ceiling is ~9. Vita3K creates one
++// dynarmic Jit -> one oaknut CodeBlock per *guest thread*, so a game with >9
++// live threads used to hit std::bad_alloc on jitCreate(). Instead we allocate
++// shared code-memory regions and carve per-CodeBlock slices out of them, so many
++// CodeBlocks use only a few Horizon code-memory objects. Each region keeps its
++// writable (rw) and executable (rx) aliases permanently mapped, so W^X needs no
++// permission toggles -- only per-slice cache maintenance in invalidate().
++// See docs/switch-port.md.
++// One Horizon code-memory object. Horizon caps how MANY of these a process may hold
++// (~9 on a SystemResourceSize=0 hbloader NRO), not really how big each is -- but a
++// single very large jitCreate is not guaranteed to succeed, so use a handful of
++// known-good 128 MiB regions and grow on demand instead of one giant region.
++struct CodeRegion {
++    ::Jit jit{};
++    std::uint8_t* rw = nullptr;
++    std::uint8_t* rx = nullptr;
++    std::size_t total = 0;
++    std::map<std::size_t, std::size_t> free_runs; // offset -> length (coalesced)
++    bool open = false;
++
++    ~CodeRegion() {
++        // Jit is a libnx C object, so destroying the struct alone does not
++        // release its source allocation or RW/RX aliases. This fallback also
++        // covers shutdown paths that do not explicitly drain the shared pool.
++        if (open)
++            (void)jitClose(&jit);
++    }
++};
++
++struct CodePool {
++    std::mutex mtx;
++    std::condition_variable released;
++    // unique_ptr so CodeRegion addresses stay stable as the vector grows.
++    std::vector<std::unique_ptr<CodeRegion>> regions;
++    std::map<std::uintptr_t, std::pair<CodeRegion*, std::size_t>> live; // rw base -> {region, len}
++    bool no_more_regions = false;
++};
++
++struct CodePoolShutdownResult {
++    std::size_t regions_closed = 0;
++    std::size_t live_slices = 0;
++    unsigned int close_rc = 0;
++};
++
++inline CodePool& code_pool() {
++    static CodePool p;
++    return p;
++}
++
++inline constexpr std::size_t kCodeRegionSize = 128u * 1024u * 1024u;
++inline constexpr std::size_t kMaxCodeRegions = 6; // <= Horizon's ~9 code-object ceiling
++
++// Per-JIT code-cache capacity. Eight MiB matches the proven Switch port setup
++// and lets sixteen guest-thread JITs share each 128 MiB Horizon code region.
++inline constexpr std::size_t kCodeSliceSize = 8u * 1024u * 1024u;
++
++// The per-Jit code cache Vita3K should hand dynarmic.
++inline std::size_t code_pool_slice_size() {
++    return kCodeSliceSize;
++}
++
++// Caller holds p.mtx. Adds one more code-memory region, or returns nullptr.
++inline CodeRegion* code_pool_add_region(CodePool& p) {
++    if (p.no_more_regions || p.regions.size() >= kMaxCodeRegions)
++        return nullptr;
++    auto r = std::make_unique<CodeRegion>();
++    const ::Result rc = jitCreate(&r->jit, kCodeRegionSize);
++    ::g_switch_last_jit_rc = static_cast<unsigned int>(rc);
++    if (R_FAILED(rc)) {
++        p.no_more_regions = true; // don't hammer Horizon on every alloc
++        return nullptr;
++    }
++
++    // The shared-pool implementation depends on CodeMemory's distinct RW and
++    // RX aliases. The SetProcessMemoryPermission fallback exposes one mapping
++    // whose permission must be toggled, so it cannot safely back concurrent
++    // CodeBlock slices.
++    if (r->jit.type != JitType_CodeMemory) {
++        (void)jitClose(&r->jit);
++        p.no_more_regions = true;
++        return nullptr;
++    }
++
++    const ::Result executable_rc = jitTransitionToExecutable(&r->jit);
++    ::g_switch_last_jit_rc = static_cast<unsigned int>(executable_rc);
++    if (R_FAILED(executable_rc)) {
++        (void)jitClose(&r->jit);
++        p.no_more_regions = true;
++        return nullptr;
++    }
++
++    r->open = true;
++    r->rw = static_cast<std::uint8_t*>(jitGetRwAddr(&r->jit));
++    r->rx = static_cast<std::uint8_t*>(jitGetRxAddr(&r->jit));
++    if (!r->rw || !r->rx) {
++        (void)jitClose(&r->jit);
++        r->open = false;
++        p.no_more_regions = true;
++        return nullptr;
++    }
++    r->total = kCodeRegionSize;
++    r->free_runs.emplace(std::size_t{ 0 }, kCodeRegionSize);
++    p.regions.push_back(std::move(r));
++    return p.regions.back().get();
++}
++
++inline bool code_pool_alloc(std::size_t size, std::uint8_t** out_rw, std::uint8_t** out_rx) {
++    CodePool& p = code_pool();
++    std::lock_guard<std::mutex> lk(p.mtx);
++    const std::size_t asz = (size + 0xFFFu) & ~std::size_t(0xFFFu);
++
++    auto take_from = [&](CodeRegion& r) -> bool {
++        for (auto it = r.free_runs.begin(); it != r.free_runs.end(); ++it) {
++            if (it->second >= asz) {
++                const std::size_t off = it->first;
++                const std::size_t len = it->second;
++                r.free_runs.erase(it);
++                if (len > asz)
++                    r.free_runs.emplace(off + asz, len - asz);
++                *out_rw = r.rw + off;
++                *out_rx = r.rx + off;
++                p.live.emplace(reinterpret_cast<std::uintptr_t>(r.rw + off), std::make_pair(&r, asz));
++                return true;
++            }
++        }
++        return false;
++    };
++
++    for (auto& r : p.regions) {
++        if (take_from(*r))
++            return true;
++    }
++    // Out of room in the regions we hold -> claim another one.
++    if (CodeRegion* r = code_pool_add_region(p)) {
++        if (take_from(*r))
++            return true;
++    }
++    return false; // out of code memory
++}
++
++inline void code_pool_free(std::uint8_t* rw) {
++    if (!rw)
++        return;
++    CodePool& p = code_pool();
++    std::lock_guard<std::mutex> lk(p.mtx);
++    const auto lit = p.live.find(reinterpret_cast<std::uintptr_t>(rw));
++    if (lit == p.live.end())
++        return;
++    CodeRegion& r = *lit->second.first;
++    std::size_t off = static_cast<std::size_t>(rw - r.rw);
++    std::size_t len = lit->second.second;
++    p.live.erase(lit);
++    // coalesce with the preceding free run
++    auto nxt = r.free_runs.lower_bound(off);
++    if (nxt != r.free_runs.begin()) {
++        auto prv = std::prev(nxt);
++        if (prv->first + prv->second == off) {
++            off = prv->first;
++            len += prv->second;
++            r.free_runs.erase(prv);
++        }
++    }
++    // coalesce with the following free run
++    nxt = r.free_runs.lower_bound(off);
++    if (nxt != r.free_runs.end() && off + len == nxt->first) {
++        len += nxt->second;
++        r.free_runs.erase(nxt);
++    }
++    r.free_runs.emplace(off, len);
++    p.released.notify_all();
++}
++
++// Release the process-wide Horizon code-memory objects before hbloader maps the
++// next NRO. Guest threads are detached SDL threads, so their last shared_ptr can
++// disappear just after KernelState::process_exit() observes an empty thread map;
++// briefly wait for those final CodeBlock destructors instead of racing them.
++inline CodePoolShutdownResult code_pool_shutdown() {
++    CodePool& p = code_pool();
++    std::unique_lock<std::mutex> lk(p.mtx);
++    (void)p.released.wait_for(lk, std::chrono::seconds(2), [&p] {
++        return p.live.empty();
++    });
++
++    CodePoolShutdownResult result;
++    result.live_slices = p.live.size();
++    if (result.live_slices != 0)
++        return result;
++
++    auto it = p.regions.begin();
++    while (it != p.regions.end()) {
++        CodeRegion& region = **it;
++        if (!region.open) {
++            it = p.regions.erase(it);
++            continue;
++        }
++
++        const ::Result rc = jitClose(&region.jit);
++        if (R_FAILED(rc)) {
++            if (result.close_rc == 0)
++                result.close_rc = static_cast<unsigned int>(rc);
++            ++it;
++            continue;
++        }
++
++        region.open = false;
++        region.rw = nullptr;
++        region.rx = nullptr;
++        region.total = 0;
++        region.free_runs.clear();
++        it = p.regions.erase(it);
++        ++result.regions_closed;
++    }
++
++    if (p.regions.empty())
++        p.no_more_regions = false;
++    return result;
++}
++
++} // namespace oaknut::switch_detail
++#endif
++
+ namespace oaknut {
+ 
+ class CodeBlock {
+@@ -40,6 +293,24 @@ public:
+         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_MPROTECT(PROT_READ | PROT_WRITE | PROT_EXEC), MAP_ANON | MAP_PRIVATE, -1, 0);
+ #elif defined(__OpenBSD__)
+         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
++#elif defined(__SWITCH__)
++        {
++            // Carve a slice out of the shared code-memory region rather than
++            // creating a per-block libnx Jit (Horizon caps concurrent
++            // code-memory objects). ptr() returns the writable alias so
++            // oaknut/dynarmic emit into it; the executable alias lives at a
++            // fixed offset (m_rx_memory) and the dynarmic AArch64 AddressSpace
++            // translates host code pointers by (m_rx_memory - m_memory) before
++            // executing. See docs/switch-port.md.
++            std::uint8_t* rw = nullptr;
++            std::uint8_t* rx = nullptr;
++            if (switch_detail::code_pool_alloc(size, &rw, &rx)) {
++                m_memory = reinterpret_cast<std::uint32_t*>(rw);
++                m_rx_memory = reinterpret_cast<std::uint32_t*>(rx);
++            } else {
++                m_memory = nullptr;
++            }
++        }
+ #else
+         m_memory = (std::uint32_t*)mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
+ #endif
+@@ -55,6 +326,8 @@ public:
+ 
+ #if defined(_WIN32)
+         VirtualFree((void*)m_memory, 0, MEM_RELEASE);
++#elif defined(__SWITCH__)
++        switch_detail::code_pool_free(reinterpret_cast<std::uint8_t*>(m_memory));
+ #else
+         munmap(m_memory, m_size);
+ #endif
+@@ -70,12 +343,32 @@ public:
+         return m_memory;
+     }
+ 
++    // Base of the executable alias. On W^X platforms (Horizon/Switch) the code
++    // buffer is written through ptr() (rw) but must be executed from here (rx),
++    // a distinct address. Everywhere else the single mapping is both writable and
++    // executable, so this is just ptr(). Pass this as oaknut's xmem so that all
++    // emitted entry points and inter-block branch targets are executable
++    // addresses.
++    std::uint32_t* exec_ptr() const
++    {
++#if defined(__SWITCH__)
++        return m_rx_memory;
++#else
++        return m_memory;
++#endif
++    }
++
+     void protect()
+     {
+ #if defined(__APPLE__) && !TARGET_OS_IPHONE
+         pthread_jit_write_protect_np(1);
+ #elif defined(__APPLE__) || defined(__NetBSD__) || defined(__OpenBSD__)
+         mprotect(m_memory, m_size, PROT_READ | PROT_EXEC);
++#elif defined(__SWITCH__)
++        // No-op: the shared code region's rw and rx aliases are permanently
++        // mapped (writable and executable respectively), so there is no
++        // permission to toggle. Cache maintenance is done per-block in
++        // invalidate(), which dynarmic calls after each emission.
+ #endif
+     }
+ 
+@@ -85,15 +378,54 @@ public:
+         pthread_jit_write_protect_np(0);
+ #elif defined(__APPLE__) || defined(__NetBSD__) || defined(__OpenBSD__)
+         mprotect(m_memory, m_size, PROT_READ | PROT_WRITE);
++#elif defined(__SWITCH__)
++        // No-op: the rw alias is always writable (see protect()).
+ #endif
+     }
+ 
++#if defined(__SWITCH__)
++    // Executable alias of the code buffer (rx). dynarmic must run code from here.
++    std::uint32_t* rx_ptr() const
++    {
++        return m_rx_memory;
++    }
++#endif
++
+     void invalidate(std::uint32_t* mem, std::size_t size)
+     {
+ #if defined(__APPLE__)
+         sys_icache_invalidate(mem, size);
+ #elif defined(_WIN32)
+         FlushInstructionCache(GetCurrentProcess(), mem, size);
++#elif defined(__SWITCH__)
++        // Code is written through the rw alias and executed from the rx alias of
++        // the shared code region. Clean the data cache over the rw range (push
++        // the freshly written instructions to the point of unification) and
++        // invalidate the instruction cache over the rx range. dynarmic passes rx
++        // block entry-points here, while invalidate_all() passes the rw base, so
++        // normalise the pointer to this slice's offset and touch both aliases.
++        if (m_memory && m_rx_memory && size) {
++            const std::uintptr_t p = reinterpret_cast<std::uintptr_t>(mem);
++            const std::uintptr_t rw_base = reinterpret_cast<std::uintptr_t>(m_memory);
++            const std::uintptr_t rx_base = reinterpret_cast<std::uintptr_t>(m_rx_memory);
++            std::uintptr_t off = 0;
++            const auto get_offset = [&](const std::uintptr_t base) {
++                if (p < base)
++                    return false;
++                const std::uintptr_t delta = p - base;
++                if (delta >= m_size)
++                    return false;
++                off = delta;
++                return true;
++            };
++            if ((!get_offset(rw_base) && !get_offset(rx_base))
++                || size > m_size - static_cast<std::size_t>(off)
++                || rw_base > std::uintptr_t(-1) - off
++                || rx_base > std::uintptr_t(-1) - off)
++                return;
++            armDCacheFlush(reinterpret_cast<void*>(rw_base + off), size);
++            armICacheInvalidate(reinterpret_cast<void*>(rx_base + off), size);
++        }
+ #else
+         static std::size_t icache_line_size = 0x10000, dcache_line_size = 0x10000;
+ 
+@@ -138,6 +470,10 @@ public:
+ protected:
+     std::uint32_t* m_memory;
+     std::size_t m_size = 0;
++#if defined(__SWITCH__)
++    Jit m_jit{};
++    std::uint32_t* m_rx_memory = nullptr;
++#endif
+ };
+ 
+ }  // namespace oaknut
+diff --git a/src/dynarmic/backend/arm64/a32_address_space.cpp b/src/dynarmic/backend/arm64/a32_address_space.cpp
+index bbdf925f..799b997c 100644
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -10,6 +10,7 @@
+ #include "dynarmic/backend/arm64/devirtualize.h"
+ #include "dynarmic/backend/arm64/emit_arm64.h"
+ #include "dynarmic/backend/arm64/stack_layout.h"
++#include "dynarmic/common/atomic.h"
+ #include "dynarmic/common/cast_util.h"
+ #include "dynarmic/common/fp/fpcr.h"
+ #include "dynarmic/frontend/A32/a32_location_descriptor.h"
+@@ -161,6 +162,20 @@ A32AddressSpace::A32AddressSpace(const A32::UserConfig& conf)
+     EmitPrelude();
+ }
+ 
++CodePtr A32AddressSpace::GetOrEmitFromDispatcher(IR::LocationDescriptor descriptor, volatile u32* halt_reason) {
++    // Clearing the code cache from inside the generated dispatcher leaves its
++    // return-stack buffer holding host pointers into code that can immediately
++    // be overwritten. Exit the JIT first so the cache can be recycled after the
++    // generated run frame (and its return-stack buffer) has been discarded.
++    if (GetRemainingSize() < 256 * 1024) {
++        Atomic::Or(halt_reason, static_cast<u32>(HaltReason::CacheInvalidation));
++        Atomic::Barrier();
++        return reinterpret_cast<CodePtr>(prelude_info.return_from_run_code);
++    }
++
++    return GetOrEmit(descriptor);
++}
++
+ IR::Block A32AddressSpace::GenerateIR(IR::LocationDescriptor descriptor) const {
+     IR::Block ir_block = A32::Translate(A32::LocationDescriptor{descriptor}, conf.callbacks, {conf.arch_version, conf.define_unpredictable_behaviour, conf.hook_hint_instructions});
+ 
+@@ -318,12 +333,13 @@ void A32AddressSpace::EmitPrelude() {
+ 
+         code.LDR(X0, l_this);
+         code.MOV(X1, Xstate);
++        code.MOV(X2, Xhalt);
+         code.LDR(Xscratch0, l_addr);
+         code.BLR(Xscratch0);
+         code.BR(X0);
+ 
+-        const auto fn = [](A32AddressSpace& self, A32JitState& context) -> CodePtr {
+-            return self.GetOrEmit(context.GetLocationDescriptor());
++        const auto fn = [](A32AddressSpace& self, A32JitState& context, volatile u32* halt_reason) -> CodePtr {
++            return self.GetOrEmitFromDispatcher(context.GetLocationDescriptor(), halt_reason);
+         };
+ 
+         code.align(8);
+diff --git a/src/dynarmic/backend/arm64/a32_address_space.h b/src/dynarmic/backend/arm64/a32_address_space.h
+index 3b9e9fb2..db4b4bea 100644
+--- a/src/dynarmic/backend/arm64/a32_address_space.h
++++ b/src/dynarmic/backend/arm64/a32_address_space.h
+@@ -25,6 +25,7 @@ protected:
+     friend class A32Core;
+ 
+     void EmitPrelude();
++    CodePtr GetOrEmitFromDispatcher(IR::LocationDescriptor descriptor, volatile u32* halt_reason);
+     EmitConfig GetEmitConfig() override;
+     void RegisterNewBasicBlock(const IR::Block& block, const EmittedBlockInfo& block_info) override;
+ 
+diff --git a/src/dynarmic/backend/arm64/a32_interface.cpp b/src/dynarmic/backend/arm64/a32_interface.cpp
+index 6b38c410..8283865e 100644
+--- a/src/dynarmic/backend/arm64/a32_interface.cpp
++++ b/src/dynarmic/backend/arm64/a32_interface.cpp
+@@ -3,6 +3,7 @@
+  * SPDX-License-Identifier: 0BSD
+  */
+ 
++#include <atomic>
+ #include <memory>
+ #include <mutex>
+ 
+@@ -17,11 +18,17 @@
+ #include "dynarmic/common/atomic.h"
+ #include "dynarmic/interface/A32/a32.h"
+ 
++std::atomic<std::uint64_t> dynarmic_code_cache_recycles{ 0 };
++
+ namespace Dynarmic::A32 {
+ 
+ using namespace Backend::Arm64;
+ 
+ struct Jit::Impl final {
++    std::uint64_t CapacityRecycleCount() const {
++        return capacity_recycle_count;
++    }
++
+     Impl(Jit* jit_interface, A32::UserConfig conf)
+             : jit_interface(jit_interface)
+             , conf(conf)
+@@ -133,7 +140,18 @@ private:
+ 
+             ClearHalt(HaltReason::CacheInvalidation);
+ 
+-            if (invalidate_entire_cache) {
++            // Cache-capacity exhaustion requests CacheInvalidation directly
++            // from the generated dispatcher and therefore has no explicit
++            // range. Recycle the whole cache only after Run() has returned.
++            if (invalidate_entire_cache || invalid_cache_ranges.empty()) {
++                // A capacity recycle discards every translated block and the
++                // guest re-translates its whole working set; on a small code
++                // cache that can dominate a frame. Counted separately from an
++                // explicit ClearCache so thrashing is measurable.
++                if (!invalidate_entire_cache) {
++                    dynarmic_code_cache_recycles.fetch_add(1, std::memory_order_relaxed);
++                    capacity_recycle_count++;
++                }
+                 current_address_space.ClearCache();
+ 
+                 invalidate_entire_cache = false;
+@@ -161,6 +179,7 @@ private:
+     std::mutex invalidation_mutex;
+     boost::icl::interval_set<u32> invalid_cache_ranges;
+     bool invalidate_entire_cache = false;
++    std::uint64_t capacity_recycle_count = 0;
+ };
+ 
+ Jit::Jit(UserConfig conf)
+@@ -168,6 +187,10 @@ Jit::Jit(UserConfig conf)
+ 
+ Jit::~Jit() = default;
+ 
++std::uint64_t Jit::CapacityRecycleCount() const {
++    return impl->CapacityRecycleCount();
++}
++
+ HaltReason Jit::Run() {
+     return impl->Run();
+ }
+diff --git a/src/dynarmic/backend/arm64/address_space.cpp b/src/dynarmic/backend/arm64/address_space.cpp
+index 2c7ae777..a231f7b3 100644
+--- a/src/dynarmic/backend/arm64/address_space.cpp
++++ b/src/dynarmic/backend/arm64/address_space.cpp
+@@ -23,7 +23,7 @@ namespace Dynarmic::Backend::Arm64 {
+ AddressSpace::AddressSpace(size_t code_cache_size)
+         : code_cache_size(code_cache_size)
+         , mem(code_cache_size)
+-        , code(mem.ptr(), mem.ptr())
++        , code(mem.ptr(), mem.exec_ptr())
+         , fastmem_manager(exception_handler) {
+     ASSERT_MSG(code_cache_size <= 128 * 1024 * 1024, "code_cache_size > 128 MiB not currently supported");
+ 
+@@ -98,7 +98,9 @@ void AddressSpace::ClearCache() {
+ }
+ 
+ void AddressSpace::DumpDisassembly() const {
+-    for (u32* ptr = mem.ptr(); ptr < code.xptr<u32*>(); ptr++) {
++    const size_t code_size = static_cast<size_t>(code.offset());
++    for (size_t offset = 0; offset + sizeof(u32) <= code_size; offset += sizeof(u32)) {
++        u32* const ptr = reinterpret_cast<u32*>(reinterpret_cast<u8*>(mem.ptr()) + offset);
+         std::printf("%s", Common::DisassembleAArch64(*ptr, mcl::bit_cast<u64>(ptr)).c_str());
+     }
+ }
+@@ -108,7 +110,10 @@ size_t AddressSpace::GetRemainingSize() {
+ }
+ 
+ EmittedBlockInfo AddressSpace::Emit(IR::Block block) {
+-    if (GetRemainingSize() < 1024 * 1024) {
++    // 256 KiB: the reserve only has to fit one block emission. The upstream
++    // 1 MiB figure was sized against 128 MiB caches and wastes 12.5% of the
++    // Switch port's 8 MiB slices.
++    if (GetRemainingSize() < 256 * 1024) {
+         ClearCache();
+     }
+ 
+@@ -136,7 +141,7 @@ void AddressSpace::Link(EmittedBlockInfo& block_info) {
+     using namespace oaknut::util;
+ 
+     for (auto [ptr_offset, target] : block_info.relocations) {
+-        CodeGenerator c{mem.ptr(), mem.ptr()};
++        CodeGenerator c{mem.ptr(), mem.exec_ptr()};
+         c.set_xptr(reinterpret_cast<u32*>(block_info.entry_point + ptr_offset));
+ 
+         switch (target) {
+@@ -276,7 +281,7 @@ void AddressSpace::LinkBlockLinks(const CodePtr entry_point, const CodePtr targe
+     using namespace oaknut::util;
+ 
+     for (auto [ptr_offset, type] : block_relocations_list) {
+-        CodeGenerator c{mem.ptr(), mem.ptr()};
++        CodeGenerator c{mem.ptr(), mem.exec_ptr()};
+         c.set_xptr(reinterpret_cast<u32*>(entry_point + ptr_offset));
+ 
+         switch (type) {
+diff --git a/src/dynarmic/backend/arm64/exclusive_monitor.cpp b/src/dynarmic/backend/arm64/exclusive_monitor.cpp
+index d57a29cd..6ab2a894 100644
+--- a/src/dynarmic/backend/arm64/exclusive_monitor.cpp
++++ b/src/dynarmic/backend/arm64/exclusive_monitor.cpp
+@@ -11,6 +11,30 @@
+ 
+ namespace Dynarmic {
+ 
++#ifdef __SWITCH__
++
++void (*g_exclusive_store_event)() = nullptr;
++
++ExclusiveMonitor::ExclusiveMonitor(size_t processor_count)
++        : reservations(std::make_unique<ProcessorReservation[]>(processor_count)), processor_count(processor_count) {}
++
++size_t ExclusiveMonitor::GetProcessorCount() const {
++    return processor_count;
++}
++
++void ExclusiveMonitor::Clear() {
++    clear_epoch.fetch_add(1, std::memory_order_acq_rel);
++    for (size_t processor_id = 0; processor_id < processor_count; ++processor_id) {
++        reservations[processor_id].address.store(INVALID_EXCLUSIVE_ADDRESS, std::memory_order_release);
++    }
++}
++
++void ExclusiveMonitor::ClearProcessor(size_t processor_id) {
++    reservations[processor_id].address.store(INVALID_EXCLUSIVE_ADDRESS, std::memory_order_release);
++}
++
++#else
++
+ ExclusiveMonitor::ExclusiveMonitor(size_t processor_count)
+         : exclusive_addresses(processor_count, INVALID_EXCLUSIVE_ADDRESS), exclusive_values(processor_count) {}
+ 
+@@ -55,4 +79,6 @@ void ExclusiveMonitor::ClearProcessor(size_t processor_id) {
+     Unlock();
+ }
+ 
++#endif
++
+ }  // namespace Dynarmic
+diff --git a/src/dynarmic/common/spin_lock_arm64.cpp b/src/dynarmic/common/spin_lock_arm64.cpp
+index ccf807e2..2d9a46fd 100644
+--- a/src/dynarmic/common/spin_lock_arm64.cpp
++++ b/src/dynarmic/common/spin_lock_arm64.cpp
+@@ -4,6 +4,9 @@
+  */
+ 
+ #include <mutex>
++#ifdef __SWITCH__
++#    include <switch.h>
++#endif
+ 
+ #include <oaknut/code_block.hpp>
+ #include <oaknut/oaknut.hpp>
+@@ -13,6 +16,8 @@
+ 
+ namespace Dynarmic {
+ 
++#ifndef __SWITCH__
++
+ using Backend::Arm64::Wscratch0;
+ using Backend::Arm64::Wscratch1;
+ using namespace oaknut::util;
+@@ -54,7 +59,10 @@ SpinLockImpl impl;
+ 
+ SpinLockImpl::SpinLockImpl()
+         : mem{4096}
+-        , code{mem.ptr(), mem.ptr()} {}
++        // On W^X platforms (Horizon/Switch) code is written through the rw alias
++        // but must execute from the rx alias; pass exec_ptr() as xmem so the emitted
++        // lock/unlock function pointers (code.xptr) are executable addresses.
++        , code{mem.ptr(), mem.exec_ptr()} {}
+ 
+ void SpinLockImpl::Initialize() {
+     mem.unprotect();
+@@ -73,14 +81,32 @@ void SpinLockImpl::Initialize() {
+ 
+ }  // namespace
+ 
++#endif  // !__SWITCH__
++
+ void SpinLock::Lock() {
++#ifdef __SWITCH__
++    // libnx mutexes are one statically-zero-initialized 32-bit word, matching
++    // SpinLock::storage. Their uncontended path stays in userspace while the
++    // contended path uses Horizon's mutex arbitration instead of repeatedly
++    // spinning/sleeping. This is important for the global exclusive monitor:
++    // a waiter must not starve a preempted lock owner on Horizon's strict-
++    // priority scheduler.
++    static_assert(sizeof(Mutex) == sizeof(storage));
++    static_assert(alignof(Mutex) == alignof(decltype(storage)));
++    mutexLock(reinterpret_cast<Mutex*>(const_cast<int*>(&storage)));
++#else
+     std::call_once(flag, &SpinLockImpl::Initialize, impl);
+     impl.lock(&storage);
++#endif
+ }
+ 
+ void SpinLock::Unlock() {
++#ifdef __SWITCH__
++    mutexUnlock(reinterpret_cast<Mutex*>(const_cast<int*>(&storage)));
++#else
+     std::call_once(flag, &SpinLockImpl::Initialize, impl);
+     impl.unlock(&storage);
++#endif
+ }
+ 
+ }  // namespace Dynarmic
+diff --git a/src/dynarmic/frontend/A32/translate/impl/hint.cpp b/src/dynarmic/frontend/A32/translate/impl/hint.cpp
+index 0ec6aeff..76bd4182 100644
+--- a/src/dynarmic/frontend/A32/translate/impl/hint.cpp
++++ b/src/dynarmic/frontend/A32/translate/impl/hint.cpp
+@@ -8,22 +8,24 @@
+ 
+ namespace Dynarmic::A32 {
+ 
+-bool TranslatorVisitor::arm_PLD_imm(bool /*add*/, bool R, Reg /*n*/, Imm<12> /*imm12*/) {
+-    if (!options.hook_hint_instructions) {
+-        return true;
+-    }
+-
+-    const auto exception = R ? Exception::PreloadData : Exception::PreloadDataWithIntentToWrite;
+-    return RaiseException(exception);
++bool TranslatorVisitor::arm_PLD_imm(bool /*add*/, bool /*R*/, Reg /*n*/, Imm<12> /*imm12*/) {
++    // Vita3K/Switch: prefetch hints are architectural no-ops with no semantic
++    // content, but hooking them makes RaiseException terminate the basic block
++    // and round-trip through the dispatcher on every one. Guest NEON memcpy and
++    // memset loops issue a PLD every 32-64 bytes, so each iteration paid a host
++    // callback. Vita3K's handler does nothing for these anyway; it only needs
++    // the WFE/WFI/YIELD hooks, which stay hooked below.
++    return true;
+ }
+ 
+-bool TranslatorVisitor::arm_PLD_reg(bool /*add*/, bool R, Reg /*n*/, Imm<5> /*imm5*/, ShiftType /*shift*/, Reg /*m*/) {
+-    if (!options.hook_hint_instructions) {
+-        return true;
+-    }
+-
+-    const auto exception = R ? Exception::PreloadData : Exception::PreloadDataWithIntentToWrite;
+-    return RaiseException(exception);
++bool TranslatorVisitor::arm_PLD_reg(bool /*add*/, bool /*R*/, Reg /*n*/, Imm<5> /*imm5*/, ShiftType /*shift*/, Reg /*m*/) {
++    // Vita3K/Switch: prefetch hints are architectural no-ops with no semantic
++    // content, but hooking them makes RaiseException terminate the basic block
++    // and round-trip through the dispatcher on every one. Guest NEON memcpy and
++    // memset loops issue a PLD every 32-64 bytes, so each iteration paid a host
++    // callback. Vita3K's handler does nothing for these anyway; it only needs
++    // the WFE/WFI/YIELD hooks, which stay hooked below.
++    return true;
+ }
+ 
+ bool TranslatorVisitor::arm_SEV() {
+diff --git a/src/dynarmic/frontend/A32/translate/impl/thumb32_load_byte.cpp b/src/dynarmic/frontend/A32/translate/impl/thumb32_load_byte.cpp
+index 42b2ebf4..f85b8418 100644
+--- a/src/dynarmic/frontend/A32/translate/impl/thumb32_load_byte.cpp
++++ b/src/dynarmic/frontend/A32/translate/impl/thumb32_load_byte.cpp
+@@ -7,22 +7,19 @@
+ #include "dynarmic/interface/A32/config.h"
+ 
+ namespace Dynarmic::A32 {
+-static bool PLDHandler(TranslatorVisitor& v, bool W) {
+-    if (!v.options.hook_hint_instructions) {
+-        return true;
+-    }
+-
+-    const auto exception = W ? Exception::PreloadDataWithIntentToWrite
+-                             : Exception::PreloadData;
+-    return v.RaiseException(exception);
++static bool PLDHandler(TranslatorVisitor&, bool) {
++    // Vita3K/Switch: prefetch hints are architectural no-ops with no semantic
++    // content, but hooking them makes RaiseException terminate the basic block
++    // and round-trip through the dispatcher on every one. Guest NEON memcpy and
++    // memset loops issue a PLD every 32-64 bytes, so each iteration paid a host
++    // callback. Vita3K's handler does nothing for these anyway; it only needs
++    // the WFE/WFI/YIELD hooks, which stay hooked below.
++    return true;
+ }
+ 
+-static bool PLIHandler(TranslatorVisitor& v) {
+-    if (!v.options.hook_hint_instructions) {
+-        return true;
+-    }
+-
+-    return v.RaiseException(Exception::PreloadInstruction);
++static bool PLIHandler(TranslatorVisitor&) {
++    // Same reasoning as PLDHandler above.
++    return true;
+ }
+ 
+ using ExtensionFunction = IR::U32 (IREmitter::*)(const IR::U8&);
+diff --git a/src/dynarmic/interface/A32/a32.h b/src/dynarmic/interface/A32/a32.h
+index e1c5b40f..e9490e7b 100644
+--- a/src/dynarmic/interface/A32/a32.h
++++ b/src/dynarmic/interface/A32/a32.h
+@@ -40,6 +40,13 @@ public:
+      */
+     void ClearCache();
+ 
++    /**
++     * Number of times this Jit discarded its whole cache because the code
++     * cache filled, as opposed to explicit invalidation. Lets the embedder
++     * grow the cache for threads whose working set does not fit.
++     */
++    std::uint64_t CapacityRecycleCount() const;
++
+     /**
+      * Invalidate the code cache at a range of addresses.
+      * @param start_address The starting address of the range to invalidate.
+diff --git a/src/dynarmic/interface/exclusive_monitor.h b/src/dynarmic/interface/exclusive_monitor.h
+index 48136758..c4bd35c9 100644
+--- a/src/dynarmic/interface/exclusive_monitor.h
++++ b/src/dynarmic/interface/exclusive_monitor.h
+@@ -10,6 +10,7 @@
+ #include <cstddef>
+ #include <cstdint>
+ #include <cstring>
++#include <memory>
+ #include <vector>
+ 
+ #include <dynarmic/common/spin_lock.h>
+@@ -19,6 +20,14 @@ namespace Dynarmic {
+ using VAddr = std::uint64_t;
+ using Vector = std::array<std::uint64_t, 2>;
+ 
++#ifdef __SWITCH__
++// Set by the embedder; called after a successful exclusive store. Cortex-A9
++// raises an event when a store clears another core's global monitor
++// reservation, and LDREX/WFE unlock loops rely on it. Best effort: the
++// embedder keeps its own wait timeout as the guarantee.
++extern void (*g_exclusive_store_event)();
++#endif
++
+ class ExclusiveMonitor {
+ public:
+     /// @param processor_count Maximum number of processors using this global
+@@ -35,12 +44,40 @@ public:
+         static_assert(std::is_trivially_copyable_v<T>);
+         const VAddr masked_address = address & RESERVATION_GRANULE_MASK;
+ 
++#ifdef __SWITCH__
++        ProcessorReservation& reservation = reservations[processor_id];
++        ReservationStripe& stripe = stripes[StripeIndex(masked_address)];
++
++        // Retire an older reservation before invoking the memory callback.
++        // Publishing the new address is the final release operation below.
++        reservation.address.store(INVALID_EXCLUSIVE_ADDRESS, std::memory_order_release);
++
++        const uint64_t epoch_before = clear_epoch.load(std::memory_order_acquire);
++        const uint64_t sequence_before = stripe.sequence.load(std::memory_order_acquire);
++        const T value = op();
++        const uint64_t sequence_after = stripe.sequence.load(std::memory_order_acquire);
++        const uint64_t epoch_after = clear_epoch.load(std::memory_order_acquire);
++
++        std::memcpy(reservation.value.data(), &value, sizeof(T));
++        reservation.sequence = sequence_after;
++        reservation.epoch = epoch_after;
++
++        // A concurrent store-exclusive (or Clear) makes this reservation fail.
++        // Returning the value is still valid; ARM permits STREX to fail
++        // spuriously, and no host thread has to wait for the writer here.
++        if (sequence_before == sequence_after && !(sequence_after & 1) && epoch_before == epoch_after) {
++            reservation.address.store(masked_address, std::memory_order_release);
++        }
++
++        return value;
++#else
+         Lock();
+         exclusive_addresses[processor_id] = masked_address;
+         const T value = op();
+         std::memcpy(exclusive_values[processor_id].data(), &value, sizeof(T));
+         Unlock();
+         return value;
++#endif
+     }
+ 
+     /// Checks to see if processor processor_id has exclusive access to the
+@@ -50,6 +87,60 @@ public:
+     template<typename T, typename Function>
+     bool DoExclusiveOperation(size_t processor_id, VAddr address, Function op) {
+         static_assert(std::is_trivially_copyable_v<T>);
++#ifdef __SWITCH__
++        ProcessorReservation& reservation = reservations[processor_id];
++        const VAddr masked_address = address & RESERVATION_GRANULE_MASK;
++
++        // STREX always clears the calling processor's local reservation.
++        if (reservation.address.exchange(INVALID_EXCLUSIVE_ADDRESS, std::memory_order_acq_rel) != masked_address) {
++            return false;
++        }
++
++        const uint64_t saved_epoch = reservation.epoch;
++        if (saved_epoch != clear_epoch.load(std::memory_order_acquire)) {
++            return false;
++        }
++
++        // Declared before StripeRelease so it fires after the stripe settles.
++        struct EventOnExit {
++            bool armed = false;
++            ~EventOnExit() {
++                if (armed && g_exclusive_store_event)
++                    g_exclusive_store_event();
++            }
++        } notify;
++
++        ReservationStripe& stripe = stripes[StripeIndex(masked_address)];
++        const uint64_t saved_sequence = reservation.sequence;
++        if (saved_sequence & 1) {
++            return false;
++        }
++
++        uint64_t expected_sequence = saved_sequence;
++        if (!stripe.sequence.compare_exchange_strong(expected_sequence, saved_sequence + 1,
++                std::memory_order_acq_rel, std::memory_order_acquire)) {
++            return false;
++        }
++
++        // Mark the stripe stable again even if the callback throws. Advancing
++        // by two invalidates every reservation made against the old generation.
++        struct StripeRelease {
++            std::atomic<uint64_t>& sequence;
++            uint64_t stable_sequence;
++            ~StripeRelease() {
++                sequence.store(stable_sequence, std::memory_order_release);
++            }
++        } release{ stripe.sequence, saved_sequence + 2 };
++
++        if (saved_epoch != clear_epoch.load(std::memory_order_acquire)) {
++            return false;
++        }
++
++        T saved_value;
++        std::memcpy(&saved_value, reservation.value.data(), sizeof(T));
++        notify.armed = op(saved_value);
++        return notify.armed;
++#else
+         if (!CheckAndClear(processor_id, address)) {
+             return false;
+         }
+@@ -60,6 +151,7 @@ public:
+ 
+         Unlock();
+         return result;
++#endif
+     }
+ 
+     /// Unmark everything.
+@@ -68,6 +160,36 @@ public:
+     void ClearProcessor(size_t processor_id);
+ 
+ private:
++    static constexpr VAddr RESERVATION_GRANULE_MASK = 0xFFFF'FFFF'FFFF'FFFFull;
++    static constexpr VAddr INVALID_EXCLUSIVE_ADDRESS = 0xDEAD'DEAD'DEAD'DEADull;
++
++#ifdef __SWITCH__
++    static constexpr size_t STRIPE_COUNT = 256;
++    static_assert(std::atomic<uint64_t>::is_always_lock_free);
++
++    struct alignas(64) ReservationStripe {
++        std::atomic<uint64_t> sequence{ 0 };
++    };
++
++    struct alignas(64) ProcessorReservation {
++        std::atomic<VAddr> address{ INVALID_EXCLUSIVE_ADDRESS };
++        uint64_t sequence = 0;
++        uint64_t epoch = 0;
++        Vector value{};
++    };
++
++    static constexpr size_t StripeIndex(VAddr address) {
++        // Guest synchronization words are normally 4-byte aligned. Mix page
++        // and word bits so adjacent locks and equal offsets on adjacent pages
++        // do not collapse onto the same stripe.
++        return static_cast<size_t>(((address >> 2) ^ (address >> 12)) & (STRIPE_COUNT - 1));
++    }
++
++    std::atomic<uint64_t> clear_epoch{ 0 };
++    std::array<ReservationStripe, STRIPE_COUNT> stripes{};
++    std::unique_ptr<ProcessorReservation[]> reservations;
++    size_t processor_count = 0;
++#else
+     bool CheckAndClear(size_t processor_id, VAddr address);
+ 
+     void Lock();
+@@ -78,11 +200,10 @@ private:
+     friend VAddr* GetExclusiveMonitorAddressPointer(ExclusiveMonitor*, size_t index);
+     friend Vector* GetExclusiveMonitorValuePointer(ExclusiveMonitor*, size_t index);
+ 
+-    static constexpr VAddr RESERVATION_GRANULE_MASK = 0xFFFF'FFFF'FFFF'FFFFull;
+-    static constexpr VAddr INVALID_EXCLUSIVE_ADDRESS = 0xDEAD'DEAD'DEAD'DEADull;
+     SpinLock lock;
+     std::vector<VAddr> exclusive_addresses;
+     std::vector<Vector> exclusive_values;
++#endif
+ };
+ 
+ }  // namespace Dynarmic

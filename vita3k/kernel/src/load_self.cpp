@@ -21,8 +21,13 @@
 #include <kernel/state.h>
 #include <kernel/types.h>
 
+#include <mem/functions.h>
 #include <nids/functions.h>
 #include <util/arm.h>
+
+#include <map>
+#include <vector>
+
 #include <util/fs.h>
 #include <util/log.h>
 
@@ -135,6 +140,17 @@ static bool load_func_imports(const uint32_t *nids, const Ptr<uint32_t> *entries
             LOG_DEBUG("\tNID {} ({}) at {}", log_hex(nid), name, log_hex(entry.address()));
         }
 
+#ifdef __SWITCH__
+        // Diagnostic: a corrupt/overrun func-entry table points into an uncommitted
+        // guest page, which on Horizon is a hard fault (no lazy-commit handler). Log
+        // the full context and skip rather than crash, so one run reveals whether it
+        // is a single bad entry or a count overrun (large i).
+        if (!is_valid_addr_range(mem, entry.address(), entry.address() + 12)) {
+            LOG_CRITICAL("[switch] Bad func import entry i={}/{} nid={} entry_addr={} — uncommitted, skipping",
+                i, count, log_hex(nid), log_hex(entry.address()));
+            continue;
+        }
+#endif
         const ExportNids::iterator export_address = kernel.export_nids.find(nid);
         uint32_t *const stub = entry.get(mem);
 

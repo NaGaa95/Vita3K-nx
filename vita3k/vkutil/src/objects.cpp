@@ -100,7 +100,20 @@ void Image::init_image(vk::ImageUsageFlags usage, vk::ComponentMapping mapping, 
         .initialLayout = vk::ImageLayout::eUndefined,
     };
 
+#ifdef __SWITCH__
+    // NVK reports several unrelated conditions as ErrorInitializationFailed and the
+    // exception carries no detail, so name the image that was rejected.
+    try {
+        std::tie(image, allocation) = allocator.createImage(image_info, vma_auto_alloc);
+    } catch (const vk::SystemError &error) {
+        LOG_ERROR("createImage failed ({}): {}x{} fmt={} usage={} flags={} tiling=optimal",
+            error.what(), width, height, vk::to_string(format),
+            vk::to_string(usage), vk::to_string(image_create_flags));
+        throw;
+    }
+#else
     std::tie(image, allocation) = allocator.createImage(image_info, vma_auto_alloc);
+#endif
 
     // only create a view if one of these flags is set
     constexpr vk::ImageUsageFlags view_usages = vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eStorage;
@@ -183,6 +196,19 @@ void Buffer::init_buffer(vk::BufferUsageFlags usage_flags, const vma::Allocation
     mapped_data = alloc_info.pMappedData;
 }
 
+bool Buffer::is_host_coherent() const {
+    const vk::MemoryPropertyFlags properties = allocator.getAllocationMemoryProperties(allocation);
+    return static_cast<bool>(properties & vk::MemoryPropertyFlagBits::eHostCoherent);
+}
+
+void Buffer::flush(vk::DeviceSize offset, vk::DeviceSize size) const {
+    allocator.flushAllocation(allocation, offset, size);
+}
+
+void Buffer::invalidate(vk::DeviceSize offset, vk::DeviceSize size) const {
+    allocator.invalidateAllocation(allocation, offset, size);
+}
+
 RingBuffer::RingBuffer(vk::BufferUsageFlags usage, const size_t capacity)
     : usage(usage)
     , capacity(capacity) {
@@ -213,7 +239,7 @@ void RingBuffer::allocate(const uint32_t data_size) {
 }
 
 void HostRingBuffer::create() {
-    buffer.init_buffer(usage, vma_mapped_alloc);
+    buffer.init_buffer(usage, vma_mapped_alloc_cached);
 
     vk::MemoryPropertyFlags memory_properties = allocator.getAllocationMemoryProperties(buffer.allocation);
     is_coherent = static_cast<bool>(memory_properties & vk::MemoryPropertyFlagBits::eHostCoherent);

@@ -26,17 +26,29 @@
 
 #include <util/log.h>
 #include <util/overloaded.h>
+#include <util/switch_thread.h>
 
 namespace renderer::vulkan {
 
 void VKContext::wait_thread_function(const MemState &mem) {
+    switch_pin_to_hardware_priority("Vulkan wait thread", 45);
+
     // try to wait for multiple fences at the same time if possible
     std::vector<vk::Fence> fences;
 
     auto wait_for_fences = [&]() {
         while (!fences.empty()) {
+            if (state.device_lost.load(std::memory_order_acquire)) {
+                fences.clear();
+                return;
+            }
             // timeout so we can check for shutdown
-            auto result = state.device.waitForFences(fences, VK_TRUE, 100'000'000ULL);
+            vk::Result result;
+            try {
+                result = state.device.waitForFences(fences, VK_TRUE, 100'000'000ULL);
+            } catch (const vk::SystemError &) {
+                result = vk::Result::eErrorDeviceLost;
+            }
             if (result == vk::Result::eSuccess) {
                 // don't reset them
                 fences.clear();
@@ -49,8 +61,11 @@ void VKContext::wait_thread_function(const MemState &mem) {
                 }
                 continue;
             }
-            LOG_ERROR("Could not wait for fences.");
-            assert(false);
+            // Device lost: no fence will ever signal again. Keep this thread
+            // alive so queued requests still complete and unblock the guest;
+            // the frontend closes the session once it sees the flag.
+            LOG_CRITICAL("Vulkan wait thread: the device was lost.");
+            state.device_lost.store(true, std::memory_order_release);
             fences.clear();
             return;
         }
@@ -100,8 +115,14 @@ void VKContext::wait_thread_function(const MemState &mem) {
                                LOG_ERROR("Buffer Sync request for {}-{} is not fully mapped", log_hex(request.location), log_hex(request.location + request.size));
                                return;
                            }
-                           uint8_t *src = reinterpret_cast<uint8_t *>(std::get<vkutil::Buffer>(mem_it->second.buffer_impl).mapped_data);
-                           src += request.location - mem_it->first;
+                           vkutil::Buffer &mapped_buffer = std::get<vkutil::Buffer>(mem_it->second.buffer_impl);
+                           const uint32_t buffer_offset = mem_it->second.buffer_offset + request.location - mem_it->first;
+                           // Double Buffer uses cached, non-coherent NVK memory
+                           // on Switch. Make completed GPU writes visible before
+                           // the CPU copies a surface/visibility result back.
+                           mapped_buffer.invalidate(buffer_offset, request.size);
+                           uint8_t *src = reinterpret_cast<uint8_t *>(mapped_buffer.mapped_data);
+                           src += buffer_offset;
                            memcpy(Ptr<void>(request.location).get(mem), src, request.size);
                        },
                        [&](PostSurfaceSyncRequest &request) {
@@ -128,6 +149,9 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.render_target = rt;
     context.scene_timestamp++;
     context.state.texture_cache.current_scene_timestamp = context.scene_timestamp;
+#ifdef __SWITCH__
+    context.state.texture_cache.memo_scene = context.scene_timestamp;
+#endif
 
     SceGxmColorSurface *color_surface_fin = &context.record.color_surface;
     // set these values for the pipeline cache
@@ -478,7 +502,19 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
     vk::SubmitInfo submit_info{};
     submit_info.setCommandBuffers(cmdbuffers_to_submit);
 
-    state.general_queue.submit(submit_info, fence);
+#ifdef __SWITCH__
+    // Mesa/NVK on Horizon behaves reliably when upload/pre-render work and the
+    // render work consuming it are separate queue submissions. Hold the queue
+    // lock across both so worker submissions cannot be inserted between them.
+    assert(cmdbuffers_to_submit.size() == 2);
+    vk::SubmitInfo prerender_submit_info{};
+    prerender_submit_info.setCommandBuffers(cmdbuffers_to_submit[0]);
+    vk::SubmitInfo render_submit_info{};
+    render_submit_info.setCommandBuffers(cmdbuffers_to_submit[1]);
+    state.submit_general_pair(prerender_submit_info, render_submit_info, fence);
+#else
+    state.submit_general(submit_info, fence);
+#endif
     cmdbuffers_to_submit.clear();
     state.frame().rendered_fences.push_back(fence);
 
@@ -542,6 +578,9 @@ void VKContext::check_for_macroblock_change(bool is_draw) {
                 stop_recording(empty_notification, empty_notification, false);
                 start_recording();
                 scene_timestamp++;
+#ifdef __SWITCH__
+                state.texture_cache.memo_scene = scene_timestamp;
+#endif
             }
         }
     }

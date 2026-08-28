@@ -48,6 +48,10 @@ static constexpr size_t TextureCacheSize = 1024;
 typedef std::array<uint32_t, 4> TextureGxmDataRepr;
 struct TextureCacheInfo {
     uint64_t hash = 0;
+#ifdef __SWITCH__
+    // Scene epoch of the last hash verification; see TextureCache::memo_scene.
+    uint64_t last_hashed_scene = 0;
+#endif
     SceGxmTexture texture;
     int index = 0;
     uint32_t texture_size = 0;
@@ -78,6 +82,18 @@ class TextureCache {
 protected:
     // current texture info the cache is looking at
     TextureCacheInfo *current_info = nullptr;
+
+public:
+#ifdef __SWITCH__
+    // Advanced by the renderer at every scene boundary (including mid-scene
+    // splits, which are the notification points where the guest may legally
+    // write). Without fault-based dirty tracking the Switch port re-hashes
+    // texture data to detect CPU updates; a texture verified in the current
+    // epoch cannot have changed and needs no second walk.
+    uint64_t memo_scene = 0;
+#endif
+
+protected:
 
     // are we in the process of exporting a texture
     bool exporting_texture = false;

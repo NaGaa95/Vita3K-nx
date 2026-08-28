@@ -30,6 +30,9 @@ CPUStatePtr init_cpu(bool cpu_opt, SceUID thread_id, std::size_t processor_id, M
 int run(CPUState &state);
 int step(CPUState &state);
 void stop(CPUState &state);
+// Force a core out of translated code at its next block boundary. Callable from
+// another thread; a no-op on cores that cannot be preempted.
+void preempt(CPUState &state, bool release_core);
 void set_thread_id(CPUState &state, SceUID thread_id);
 SceUID get_thread_id(CPUState &state);
 uint32_t read_reg(CPUState &state, size_t index);
@@ -59,6 +62,18 @@ uint32_t stack_alloc(CPUState &state, size_t size);
 uint32_t stack_free(CPUState &state, size_t size);
 
 void clear_exclusive(CPUState &state);
+
+#ifdef __SWITCH__
+// Statistics from releasing the shared libnx code-memory pool before handing
+// the process back to hbloader.
+struct SwitchJitPoolShutdownResult {
+    std::size_t regions_closed = 0;
+    std::size_t live_slices = 0;
+    uint32_t close_result = 0;
+};
+
+SwitchJitPoolShutdownResult switch_shutdown_jit_code_pool();
+#endif
 
 // Debugging helpers
 std::string disassemble(CPUState &state, uint64_t at, bool thumb, uint16_t *insn_size = nullptr);

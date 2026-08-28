@@ -28,6 +28,7 @@
 
 #include <util/fs.h>
 #include <util/log.h>
+#include <util/switch_thread.h>
 
 #include <SDL3/SDL_cpuinfo.h>
 
@@ -37,6 +38,36 @@
 #include <xxhash.h>
 
 namespace renderer::vulkan {
+
+static bool shader_cache_directory_has_entries(const fs::path &path) {
+    boost::system::error_code ec;
+    if (!fs::exists(path, ec)) {
+        // A missing cache is normal on first boot. Writers create the directory
+        // when the first shader is saved; creating it from every precompile
+        // probe races cache invalidation and floods the SD-card log with ENOENT.
+        if (ec && ec != boost::system::errc::no_such_file_or_directory)
+            LOG_WARN("Unable to check shader cache directory {}: {}", path, ec.message());
+        return false;
+    }
+
+    ec.clear();
+    if (!fs::is_directory(path, ec) || ec) {
+        if (ec)
+            LOG_WARN("Unable to inspect shader cache directory {}: {}", path, ec.message());
+        return false;
+    }
+
+    ec.clear();
+    const bool empty = fs::is_empty(path, ec);
+    if (ec) {
+        // The cache can be invalidated between exists() and is_empty(). Treat
+        // that normal race as an empty cache rather than an actionable warning.
+        if (ec != boost::system::errc::no_such_file_or_directory)
+            LOG_WARN("Unable to read shader cache directory {}: {}", path, ec.message());
+        return false;
+    }
+    return !empty;
+}
 
 // Size of the record containing what is needed for the pipeline construction (what is after is dynamic state)
 constexpr size_t record_pipeline_len = offsetof(GxmRecordState, vertex_streams);
@@ -226,6 +257,18 @@ void PipelineCache::init(bool support_rasterized_order_access) {
     support_coherent_framebuffer_fetch = support_rasterized_order_access;
 
     const int nb_logical_threads = SDL_GetNumLogicalCPUCores();
+#ifdef __SWITCH__
+    // The table below is tuned for desktop core counts and yields exactly one
+    // worker below six logical cores, which is every Switch. Horizon gives
+    // homebrew three cores that guest threads already share, so a second worker
+    // is what fits: it halves the cold-shader backlog without taking a core away
+    // from emulation for the whole session.
+    // Three app cores plus the helper core's slack, and these workers sit
+    // below the guest band, so a third one consumes leftover CPU rather than
+    // competing for what emulation needs.
+    nb_worker_threads = 3;
+    (void)nb_logical_threads;
+#else
     // took this from RPCS3 (slightly modified)
     if (nb_logical_threads > 12)
         nb_worker_threads = 6;
@@ -237,6 +280,7 @@ void PipelineCache::init(bool support_rasterized_order_access) {
         nb_worker_threads = 2;
     else
         nb_worker_threads = 1;
+#endif
 
     if (use_async_compilation) {
         // we could not initialize the worker threads previously
@@ -506,7 +550,7 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
     LOG_INFO("Generating vulkan spv shader {}", hash_text);
     const std::string shader_version = fmt::format("vk{}", shader::CURRENT_VERSION);
 
-    shader::usse::SpirvCode source = load_spirv_shader(*program, state.features, true, hints, maskupdate, state.shaders_path, state.shaders_log_path, shader_version, true);
+    shader::usse::SpirvCode source = load_spirv_shader(*program, state.features, true, hints, maskupdate, state.shaders_path, state.shaders_log_path, shader_version, true, state.shader_debug_dump);
 
     vk::ShaderModuleCreateInfo shader_info{
         .codeSize = sizeof(uint32_t) * source.size(),
@@ -780,6 +824,9 @@ vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(con
 }
 
 void PipelineCache::compiler_thread(MemState &mem) {
+    // Shader compilation is CPU-heavy; keep it off the OS-reserved core 3.
+    switch_allow_helper_core("shader compiler thread");
+
     moodycamel::ConsumerToken consumer_token(pipeline_compile_queue);
 
     // just a single loop, waiting for a pipeline compile request and compiling it
@@ -1022,7 +1069,7 @@ vk::ShaderModule PipelineCache::precompile_shader(const Sha256Hash &hash, bool s
             return it->second;
     }
 
-    if (!fs::exists(state.shaders_path) || fs::is_empty(state.shaders_path))
+    if (!shader_cache_directory_has_entries(state.shaders_path))
         return nullptr;
 
     Sha256Hash shader_hash;

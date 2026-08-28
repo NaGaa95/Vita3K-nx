@@ -17,8 +17,10 @@
 
 #include "SceProcessmgr.h"
 
+#include <cpu/functions.h>
 #include <io/functions.h>
 #include <kernel/state.h>
+#include <kernel/thread/thread_state.h>
 #include <rtc/rtc.h>
 
 #include <util/safe_time.h>
@@ -101,7 +103,30 @@ EXPORT(int, sceKernelCDialogSetLeaseLimit) {
 
 EXPORT(int, sceKernelCallAbortHandler, uint32_t param1, uint32_t param2) {
     TRACY_FUNC(sceKernelCallAbortHandler, param1, param2);
-    return UNIMPLEMENTED();
+
+    // This export is reached from the guest libc abnormal-termination path.
+    // Returning zero preserves Vita3K's existing behaviour; the diagnostic is
+    // intentionally one-shot and only runs when a title is already aborting.
+    // It provides enough guest context to identify the real caller instead of
+    // misclassifying the subsequent frontend shutdown as a native Switch crash.
+    const auto thread = emuenv.kernel.get_thread(thread_id);
+    if (thread && thread->cpu) {
+        auto &cpu = *thread->cpu;
+        LOG_ERROR("Guest called sceKernelCallAbortHandler: tid={}, name='{}', param1=0x{:08X}, param2=0x{:08X}, PC=0x{:08X}, LR=0x{:08X}, SP=0x{:08X}, CPSR=0x{:08X}",
+            thread_id, thread->name, param1, param2, read_pc(cpu), read_lr(cpu), read_sp(cpu), read_cpsr(cpu));
+        LOG_ERROR("Guest abort registers: r0=0x{:08X} r1=0x{:08X} r2=0x{:08X} r3=0x{:08X} r4=0x{:08X} r5=0x{:08X} r6=0x{:08X} r7=0x{:08X} r8=0x{:08X} r9=0x{:08X} r10=0x{:08X} r11=0x{:08X} r12=0x{:08X}",
+            read_reg(cpu, 0), read_reg(cpu, 1), read_reg(cpu, 2), read_reg(cpu, 3),
+            read_reg(cpu, 4), read_reg(cpu, 5), read_reg(cpu, 6), read_reg(cpu, 7),
+            read_reg(cpu, 8), read_reg(cpu, 9), read_reg(cpu, 10), read_reg(cpu, 11), read_reg(cpu, 12));
+        const std::string stack_candidates = thread->log_stack_traceback();
+        LOG_ERROR("Guest abort stack return-address candidates:\n{}",
+            stack_candidates.empty() ? "<none>" : stack_candidates);
+    } else {
+        LOG_ERROR("Guest called sceKernelCallAbortHandler: tid={}, param1=0x{:08X}, param2=0x{:08X} (thread context unavailable)",
+            thread_id, param1, param2);
+    }
+
+    return SCE_KERNEL_OK;
 }
 
 EXPORT(int, sceKernelGetCurrentProcess) {

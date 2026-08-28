@@ -1301,10 +1301,10 @@ int condvar_signal(KernelState &kernel, const char *export_name, SceUID thread_i
         while (!waiting_threads->empty()) {
             const auto waiting_thread_data = *waiting_threads->begin();
             auto waiting_thread = waiting_thread_data.thread;
-            const std::unique_lock<std::mutex> waiting_thread_lock(waiting_thread->mutex, std::try_to_lock);
-            if (!waiting_thread_lock)
-                continue;
-
+            // Blocking here follows the same condvar->mutex -> thread->mutex order
+            // as condvar_wait. Retrying try_to_lock while holding condvar->mutex can
+            // livelock on Horizon's priority scheduler and burns a host core.
+            const std::lock_guard<std::mutex> waiting_thread_lock(waiting_thread->mutex);
             waiting_thread->update_status(ThreadStatus::run, ThreadStatus::wait);
             waiting_threads->pop();
         }
@@ -1711,8 +1711,7 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
             for (auto it = msgpipe->senders->begin(); it != msgpipe->senders->end(); ++it) {
                 auto threadInfo = (*it);
                 if (threadInfo.mp.request_size <= msgpipe->data_buffer.Free()) { // Found a thread we can service
-                    threadInfo.thread->status = ThreadStatus::run;
-                    threadInfo.thread->status_cond.notify_one();
+                    threadInfo.thread->update_status(ThreadStatus::run, ThreadStatus::wait);
 
                     msgpipe->senders->erase(it); // Erase other thread's info - done here to avoid race
                     break; // Should we try to signal other threads, too?
@@ -1759,6 +1758,10 @@ SceSize msgpipe_recv(KernelState &kernel, const char *export_name, SceUID thread
                     std::atomic_fetch_add(&msgpipe->remainingThreads, static_cast<size_t>(-1));
                     return SCE_KERNEL_ERROR_WAIT_DELETE;
                 }
+                // An untimed wait ends only when data moves, which never happens
+                // once the thread has been told to exit.
+                if (thread->is_delete_requested())
+                    return SCE_KERNEL_ERROR_WAIT_DELETE;
                 msgpipe_lock.lock(); // Lock message pipe again
                 availableSize = msgpipe->data_buffer.Used();
             } while (!((availableSize >= recvSize) || (ASAP && (availableSize > 0))));
@@ -1866,6 +1869,10 @@ SceSize msgpipe_send(KernelState &kernel, const char *export_name, SceUID thread
                     std::atomic_fetch_add(&msgpipe->remainingThreads, static_cast<size_t>(-1));
                     return SCE_KERNEL_ERROR_WAIT_DELETE;
                 }
+                // An untimed wait ends only when data moves, which never happens
+                // once the thread has been told to exit.
+                if (thread->is_delete_requested())
+                    return SCE_KERNEL_ERROR_WAIT_DELETE;
                 msgpipe_lock.lock(); // Lock message pipe before read from data_buffer
                 freeSize = msgpipe->data_buffer.Free();
             } while (!((freeSize >= sendSize) || (ASAP && (freeSize >= 1))));

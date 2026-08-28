@@ -20,9 +20,13 @@
 #include <dynarmic/interface/A32/a32.h>
 
 #include <cpu/functions.h>
+#include <atomic>
+
 #include <cpu/impl/interface.h>
 
 #include <memory>
+#include <vector>
+#include <vector>
 
 class ArmDynarmicCallback;
 class ArmDynarmicCP15;
@@ -39,6 +43,10 @@ class DynarmicCPU : public CPUInterface {
     std::size_t core_id = 0;
 
     bool halted = false;
+#ifdef __SWITCH__
+    // Set by the watchdog before it halts this core; read once the halt lands.
+    std::atomic<bool> preempt_release_core{ false };
+#endif
     bool break_ = false;
 
     bool log_mem = false;
@@ -47,11 +55,26 @@ class DynarmicCPU : public CPUInterface {
 
     std::unique_ptr<Dynarmic::A32::Jit> make_jit();
 
+#ifdef __SWITCH__
+    // Both return whether the guest hint should also leave the JIT.
+    bool wait_for_event();
+    bool yield_hint();
+
+    std::size_t code_slice_B = 0;
+    std::uint64_t handled_capacity_recycles = 0;
+    // Superseded lean JITs parked until destruction: a cross-thread caller
+    // (invalidation, stop, a register read from the hang reporter) racing the
+    // swap then touches stale state instead of freed memory.
+    std::vector<std::unique_ptr<Dynarmic::A32::Jit>> retired_jits;
+    void maybe_grow_code_cache();
+#endif
+
 public:
     DynarmicCPU(CPUState *state, std::size_t processor_id, bool cpu_opt);
     ~DynarmicCPU() override;
     int run() override;
     void stop() override;
+    void preempt(bool release_core) override;
 
     uint32_t get_reg(uint8_t idx) override;
     void set_reg(uint8_t idx, uint32_t val) override;

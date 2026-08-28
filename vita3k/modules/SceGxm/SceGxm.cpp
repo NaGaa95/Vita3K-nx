@@ -19,6 +19,8 @@
 
 #include <modules/module_parent.h>
 
+
+#include <chrono>
 #include <span>
 #include <stack>
 #if defined(__x86_64__) && !defined(__APPLE__)
@@ -44,6 +46,7 @@
 #include <util/align.h>
 #include <util/bytes.h>
 #include <util/log.h>
+#include <util/switch_thread.h>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceGxm);
@@ -893,6 +896,8 @@ std::string to_debug_str<SceGxmTransferFlags>(const MemState &mem, SceGxmTransfe
 }
 
 static void display_entry_thread(EmuEnvState &emuenv) {
+    switch_pin_to_hardware_priority("GXM display thread", 46);
+
     auto &display_queue = emuenv.gxm.display_queue;
     const Address callback_address = emuenv.gxm.params.displayQueueCallback.address();
     const ThreadStatePtr display_thread = emuenv.kernel.get_thread(emuenv.gxm.display_queue_thread);
@@ -1039,11 +1044,23 @@ struct SceGxmContext {
         while (cmd != command_list->list->last) {
             renderer::Command *next = cmd->next;
             renderer::destroy_command_payload(*cmd);
-            free(cmd);
+#ifdef __SWITCH__
+            renderer::generic_command_free(cmd);
+#else
+    #ifdef __SWITCH__
+        renderer::generic_command_free(cmd);
+#else
+        free(cmd);
+#endif
+#endif
             cmd = next;
         }
         renderer::destroy_command_payload(*cmd);
+#ifdef __SWITCH__
+        renderer::generic_command_free(cmd);
+#else
         free(cmd);
+#endif
         free(command_list->list);
 
         // we also need to delete all ranges occupied by this list
@@ -1138,9 +1155,9 @@ struct SceGxmContext {
         return true;
     }
 
-    std::uint8_t *linearly_allocate(KernelState &kern, const MemState &mem, const SceUID thread_id, const std::uint32_t size) {
+    bool advance_vdm_tracking(KernelState &kern, const MemState &mem, const SceUID thread_id) {
         if (state.type != SCE_GXM_CONTEXT_TYPE_DEFERRED) {
-            return nullptr;
+            return false;
         }
 
         // allocate 4 bytes in the vdm memory to make it look like the vdm buffer is getting used
@@ -1149,11 +1166,18 @@ struct SceGxmContext {
 
         if (alloc_space.address() + allocated_on_vdm > alloc_space_end.address()) {
             if (!make_new_alloc_space(kern, mem, thread_id, true)) {
-                return nullptr;
+                return false;
             }
         }
 
         alloc_space = alloc_space + allocated_on_vdm;
+        return true;
+    }
+
+    std::uint8_t *linearly_allocate(KernelState &kern, const MemState &mem, const SceUID thread_id, const std::uint32_t size) {
+        if (!advance_vdm_tracking(kern, mem, thread_id)) {
+            return nullptr;
+        }
 
         // the data returned is not part of the vita memory (our commands are too big and do not fit)
         return static_cast<uint8_t *>(malloc(size));
@@ -1174,11 +1198,25 @@ struct SceGxmContext {
                 new_command = alloc_space.cast<renderer::Command>().get(mem) + offset;
                 new (new_command) renderer::Command;
             } else {
+#ifdef __SWITCH__
+                // Pool nodes are recycled, so reset before reuse.
+                new_command = renderer::generic_command_allocate();
+                new (new_command) renderer::Command;
+#else
                 new_command = new renderer::Command;
+#endif
                 new_command->flags |= renderer::Command::FLAG_FROM_HOST;
             }
         } else {
+#ifdef __SWITCH__
+            if (!advance_vdm_tracking(kern, mem, current_thread_id))
+                return nullptr;
+            new_command = renderer::generic_command_allocate();
+#else
             new_command = linearly_allocate<renderer::Command>(kern, mem, current_thread_id);
+#endif
+            if (!new_command)
+                return nullptr;
 
             new (new_command) renderer::Command;
             new_command->flags |= renderer::Command::FLAG_NO_FREE;
@@ -1190,7 +1228,11 @@ struct SceGxmContext {
     void free_new_command(renderer::Command *cmd) {
         if (!(cmd->flags & renderer::Command::FLAG_NO_FREE)) {
             if (cmd->flags & renderer::Command::FLAG_FROM_HOST) {
+#ifdef __SWITCH__
+                renderer::generic_command_free(cmd);
+#else
                 delete cmd;
+#endif
             } else {
                 command_last_free_pos.fetch_add(1, std::memory_order_release);
             }
@@ -1219,7 +1261,11 @@ static void destroy_pending_deferred_command_chain(renderer::CommandList &comman
     while (cmd) {
         renderer::Command *next = cmd->next;
         renderer::destroy_command_payload(*cmd);
+#ifdef __SWITCH__
+        renderer::generic_command_free(cmd);
+#else
         free(cmd);
+#endif
         cmd = next;
     }
 
@@ -1556,6 +1602,12 @@ EXPORT(void, sceGxmSetDefaultRegionClipAndViewport, SceGxmContext *context, uint
 }
 
 static void gxmContextStateRestore(renderer::State &state, SceGxmContext *context, const bool sync_viewport_and_clip) {
+#ifdef __SWITCH__
+    // The restore below re-emits every piece of state and thereby refills the
+    // dedup cache, after which redundant re-sets can be skipped again.
+    context->renderer->clear_emission_dedup();
+    context->renderer->emission_dedup_valid = true;
+#endif
     if (sync_viewport_and_clip) {
         renderer::set_region_clip(state, context->renderer.get(), SCE_GXM_REGION_CLIP_OUTSIDE,
             context->state.region_clip_min.x, context->state.region_clip_max.x, context->state.region_clip_min.y,
@@ -1672,6 +1724,13 @@ EXPORT(int, sceGxmBeginCommandList, SceGxmContext *deferredContext) {
 }
 
 EXPORT(int, sceGxmBeginScene, SceGxmContext *context, uint32_t flags, const SceGxmRenderTarget *renderTarget, const SceGxmValidRegion *validRegion, SceGxmSyncObject *vertexSyncObject, Ptr<SceGxmSyncObject> fragmentSyncObject, const SceGxmColorSurface *colorSurface, const SceGxmDepthStencilSurface *depthStencil) {
+#ifdef __SWITCH__
+    if (context && context->renderer) {
+        context->renderer->clear_emission_dedup();
+        context->renderer->emission_dedup_valid = true;
+    }
+#endif
+
     TRACY_FUNC(sceGxmBeginScene, context, flags, renderTarget, validRegion, vertexSyncObject, fragmentSyncObject, colorSurface, depthStencil);
     if (!context) {
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);

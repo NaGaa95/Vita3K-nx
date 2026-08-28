@@ -98,14 +98,39 @@ bool copy_directory_contents(const fs::path &src_path, const fs::path &dst_path,
         fs::create_directories(dst_path);
 
         for (const auto &src : fs::recursive_directory_iterator(src_path)) {
+#ifdef __SWITCH__
+            // On the Horizon sdmc: devoptab, fs::relative() canonicalises (prepends
+            // getcwd -> throws) and fs::copy_file writes unreliably, so use a lexical
+            // relative path and a manual stream copy that truncates the destination.
+            (void)options;
+            const auto relative_path = fs::path(src.path()).lexically_relative(src_path);
+#else
             const auto relative_path = fs::relative(src.path(), src_path);
+#endif
             const auto output_path = dst_path / relative_path;
 
             if (fs::is_directory(src)) {
                 fs::create_directories(output_path);
             } else if (fs::is_regular_file(src)) {
                 fs::create_directories(output_path.parent_path());
+#ifdef __SWITCH__
+                {
+                    fs::ifstream in(src.path(), std::ios::in | std::ios::binary);
+                    fs::ofstream out(output_path, std::ios::out | std::ios::binary | std::ios::trunc);
+                    if (!in.is_open() || !out.is_open())
+                        return false;
+                    out << in.rdbuf();
+                    if (in.bad() || !out.good())
+                        return false;
+                    out.flush();
+                    const bool write_succeeded = out.good();
+                    out.close();
+                    if (!write_succeeded || out.fail())
+                        return false;
+                }
+#else
                 fs::copy_file(src.path(), output_path, options);
+#endif
             }
         }
 

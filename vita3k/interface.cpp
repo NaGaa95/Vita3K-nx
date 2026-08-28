@@ -174,7 +174,8 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
     const std::string theme_root_name = fallback_theme_root_name(content_path);
 
     auto output_path{ emuenv.vita_fs_path / "ux0" };
-    if (mz_zip_reader_extract_file_to_callback(zip.get(), (content_path + sfo_path).c_str(), &write_to_buffer, &buffer, 0)) {
+    const bool has_sfo = mz_zip_reader_extract_file_to_callback(zip.get(), (content_path + sfo_path).c_str(), &write_to_buffer, &buffer, 0);
+    if (has_sfo) {
         sfo::get_param_info(emuenv.app_info, buffer, emuenv.cfg.sys_lang);
         if (!set_content_path(emuenv, is_theme, output_path))
             return false;
@@ -223,7 +224,12 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
             } else {
                 fs::create_directories(file_output.parent_path());
                 LOG_INFO("Extracting {}", file_output);
-                mz_zip_reader_extract_to_file(zip.get(), i, fs_utils::path_to_utf8(file_output).c_str(), 0);
+                if (!mz_zip_reader_extract_to_file(zip.get(), i, fs_utils::path_to_utf8(file_output).c_str(), 0)) {
+                    // Half an app is not an app. Failing here is what lets the
+                    // frontend report the install as failed instead of "OK".
+                    LOG_CRITICAL("miniz error: {} extracting {}", miniz_get_error(zip), file_output);
+                    return false;
+                }
             }
         }
     }
@@ -237,6 +243,21 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
     }
     if (!copy_path(output_path, emuenv.vita_fs_path, emuenv.app_info.app_title_id, emuenv.app_info.app_category))
         return false;
+
+    // Frontends find installed content by its param.sfo. If it is not on disk the
+    // install did not land, whatever the individual steps reported, and saying so
+    // is far better than a success message and an app that never appears.
+    // copy_path moves a patch into ux0/app/<title id>, so check there for one.
+    if (has_sfo) {
+        const auto installed_root = emuenv.app_info.app_category.contains("gp")
+            ? emuenv.vita_fs_path / "ux0/app" / emuenv.app_info.app_title_id
+            : output_path;
+        if (!fs::is_regular_file(installed_root / "sce_sys" / "param.sfo")) {
+            LOG_CRITICAL("{} [{}] reported success but {} is missing", emuenv.app_info.app_title,
+                emuenv.app_info.app_title_id, (installed_root / "sce_sys" / "param.sfo").string());
+            return false;
+        }
+    }
 
     update_progress();
 
@@ -433,7 +454,7 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
         return KernelInitFailed;
     }
 
-    if (emuenv.cfg.archive_log) {
+    if (emuenv.cfg.file_logging && emuenv.cfg.archive_log) {
         const fs::path log_directory{ emuenv.log_path / "logs" };
         fs::create_directory(log_directory);
         const auto log_path{ log_directory / fs_utils::utf8_to_path(emuenv.io.title_id + " - [" + string_utils::remove_special_chars(emuenv.current_app_title) + "].log") };

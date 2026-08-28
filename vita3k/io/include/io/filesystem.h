@@ -57,6 +57,13 @@ const char *translate_open_mode(const int flags);
 
 inline FilePtr create_shared_file(const fs::path &path, const int open_mode) {
     const auto file = fopen(path.generic_path().string().c_str(), translate_open_mode(open_mode));
+#ifdef __SWITCH__
+    // fsdev reports no st_blksize, so newlib leaves stdio nearly unbuffered and
+    // every small guest read becomes a full FS-service IPC round trip. Give
+    // guest files a real buffer; large reads still bypass it.
+    if (file)
+        setvbuf(file, nullptr, _IOFBF, 256 * 1024);
+#endif
     return file ? FilePtr(file, std::fclose) : FilePtr();
 }
 

@@ -32,6 +32,9 @@ namespace {
 
 void copy_global_to_current(Config::CurrentConfig &current, const Config &cfg) {
     current.cpu_opt = cfg.cpu_opt;
+    current.switch_lsfg_enabled = cfg.switch_lsfg_enabled;
+    current.switch_lsfg_flow_scale = cfg.switch_lsfg_flow_scale;
+    current.switch_lsfg_performance = cfg.switch_lsfg_performance;
     current.modules_mode = cfg.modules_mode;
     current.lle_modules = cfg.lle_modules;
     current.backend_renderer = cfg.backend_renderer;
@@ -69,6 +72,7 @@ void copy_global_to_current(Config::CurrentConfig &current, const Config &cfg) {
     current.ime_langs = cfg.ime_langs;
     current.log_active_shaders = cfg.log_active_shaders;
     current.log_uniforms = cfg.log_uniforms;
+    current.shader_debug_dump = cfg.shader_debug_dump;
     current.color_surface_debug = cfg.color_surface_debug;
     current.validation_layer = cfg.validation_layer;
     current.tracy_primitive_impl = cfg.tracy_primitive_impl;
@@ -77,6 +81,9 @@ void copy_global_to_current(Config::CurrentConfig &current, const Config &cfg) {
 
 void copy_current_to_global(Config &cfg, const Config::CurrentConfig &current) {
     cfg.cpu_opt = current.cpu_opt;
+    cfg.switch_lsfg_enabled = current.switch_lsfg_enabled;
+    cfg.switch_lsfg_flow_scale = current.switch_lsfg_flow_scale;
+    cfg.switch_lsfg_performance = current.switch_lsfg_performance;
     cfg.modules_mode = current.modules_mode;
     cfg.lle_modules = current.lle_modules;
     cfg.backend_renderer = current.backend_renderer;
@@ -114,6 +121,7 @@ void copy_current_to_global(Config &cfg, const Config::CurrentConfig &current) {
     cfg.ime_langs = current.ime_langs;
     cfg.log_active_shaders = current.log_active_shaders;
     cfg.log_uniforms = current.log_uniforms;
+    cfg.shader_debug_dump = current.shader_debug_dump;
     cfg.color_surface_debug = current.color_surface_debug;
     cfg.validation_layer = current.validation_layer;
     cfg.tracy_primitive_impl = current.tracy_primitive_impl;
@@ -176,8 +184,16 @@ bool load_custom_config(Config::CurrentConfig &out, const fs::path &config_path,
             out.lle_modules.emplace_back(m.text().as_string());
     }
 
-    if (!config_child.child("cpu").empty())
-        out.cpu_opt = config_child.child("cpu").attribute("cpu-opt").as_bool();
+    if (!config_child.child("cpu").empty()) {
+        const auto cpu = config_child.child("cpu");
+        out.cpu_opt = cpu.attribute("cpu-opt").as_bool();
+        if (const auto value = cpu.attribute("switch-lsfg-enabled"); !value.empty())
+            out.switch_lsfg_enabled = value.as_bool();
+        if (const auto value = cpu.attribute("switch-lsfg-flow-scale"); !value.empty())
+            out.switch_lsfg_flow_scale = value.as_float(0.25f);
+        if (const auto value = cpu.attribute("switch-lsfg-performance"); !value.empty())
+            out.switch_lsfg_performance = value.as_bool(true);
+    }
 
     if (!config_child.child("gpu").empty()) {
         const auto gpu = config_child.child("gpu");
@@ -235,6 +251,7 @@ bool load_custom_config(Config::CurrentConfig &out, const fs::path &config_path,
         const auto dbg = config_child.child("debug");
         out.log_active_shaders = dbg.attribute("log-active-shaders").as_bool();
         out.log_uniforms = dbg.attribute("log-uniforms").as_bool();
+        out.shader_debug_dump = dbg.attribute("shader-debug-dump").as_bool();
         out.color_surface_debug = dbg.attribute("color-surface-debug").as_bool();
         out.validation_layer = dbg.attribute("validation-layer").as_bool(true);
     }
@@ -267,6 +284,9 @@ bool save_custom_config(const Config::CurrentConfig &cc, const fs::path &config_
 
     auto cpu_child = config_child.append_child("cpu");
     cpu_child.append_attribute("cpu-opt") = cc.cpu_opt;
+    cpu_child.append_attribute("switch-lsfg-enabled") = cc.switch_lsfg_enabled;
+    cpu_child.append_attribute("switch-lsfg-flow-scale") = cc.switch_lsfg_flow_scale;
+    cpu_child.append_attribute("switch-lsfg-performance") = cc.switch_lsfg_performance;
 
     auto gpu_child = config_child.append_child("gpu");
     gpu_child.append_attribute("backend-renderer") = cc.backend_renderer.c_str();
@@ -313,6 +333,7 @@ bool save_custom_config(const Config::CurrentConfig &cc, const fs::path &config_
     auto debug_child = config_child.append_child("debug");
     debug_child.append_attribute("log-active-shaders") = cc.log_active_shaders;
     debug_child.append_attribute("log-uniforms") = cc.log_uniforms;
+    debug_child.append_attribute("shader-debug-dump") = cc.shader_debug_dump;
     debug_child.append_attribute("color-surface-debug") = cc.color_surface_debug;
     debug_child.append_attribute("validation-layer") = cc.validation_layer;
 

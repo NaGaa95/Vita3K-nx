@@ -13,5 +13,6 @@ src/external/*	linguist-vendored
 *.vert			eol=lf
 *.h			eol=lf
 *.sh			eol=lf
+patches/submodules/*.patch text eol=lf whitespace=-blank-at-eol,-space-before-tab
 
 *.bat			eol=crlf

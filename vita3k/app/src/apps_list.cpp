@@ -28,6 +28,11 @@
 
 #include <algorithm>
 #include <array>
+#ifdef __SWITCH__
+#include <cerrno>
+#include <cstring>
+#include <dirent.h>
+#endif
 #include <cstdint>
 #include <ctime>
 #include <mutex>
@@ -51,37 +56,70 @@ static fs::path get_apps_cache_path(const EmuEnvState &emuenv) {
     return emuenv.config_path / "gui-configs" / "apps-cache.xml";
 }
 
+static bool directory_exists_noexcept(const fs::path &path) {
+    boost::system::error_code error;
+    const bool is_directory = fs::is_directory(path, error);
+    return is_directory && !error;
+}
+
 static int64_t get_path_write_time(const fs::path &path) {
-    if (!fs::exists(path))
+    boost::system::error_code error;
+    if (!fs::exists(path, error) || error)
         return -1;
 
-    try {
-        return static_cast<int64_t>(fs::last_write_time(path));
-    } catch (const std::exception &e) {
-        LOG_WARN("Failed to read timestamp for '{}': {}", path, e.what());
+    const auto write_time = fs::last_write_time(path, error);
+    if (error) {
+        LOG_WARN("Failed to read timestamp for '{}': {}", path, error.message());
         return -1;
     }
+    return static_cast<int64_t>(write_time);
 }
 
 static std::vector<AppCacheSource> collect_app_cache_sources(const EmuEnvState &emuenv) {
     const fs::path app_path{ emuenv.vita_fs_path / "ux0/app" };
-    if (!fs::exists(app_path))
+    if (!directory_exists_noexcept(app_path))
         return {};
 
     std::vector<AppCacheSource> sources;
-    for (const auto &entry : fs::directory_iterator(app_path)) {
-        if (entry.path().empty() || !fs::is_directory(entry.path()) || entry.path().filename_is_dot() || entry.path().filename_is_dot_dot())
-            continue;
-        if (entry.path().filename().string().ends_with("_dec"))
-            continue;
+    const auto append_source = [&](const fs::path &title_path) {
+        if (title_path.empty() || !directory_exists_noexcept(title_path)
+            || title_path.filename_is_dot() || title_path.filename_is_dot_dot())
+            return;
 
-        const auto title_id = entry.path().filename().generic_string();
+        const auto title_id = title_path.filename().generic_string();
+        if (title_id.ends_with("_dec"))
+            return;
+
         sources.push_back({
             .title_id = title_id,
-            .param_sfo_write_time = get_path_write_time(entry.path() / "sce_sys/param.sfo"),
-            .icon_write_time = get_path_write_time(entry.path() / "sce_sys/icon0.png"),
+            .param_sfo_write_time = get_path_write_time(title_path / "sce_sys/param.sfo"),
+            .icon_write_time = get_path_write_time(title_path / "sce_sys/icon0.png"),
         });
+    };
+
+#ifdef __SWITCH__
+    DIR *directory = opendir(app_path.generic_string().c_str());
+    if (!directory) {
+        LOG_WARN("Could not open app directory '{}': {}", app_path, std::strerror(errno));
+        return {};
     }
+    while (dirent *entry = readdir(directory)) {
+        const std::string name = entry->d_name;
+        if (name.empty() || name == "." || name == "..")
+            continue;
+        append_source(app_path / name);
+    }
+    closedir(directory);
+#else
+    boost::system::error_code error;
+    fs::directory_iterator entry(app_path, error);
+    const fs::directory_iterator end;
+    for (; !error && entry != end; entry.increment(error))
+        append_source(entry->path());
+    if (error) {
+        LOG_WARN("Stopped scanning app directory '{}': {}", app_path, error.message());
+    }
+#endif
 
     std::sort(sources.begin(), sources.end(), [](const AppCacheSource &lhs, const AppCacheSource &rhs) {
         return lhs.title_id < rhs.title_id;
@@ -239,7 +277,7 @@ bool init_apps_list(EmuEnvState &emuenv) {
 
 bool scan_apps(EmuEnvState &emuenv) {
     const fs::path app_path{ emuenv.vita_fs_path / "ux0/app" };
-    if (!fs::exists(app_path))
+    if (!directory_exists_noexcept(app_path))
         return false;
 
     const auto sources = collect_app_cache_sources(emuenv);

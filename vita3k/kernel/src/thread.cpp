@@ -29,6 +29,20 @@
 #include <memory>
 #include <sstream>
 
+#ifdef __SWITCH__
+// Not <switch.h>: it declares Mutex/Semaphore types that collide with the
+// guest kernel objects this file works with. The SVC headers stand alone.
+extern "C" {
+#include <switch/types.h>
+#include <switch/result.h>
+#include <switch/kernel/svc.h>
+#include <switch/arm/counter.h>
+}
+#endif
+
+#ifdef __SWITCH__
+#endif
+
 void ThreadSignal::wait() {
     std::unique_lock<std::mutex> lock(mutex);
     recv_cond.wait(lock, [&]() { return signaled; });
@@ -122,9 +136,7 @@ int ThreadState::init(const char *name, Ptr<const void> entry_point, int init_pr
 void ThreadState::raise_waiting_threads() {
     for (const auto &t : waiting_threads) {
         const std::unique_lock<std::mutex> lock(t->mutex);
-        assert(t->status == ThreadStatus::wait);
-        t->status = ThreadStatus::run;
-        t->status_cond.notify_all();
+        t->update_status(ThreadStatus::run, ThreadStatus::wait);
     }
     waiting_threads.clear();
 }
@@ -151,9 +163,9 @@ int ThreadState::start(SceSize arglen, const Ptr<void> argp, bool run_entry_call
 
     if (kernel.debugger.wait_for_debugger) {
         kernel.debugger.wait_for_debugger = false;
-        status = ThreadStatus::suspend;
+        status.store(ThreadStatus::suspend, std::memory_order_release);
     } else {
-        status = ThreadStatus::run;
+        status.store(ThreadStatus::run, std::memory_order_release);
     }
     status_cond.notify_one();
 
@@ -210,9 +222,9 @@ void ThreadState::run_loop() {
         if (!kernel.thread_event_end)
             return;
 
-        const ThreadStatus old_status = status;
+        const ThreadStatus old_status = status.load(std::memory_order_acquire);
         const uint32_t old_returned_value = returned_value;
-        status = ThreadStatus::run;
+        status.store(ThreadStatus::run, std::memory_order_release);
 
         lock.unlock();
         const int ret = run_callback(kernel.thread_event_end.address(), { SCE_KERNEL_THREAD_EVENT_TYPE_END, static_cast<uint32_t>(id), 0, kernel.thread_event_end_arg });
@@ -220,7 +232,7 @@ void ThreadState::run_loop() {
             LOG_WARN("Thread end event handler returned {}", log_hex(ret));
         lock.lock();
 
-        status = old_status;
+        status.store(old_status, std::memory_order_release);
         returned_value = old_returned_value;
     };
 
@@ -241,9 +253,10 @@ void ThreadState::run_loop() {
         }
 
         // Park until we have something to do.
-        if (status != ThreadStatus::run) {
+        if (status.load(std::memory_order_acquire) != ThreadStatus::run) {
             status_cond.wait(lock, [&] {
-                return status == ThreadStatus::run || delete_requested;
+                return status.load(std::memory_order_acquire) == ThreadStatus::run
+                    || delete_requested.load(std::memory_order_acquire);
             });
             continue;
         }
@@ -261,20 +274,25 @@ void ThreadState::run_loop() {
         }
 
         // Active JIT loop. Lock held on entry and exit; unlocked only around run/step.
-        while (!delete_requested && !exit_requested && !guest_returned && status == ThreadStatus::run) {
+        while (!delete_requested.load(std::memory_order_acquire) && !exit_requested && !guest_returned
+            && status.load(std::memory_order_acquire) == ThreadStatus::run) {
             const bool do_step = single_stepping;
             if (do_step)
                 single_stepping = false;
 
             lock.unlock();
-
             // Single step or run
             const int res = do_step ? step(*cpu) : run(*cpu);
 
             // handle svc call if this was what stopped the cpu
             if (cpu->svc_called) {
                 const uint32_t nid = *Ptr<uint32_t>(read_pc(*cpu) + 4).get(mem);
+                current_import_nid.store(nid, std::memory_order_relaxed);
+#ifdef __SWITCH__
+                cpu->import_serial.fetch_add(1, std::memory_order_relaxed);
+#endif
                 kernel.call_import(*cpu, nid, id);
+                current_import_nid.store(0, std::memory_order_relaxed);
                 clear_exclusive(*cpu);
             }
 
@@ -285,6 +303,15 @@ void ThreadState::run_loop() {
             lock.lock();
 
             if (do_step || suspend_requested || hit_breakpoint(*cpu)) {
+                // Breakpoints are implemented by writing BKPT into guest code, so this
+                // exception is raised both by the debugger's own breakpoints and by a
+                // BKPT the guest executes. Only the first is ever resumed; the second
+                // stops the thread for good and strands every lock it was holding, so
+                // report it instead of letting it look like an ordinary stall.
+                if (!do_step && !suspend_requested && !kernel.debugger.owns_breakpoint(read_pc(*cpu)))
+                    LOG_ERROR("Thread {} ({}) trapped on a guest breakpoint at {} (lr {}). "
+                              "Nothing can resume it.",
+                        id, name, log_hex(read_pc(*cpu)), log_hex(read_lr(*cpu)));
                 suspend_requested = false;
                 update_status(ThreadStatus::suspend);
             }
@@ -408,13 +435,13 @@ ThreadState::ThreadState(SceUID id, KernelState &kernel, MemState &mem)
 
 void ThreadState::update_status(ThreadStatus status, std::optional<ThreadStatus> expected) {
     if (expected)
-        assert(expected.value() == this->status);
+        assert(expected.value() == this->status.load(std::memory_order_acquire));
 
     // Don't apply the requested wait transition if being removed to not block deletion
-    if (status == ThreadStatus::wait && delete_requested)
+    if (status == ThreadStatus::wait && delete_requested.load(std::memory_order_acquire))
         return;
 
-    this->status = status;
+    this->status.store(status, std::memory_order_release);
     status_cond.notify_all();
 
     if (status == ThreadStatus::dormant) {
@@ -433,6 +460,22 @@ void ThreadState::suspend() {
         suspend_requested = true;
     }
     stop(*cpu);
+}
+
+void ThreadState::request_suspend() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    suspend_requested = true;
+}
+
+void ThreadState::cancel_suspend() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    suspend_requested = false;
+    // If the thread woke while the pause was in effect it will have consumed the
+    // request and parked itself in suspend. It only reaches that point from the
+    // run loop, i.e. once its wait had already completed, so releasing it to run
+    // is right - and required, or it would stay parked forever.
+    if (status.load(std::memory_order_acquire) == ThreadStatus::suspend)
+        update_status(ThreadStatus::run);
 }
 
 void ThreadState::resume(bool step) {

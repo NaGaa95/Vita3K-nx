@@ -22,6 +22,14 @@ struct TouchState {
     SDL_GamepadTouchpadEvent touchpad_buffer[8] = {};
     uint8_t finger_count = 0;
     uint8_t touchpad_finger_count = 0;
+    // ZL/ZR standing in for a press on one half of the rear panel. Indexed
+    // left, right; the id is kept for as long as the trigger is held so the
+    // guest sees one continuous contact rather than a new one every frame.
+    // The rear panel's four quadrants, indexed top-left, top-right, bottom-left,
+    // bottom-right. Each holds its touch id for as long as its button is held so
+    // the guest sees one continuous contact rather than a new one every frame.
+    bool rear_touch_held[4] = {};
+    int rear_touch_id[4] = { -1, -1, -1, -1 };
     bool is_touched[2] = { false, false };
     int curr_touch_id[2] = { 0, 0 };
     int next_touch_id = 1;
@@ -50,6 +58,8 @@ struct TouchState {
         std::fill_n(touchpad_buffer, 8, SDL_GamepadTouchpadEvent{});
         finger_count = 0;
         touchpad_finger_count = 0;
+        std::fill_n(rear_touch_held, 4, false);
+        std::fill_n(rear_touch_id, 4, -1);
         is_touched[0] = false;
         is_touched[1] = false;
         curr_touch_id[0] = 0;

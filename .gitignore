@@ -87,3 +87,21 @@ fastlane/readme.md
 
 # Copilot local config
 .github/copilot-instructions.md
+
+# Local assistant state
+/.claude/
+
+# Nintendo Switch build and packaging outputs
+/build-switch*/
+/Vita3K.nro
+/Vita3K-Launcher.nro
+/switch-launcher/build/
+/switch-launcher/dependencies/build/
+/switch-launcher/*.elf
+/switch-launcher/*.nro
+/switch-launcher/*.nacp
+/switch-launcher/*.map
+/switch-launcher/*.lst
+/switch-launcher/fwd/hbl.elf
+/switch-launcher/romfs/emu/Vita3K.nro
+/switch-launcher/romfs/emu/Vita3K.sha256

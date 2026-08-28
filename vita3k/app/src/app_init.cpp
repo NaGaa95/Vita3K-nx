@@ -167,7 +167,12 @@ static overlay::button_states poll_overlay_input(EmuEnvState &emuenv) {
 
 static void set_backend_renderer(EmuEnvState &emuenv, const std::string &backend_renderer) {
 #ifndef __APPLE__
-    emuenv.backend_renderer = (string_utils::toupper(backend_renderer) == "OPENGL")
+    const std::string normalized_backend = string_utils::toupper(backend_renderer);
+    emuenv.backend_renderer = (normalized_backend == "OPENGL"
+#ifdef __SWITCH__
+                                  || normalized_backend == "ZINK"
+#endif
+                                  )
         ? renderer::Backend::OpenGL
         : renderer::Backend::Vulkan;
 #else
@@ -278,6 +283,10 @@ bool init_paths(Root &root_paths) {
     } else {
         portable_path = exe_path / "portable" / "";
     }
+#else
+    // Switch and other platforms: no portable-directory concept (the Switch
+    // frontend sets all paths explicitly in its bootstrap).
+    fs::path portable_path = "";
 #endif
 
     if (fs::is_directory(portable_path)) {
@@ -397,12 +406,19 @@ bool init_paths(Root &root_paths) {
     }
 #endif
 
-    // Create paths for safety
-    fs::create_directories(root_paths.get_config_path());
-    fs::create_directories(root_paths.get_cache_path());
-    fs::create_directories(root_paths.get_log_path() / "shaderlog");
-    fs::create_directories(root_paths.get_log_path() / "texturelog");
-    fs::create_directories(root_paths.get_patch_path());
+    // Removable or damaged storage must not turn path setup into an uncaught
+    // filesystem exception. Individual subsystems can then fail gracefully.
+    const auto create_path = [](const fs::path &path) {
+        boost::system::error_code ec;
+        fs::create_directories(path, ec);
+        if (ec)
+            LOG_WARN("Failed to create directory {}: {}", path, ec.message());
+    };
+    create_path(root_paths.get_config_path());
+    create_path(root_paths.get_cache_path());
+    create_path(root_paths.get_log_path() / "shaderlog");
+    create_path(root_paths.get_log_path() / "texturelog");
+    create_path(root_paths.get_patch_path());
 
     const auto gui_configs_source_path = root_paths.get_static_assets_path() / "data" / "gui-configs";
     if (fs::is_directory(gui_configs_source_path)) {
@@ -413,7 +429,7 @@ bool init_paths(Root &root_paths) {
     return portable;
 }
 
-bool init(EmuEnvState &state, Config &cfg, const Root &root_paths) {
+bool init(EmuEnvState &state, Config &cfg, const Root &root_paths, bool paths_only) {
     state.cfg = std::move(cfg);
 
     state.default_path = root_paths.get_vita_fs_path();
@@ -446,6 +462,12 @@ bool init(EmuEnvState &state, Config &cfg, const Root &root_paths) {
     LOG_INFO("User cache path: {}", state.cache_path);
 #endif
     LOG_INFO("VitaFS path: {}", state.vita_fs_path);
+
+    // Switch --install path: cfg + the filesystem paths above are all install_pup/
+    // install_pkg/copy_license touch. Return before io/mem/kernel/modules/renderer
+    // so no guest pool or worker threads exist to corrupt hbloader's chainload.
+    if (paths_only)
+        return true;
 
     if (!init(state.io, state.cache_path, state.log_path, state.vita_fs_path, state.cfg.console)) {
         LOG_ERROR("Failed to initialize file system for the emulator!");

@@ -23,6 +23,8 @@
 #include <mem/block.h>
 #include <mem/ptr.h>
 
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 #include <optional>
@@ -43,6 +45,68 @@ enum class ThreadStatus {
     dormant, // Waiting for a job
     suspend, // Suspended by debugger
     wait, // Waiting to be awaken by sync object or operation
+};
+
+// Thread status waits are sometimes performed while holding the guest sync
+// primitive's mutex and sometimes while holding ThreadState::mutex. A regular
+// std::condition_variable cannot safely coordinate those different mutexes, and
+// an atomic status alone still permits a notification to land between the
+// predicate check and the wait. This wrapper uses one internal mutex for the
+// actual condition variable and handshakes with the caller's lock before it is
+// released, closing that lost-wakeup window without polling.
+class ThreadStatusCondition {
+public:
+    template <typename Lock, typename Predicate>
+    void wait(Lock &external_lock, Predicate predicate) {
+        while (!predicate()) {
+            std::unique_lock<std::mutex> signal_lock(signal_mutex);
+            if (predicate())
+                return;
+
+            external_lock.unlock();
+            signal_condition.wait(signal_lock);
+            signal_lock.unlock();
+            external_lock.lock();
+        }
+    }
+
+    template <typename Lock, typename Rep, typename Period, typename Predicate>
+    bool wait_for(Lock &external_lock, const std::chrono::duration<Rep, Period> &timeout, Predicate predicate) {
+        if (predicate())
+            return true;
+
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (!predicate()) {
+            std::unique_lock<std::mutex> signal_lock(signal_mutex);
+            if (predicate())
+                return true;
+
+            external_lock.unlock();
+            const auto result = signal_condition.wait_until(signal_lock, deadline);
+            signal_lock.unlock();
+            external_lock.lock();
+
+            if (predicate())
+                return true;
+            if (result == std::cv_status::timeout)
+                return false;
+        }
+        return true;
+    }
+
+    void notify_one() {
+        const std::lock_guard<std::mutex> lock(signal_mutex);
+        signal_condition.notify_one();
+    }
+
+    void notify_all() {
+        const std::lock_guard<std::mutex> lock(signal_mutex);
+        signal_condition.notify_all();
+    }
+
+private:
+    std::mutex signal_mutex;
+    std::condition_variable signal_condition;
 };
 
 struct ThreadSignal {
@@ -76,11 +140,20 @@ struct ThreadState {
     bool is_processing_callbacks = false;
 
     CPUStatePtr cpu;
-    ThreadStatus status = ThreadStatus::dormant;
+    // Status is observed under several different guest-primitive mutexes. Keep
+    // the value atomic; ThreadStatusCondition provides the matching wakeup
+    // ordering for waits.
+    std::atomic<ThreadStatus> status{ ThreadStatus::dormant };
+
+    // The import this thread is currently executing, 0 when it is running guest
+    // code. A thread blocked inside an HLE call keeps ThreadStatus::run and a
+    // frozen guest pc, so without this a host-side stall is indistinguishable
+    // from guest code that simply is not being scheduled.
+    std::atomic<uint32_t> current_import_nid{ 0 };
 
     ThreadSignal signal;
     std::vector<CallbackPtr> callbacks;
-    std::condition_variable status_cond;
+    ThreadStatusCondition status_cond;
     std::vector<std::shared_ptr<ThreadState>> waiting_threads;
     uint32_t returned_value = 0;
 
@@ -108,6 +181,14 @@ struct ThreadState {
 
     void suspend();
     void resume(bool step = false);
+    // For a thread that is not running when a pause begins. suspend() cannot be
+    // used on one: it asserts the thread is running and stops its CPU. These only
+    // raise and clear the request, so a thread that wakes mid-pause honours it at
+    // its next JIT re-entry instead of running on through the pause.
+    void request_suspend();
+    void cancel_suspend();
+    bool is_suspend_requested() const { return suspend_requested.load(std::memory_order_relaxed); }
+    bool is_delete_requested() const { return delete_requested.load(std::memory_order_acquire); }
     std::string log_stack_traceback() const;
 
 private:
@@ -120,9 +201,12 @@ private:
     // sceKernelExitThread (or top-level guest function return): park at dormant, thread reusable via start() / run_guest_function().
     bool exit_requested = false;
     // sceKernelExitDeleteThread (or external kill): will return from top-level run_loop(), then host thread joins.
-    bool delete_requested = false;
+    // Read by status wait predicates that do not hold ThreadState::mutex.
+    std::atomic<bool> delete_requested{ false };
     // Set by suspend(), consumed in run_loop() to transition to ThreadStatus::suspend.
-    bool suspend_requested = false;
+    // Atomic so the preemption watchdog can tell a thread the kernel is stopping
+    // from one spinning in translated code, without taking ThreadState::mutex.
+    std::atomic<bool> suspend_requested{ false };
     // Single stepping mode.
     bool single_stepping = false;
 

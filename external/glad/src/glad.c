@@ -83,7 +83,17 @@ void close_gl(void) {
     }
 }
 #else
+#if defined(__SWITCH__)
+/* GL is unused on Switch (Vulkan renderer) and newlib has no dlfcn; stub it. */
+#define RTLD_LAZY 0
+#define RTLD_NOW 0
+#define RTLD_GLOBAL 0
+static void* dlopen(const char* filename, int flag) { (void)filename; (void)flag; return 0; }
+static void* dlsym(void* handle, const char* symbol) { (void)handle; (void)symbol; return 0; }
+static int dlclose(void* handle) { (void)handle; return 0; }
+#else
 #include <dlfcn.h>
+#endif
 static void* libGL;
 
 #if !defined(__APPLE__) && !defined(__HAIKU__)

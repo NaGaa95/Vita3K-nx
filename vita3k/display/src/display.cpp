@@ -22,6 +22,7 @@
 #include <emuenv/state.h>
 #include <kernel/state.h>
 #include <renderer/state.h>
+#include <util/switch_thread.h>
 
 #include <chrono>
 #include <motion/functions.h>
@@ -36,6 +37,11 @@ static constexpr int predict_threshold = 3;
 static constexpr int max_expected_swapchain_size = 6;
 
 static void vblank_sync_thread(EmuEnvState &emuenv) {
+    // The vblank tick is tiny and periodic but its timing gates every guest thread
+    // blocked in sceCtrlReadBuffer* / sceDisplayWaitVblank, so keep it off the cores
+    // the emulator saturates when the fourth core is available.
+    switch_pin_to_helper_core("vblank thread", 44);
+
     DisplayState &display = emuenv.display;
 
     while (!display.abort.load()) {

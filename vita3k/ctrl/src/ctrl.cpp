@@ -25,6 +25,10 @@
 #include <kernel/state.h>
 #include <util/log.h>
 
+#include <atomic>
+#include <chrono>
+#include <cmath>
+
 static int reserve_port(CtrlState &state) {
     for (int i = 0; i < SCE_CTRL_MAX_WIRELESS_NUM; i++) {
         if (state.free_ports[i]) {
@@ -190,9 +194,11 @@ static float axis_to_axis(int16_t axis, const auto &mult) {
 
 static uint8_t float_to_byte(float f) {
     const auto clamped_f = std::clamp(f, -1.0f, 1.0f);
-    const auto mapped = (clamped_f * 0.5f) + 0.5f;
 
-    return static_cast<uint8_t>(mapped * 255);
+    // Truncating (f * 0.5 + 0.5) * 255 puts the neutral position at 127 and never
+    // reaches 255 at full deflection. The hardware rests at 128 and spans the
+    // whole byte, so round about that centre instead.
+    return static_cast<uint8_t>(std::lround((clamped_f + 1.0f) * 127.5f));
 }
 
 static void apply_controller(EmuEnvState &emuenv, uint32_t *buttons, float axes[4], SDL_Gamepad *controller, bool ext) {
@@ -287,7 +293,13 @@ int ctrl_get(const SceUID thread_id, EmuEnvState &emuenv, int port, SceCtrlData2
         return RET_ERROR(SCE_CTRL_ERROR_NO_DEVICE);
     }
 
-    memset(pData, 0, sizeof(SceCtrlData2) * count);
+    // The v1 entry points hand us a SceCtrlData array through a SceCtrlData2
+    // pointer. The two agree up to ry but not in size (32 vs 40 bytes), so the
+    // element stride has to follow the caller's structure: using the larger one
+    // overruns the guest buffer and writes every sample after the first at the
+    // wrong offset.
+    const size_t element_size = is_v2 ? sizeof(SceCtrlData2) : sizeof(SceCtrlData);
+    memset(pData, 0, element_size * count);
 
     CtrlState &state = emuenv.ctrl;
 
@@ -313,10 +325,11 @@ int ctrl_get(const SceUID thread_id, EmuEnvState &emuenv, int port, SceCtrlData2
     retrieve_ctrl_data(emuenv, port, is_v2, negative, from_ext, pData->buttons, pData->lx, pData->ly, pData->rx, pData->ry);
 
     for (int i = 1; i < nb_returned_data; i++) {
-        memcpy(&pData[i], &pData[0], sizeof(SceCtrlData2));
+        auto *const entry = reinterpret_cast<uint8_t *>(pData) + element_size * i;
+        memcpy(entry, pData, element_size);
 
         // update the timestamp, 1 vsync = 1/60 sec = 16 667 us earlier
-        pData[i].timeStamp -= i * 16667ULL;
+        reinterpret_cast<SceCtrlData2 *>(entry)->timeStamp -= i * 16667ULL;
     }
 
     return nb_returned_data;

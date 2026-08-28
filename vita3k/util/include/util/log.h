@@ -65,7 +65,14 @@ namespace logging {
 ExitCode init(const Root &root_paths, bool use_stdout);
 void set_level(spdlog::level::level_enum log_level);
 ExitCode add_sink(const fs::path &log_path);
+// Enable or remove file sinks after config loading. This is intended to run
+// during bootstrap, before worker threads begin logging.
+ExitCode set_file_logging_enabled(bool enabled);
 void set_log_callback(std::function<void(std::string, int)> cb);
+
+// Records where execution is, for the terminate handler to report. Stores the
+// pointer without copying, so it must be given a string literal.
+void set_crash_breadcrumb(const char *stage);
 
 } // namespace logging
 

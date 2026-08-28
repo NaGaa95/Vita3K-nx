@@ -128,13 +128,13 @@ EXPORT(SceUID, ksceKernelAllocMemBlock, const char *name, SceKernelMemBlockType 
         switch (type) {
         case SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE:
         case SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW:
-            start_address = 0x70000000U;
+            start_address = phycont_memory_start;
             break;
         case SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW:
-            start_address = 0x60000000U;
+            start_address = cdram_memory_start;
             break;
         default:
-            start_address = 0x80000000U;
+            start_address = user_main_memory_start;
             break;
         }
         address = Ptr<void>(alloc_aligned(mem, size, name, alignment, start_address));

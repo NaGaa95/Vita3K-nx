@@ -26,6 +26,11 @@ struct MemState;
 
 typedef std::function<bool(uint8_t *addr, bool write)> AccessViolationHandler;
 
+// Vita native memory bases. On Switch these high guest addresses are handled by
+// the page table (each guest page maps to an arbitrary low host page), so no
+// relocation is needed.
+constexpr Address cdram_memory_start = 0x60000000U;
+constexpr Address phycont_memory_start = 0x70000000U;
 constexpr Address user_main_memory_start = 0x80000000U;
 
 // Permission when protecting a memory range
@@ -47,13 +52,33 @@ constexpr MemPerm most_restrictive_perm(MemPerm a, MemPerm b) {
     return MemPerm::ReadWrite;
 }
 
+#ifdef __SWITCH__
+// Reserve the guest address space in the Horizon Stack region up front, before
+// the renderer and other threads fragment that region. Safe to call more than
+// once; the first successful call wins. Returns false if no contiguous slice is
+// available. init() falls back to reserving lazily if this was not called.
+bool switch_reserve_guest_region();
+// Release the established page-table backing pool. Returns false if a live
+// alias could not be removed; in that case the backing is deliberately retained
+// for a safe retry.
+bool switch_release_page_table_region();
+// Convert a host pointer (into the guest pool) back to its guest address, honoring
+// the non-linear page-table mapping. Used by Ptr(T*, mem). Returns 0 if unmapped.
+Address switch_host_to_guest(const MemState &state, const void *host);
+// Free the guest reservation + backing pool without an EmuEnvState teardown. Used
+// by the --install path before it chainloads the launcher, so hbloader has a clean
+// address space (otherwise the leaked reservation fails its next-NRO load).
+void switch_release_guest_region();
+#endif
+
 bool init(MemState &state, const bool use_page_table);
 void deinit_mem(MemState &state);
 Address alloc(MemState &state, uint32_t size, const char *name, Address start_addr = user_main_memory_start);
 Address alloc_aligned(MemState &state, uint32_t size, const char *name, unsigned int alignment, Address start_addr = user_main_memory_start);
 void protect_inner(MemState &state, Address addr, uint32_t size, const MemPerm perm);
 void unprotect_inner(MemState &state, Address addr, uint32_t size);
-bool add_protect(MemState &state, Address addr, const uint32_t size, const MemPerm perm, const ProtectCallback &callback);
+bool add_protect(MemState &state, Address addr, const uint32_t size, const MemPerm perm,
+    const ProtectCallback &callback);
 void open_access_parent_protect_segment(MemState &state, Address addr);
 void close_access_parent_protect_segment(MemState &state, Address addr);
 void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *addr_ptr);
@@ -61,6 +86,7 @@ void remove_external_mapping(MemState &mem, uint8_t *addr_ptr, uint32_t size);
 bool is_protecting(MemState &state, Address addr, MemPerm *perm = nullptr);
 bool is_valid_addr(const MemState &state, Address addr);
 bool is_valid_addr_range(const MemState &state, Address start, Address end);
+bool is_valid_addr_range_size(const MemState &state, Address start, uint64_t size);
 bool handle_access_violation(MemState &state, uint8_t *addr, bool write) noexcept;
 Block alloc_block(MemState &mem, uint32_t size, const char *name, Address start_addr = user_main_memory_start);
 Address alloc_at(MemState &state, Address address, uint32_t size, const char *name);

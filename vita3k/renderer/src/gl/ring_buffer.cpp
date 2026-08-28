@@ -62,6 +62,9 @@ std::pair<std::uint8_t *, std::size_t> RingBuffer::allocate(const std::size_t da
         }
     }
 
+    if (data_size > capacity_)
+        return std::make_pair(nullptr, static_cast<std::size_t>(-1));
+
     std::size_t offset = align(cursor_, 256);
 
     if ((offset + data_size) >= capacity_) {

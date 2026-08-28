@@ -41,6 +41,13 @@
 #include <iterator>
 #include <string>
 
+#ifdef __SWITCH__
+#include <atomic>
+#include <chrono>
+#include <thread>
+#endif
+
+
 #if defined(__aarch64__) && defined(__APPLE__)
 #define stat64 stat
 #endif
@@ -49,7 +56,27 @@
 // * Utility functions *
 // ****************************
 
+// A guest probing for a file that is not there is ordinary control flow, not a
+// failure: the caller receives ENOENT and handles it. Games poll for optional
+// files constantly - a single save-slot scan issues well over a hundred probes.
+// On Switch the logger is synchronous and flushes on error, so at ERROR level
+// every one of those probes became a blocking SD-card write. Desktop keeps the
+// original level.
+#ifdef __SWITCH__
+#define LOG_MISSING_FILE(...) LOG_TRACE(__VA_ARGS__)
+#else
+#define LOG_MISSING_FILE(...) LOG_ERROR(__VA_ARGS__)
+#endif
+
 static int io_error_impl(const int retval, const char *export_name, const char *func_name) {
+#ifdef __SWITCH__
+    // A missing file is ordinary control flow (see LOG_MISSING_FILE above);
+    // only unexpected errors earn a synchronous SD-bound WARN line.
+    if (retval == static_cast<int>(SCE_ERROR_ERRNO_ENOENT)) {
+        LOG_TRACE("{} ({}) returned {}", func_name, export_name, log_hex(retval));
+        return retval;
+    }
+#endif
     LOG_WARN("{} ({}) returned {}", func_name, export_name, log_hex(retval));
     return retval;
 }
@@ -99,38 +126,48 @@ static bool is_valid_output_path(const VitaIoDevice device) {
 }
 
 bool init(IOState &io, const fs::path &cache_path, const fs::path &log_path, const fs::path &vita_fs_path, bool redirect_stdio) {
+    bool directories_ready = true;
+    const auto create_path = [&directories_ready](const fs::path &path) {
+        boost::system::error_code ec;
+        fs::create_directories(path, ec);
+        if (ec) {
+            LOG_ERROR("Failed to create I/O directory {}: {}", path, ec.message());
+            directories_ready = false;
+        }
+    };
+
     // Iterate through the entire list of devices and create the subdirectories if they do not exist
-    boost::mp11::mp_for_each<boost::describe::describe_enumerators<VitaIoDevice>>([&vita_fs_path](auto i) {
+    boost::mp11::mp_for_each<boost::describe::describe_enumerators<VitaIoDevice>>([&](auto i) {
         if (is_valid_output_path(i.value))
-            fs::create_directories(vita_fs_path / i.name);
+            create_path(vita_fs_path / i.name);
     });
 
     const fs::path ux0{ vita_fs_path / "ux0" };
     const fs::path uma0{ vita_fs_path / "uma0" };
     const fs::path vd0{ vita_fs_path / "vd0" };
 
-    fs::create_directories(ux0 / "data");
-    fs::create_directories(ux0 / "app");
-    fs::create_directories(ux0 / "music");
-    fs::create_directories(ux0 / "picture");
-    fs::create_directories(ux0 / "theme");
-    fs::create_directories(ux0 / "video");
-    fs::create_directories(ux0 / "user");
-    fs::create_directories(uma0 / "data");
-    fs::create_directories(vd0 / "registry");
-    fs::create_directories(vd0 / "network");
+    create_path(ux0 / "data");
+    create_path(ux0 / "app");
+    create_path(ux0 / "music");
+    create_path(ux0 / "picture");
+    create_path(ux0 / "theme");
+    create_path(ux0 / "video");
+    create_path(ux0 / "user");
+    create_path(uma0 / "data");
+    create_path(vd0 / "registry");
+    create_path(vd0 / "network");
 
-    fs::create_directories(cache_path / "shaders");
-    fs::create_directory(log_path / "shaderlog");
-    fs::create_directory(log_path / "texturelog");
+    create_path(cache_path / "shaders");
+    create_path(log_path / "shaderlog");
+    create_path(log_path / "texturelog");
 
     io.redirect_stdio = redirect_stdio;
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(__SWITCH__)
     io.case_isens_find_enabled = true;
 #endif
 
-    return true;
+    return directories_ready;
 }
 
 void io_deinit(IOState &io) {
@@ -361,12 +398,12 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
                     if (!system_path.empty() && path_found) {
                         LOG_TRACE("Found file on case-sensitive filesystem at {}", system_path);
                     } else {
-                        LOG_ERROR("Missing file at {} (target path: {})", original_system_path, path);
+                        LOG_MISSING_FILE("Missing file at {} (target path: {})", original_system_path, path);
                         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
                     }
                 }
             } else {
-                LOG_ERROR("Missing file at {} (target path: {})", system_path, path);
+                LOG_MISSING_FILE("Missing file at {} (target path: {})", system_path, path);
                 return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
             }
         } else {
@@ -393,19 +430,46 @@ int read_file(void *data, IOState &io, const SceUID fd, const SceSize size, cons
 
     const auto file = io.std_files.find(fd);
     if (file != io.std_files.end()) {
+#ifdef __SWITCH__
+        // fsdev SD reads are far slower than the game card these titles were
+        // tuned for; a stalled streaming read is invisible without this.
+        const auto read_begin = std::chrono::steady_clock::now();
         const auto read = file->second.read(data, 1, size);
+        const uint64_t read_us = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - read_begin)
+                .count());
+        if (read_us > 100000)
+            LOG_WARN("[io] slow read: {} KiB in {} ms (fd {})", size >> 10,
+                read_us / 1000, log_hex(fd));
+#else
+        const auto read = file->second.read(data, 1, size);
+#endif
         LOG_TRACE_IF(log_file_op && log_file_read, "{}: Reading {} bytes of fd {}", export_name, read, log_hex(fd));
         return static_cast<int>(read);
     }
 
     const auto tty_file = io.tty_files.find(fd);
     if (tty_file != io.tty_files.end()) {
+#ifdef __SWITCH__
+        // Horizon has no console input, so std::cin returns instantly and a
+        // game polling its debug TTY spins flat out - Ratchet & Clank's
+        // FluxTTY thread burned a full core of the three this way. Real
+        // hardware blocks the reader until input arrives; pace the poll so an
+        // unfed console thread costs nothing while exit paths still see it
+        // return.
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        if (tty_file->second & TTY_IN)
+            return 0;
+        return IO_ERROR_UNK();
+#else
         if (tty_file->second == TTY_IN) {
             std::cin.read(static_cast<char *>(data), size);
             LOG_TRACE_IF(log_file_op && log_file_read, "{}: Reading terminal fd: {}, size: {}", export_name, log_hex(fd), size);
             return size;
         }
         return IO_ERROR_UNK();
+#endif
     }
 
     return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
@@ -539,12 +603,12 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
                     if (!file_path.empty() && path_found) {
                         LOG_TRACE("Found file on case-sensitive filesystem at {}", file_path);
                     } else {
-                        LOG_ERROR("Missing file at {} (target path: {})", original_file_path, file);
+                        LOG_MISSING_FILE("Missing file at {} (target path: {})", original_file_path, file);
                         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
                     }
                 }
             } else {
-                LOG_ERROR("Missing file at {} (target path: {})", file_path, file);
+                LOG_MISSING_FILE("Missing file at {} (target path: {})", file_path, file);
                 return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
             }
         }
@@ -568,12 +632,23 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
     struct _stati64 sb;
     if (_wstati64(file_path.generic_path().wstring().c_str(), &sb) < 0)
         return IO_ERROR_UNK();
+#elif defined(__SWITCH__)
+    // newlib has no stat64; struct stat is already 64-bit with _FILE_OFFSET_BITS=64.
+    struct stat sb;
+    if (stat(file_path.generic_path().string().c_str(), &sb) < 0)
+        return IO_ERROR_UNK();
 #else
     struct stat64 sb;
     if (stat64(file_path.generic_path().string().c_str(), &sb) < 0)
         return IO_ERROR_UNK();
 #endif
 
+#if defined(__SWITCH__)
+    // newlib exposes the POSIX.1-2008 timespec members (st_atim/…), not st_atime.
+    last_access_time_ticks = RTC_OFFSET + (uint64_t)sb.st_atim.tv_sec * VITA_CLOCKS_PER_SEC;
+    creation_time_ticks = RTC_OFFSET + (uint64_t)sb.st_ctim.tv_sec * VITA_CLOCKS_PER_SEC;
+    last_modification_time_ticks = RTC_OFFSET + (uint64_t)sb.st_mtim.tv_sec * VITA_CLOCKS_PER_SEC;
+#else
     last_access_time_ticks = RTC_OFFSET + (uint64_t)sb.st_atime * VITA_CLOCKS_PER_SEC;
     creation_time_ticks = RTC_OFFSET + (uint64_t)sb.st_ctime * VITA_CLOCKS_PER_SEC;
     last_modification_time_ticks = RTC_OFFSET + (uint64_t)sb.st_mtime * VITA_CLOCKS_PER_SEC;
@@ -582,6 +657,7 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
 #undef st_atime
 #undef st_mtime
 #undef st_ctime
+#endif
 #endif
 
     // report regular files as readable but not executable

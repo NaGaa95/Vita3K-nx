@@ -29,8 +29,15 @@
 #define SCE_AUDIO_OUT_MAX_VOL 32768 //!< Maximum output port volume
 #define SCE_AUDIO_VOLUME_0DB SCE_AUDIO_OUT_MAX_VOL //!< Maximum output port volume
 
+class AudioAdapter;
+
 struct AudioOutPort {
     virtual ~AudioOutPort() = default;
+
+    // Backend that created this port. This allows a failed native port to use
+    // the silent fallback without dispatching it through an incompatible
+    // adapter implementation.
+    AudioAdapter *backend = nullptr;
 
     // shutdown flag
     std::atomic<bool> stopping{ false };
@@ -81,13 +88,15 @@ public:
     virtual void switch_state(const bool pause) {}
     virtual int get_rest_sample(AudioOutPort &out_port) { return 0; };
     virtual void wake_all_ports() {}
+    virtual bool handles_output_pacing() const { return false; }
     friend struct AudioState;
 };
 
 struct AudioState {
-    //  the adapter must be before out_ports for the destructors to work correctly
-    std::unique_ptr<AudioAdapter> adapter;
+    // The mutex must outlive adapters, and adapters must outlive their ports.
     std::mutex mutex;
+    std::unique_ptr<AudioAdapter> adapter;
+    std::unique_ptr<AudioAdapter> silent_adapter;
     int next_port_id = 1;
     AudioOutPortPtrs out_ports;
     AudioInPort in_port;

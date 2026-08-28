@@ -172,7 +172,7 @@ struct KernelState {
     ThreadStatePtr get_thread(SceUID thread_id);
     Ptr<Ptr<void>> get_thread_tls_addr(MemState &mem, SceUID thread_id, int key);
 
-    bool is_threads_paused() { return !paused_threads_status.empty(); }
+    bool is_threads_paused() { return threads_paused.load(std::memory_order_acquire); }
     void pause_threads();
     void resume_threads();
 
@@ -190,4 +190,5 @@ struct KernelState {
 private:
     std::atomic<SceUID> next_uid{ 1 };
     std::map<SceUID, ThreadStatus> paused_threads_status;
+    std::atomic<bool> threads_paused{ false };
 };

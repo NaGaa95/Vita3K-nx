@@ -24,6 +24,9 @@
 
 #include <pugixml.hpp>
 
+#include <cstring>
+#include <vector>
+
 namespace np::trophy {
 Context::Context(const CommunicationID &comm_id, IOState *io, const SceUID trophy_stream, const std::string &output_progress_path)
     : comm_id(comm_id)
@@ -181,48 +184,44 @@ void Context::save_trophy_progress_file() {
     close_file(*io, output, "save_trophy_progress_file");
 }
 
-bool Context::load_trophy_progress_file(const SceUID &progress_input_file) {
-    // Check magic
-    std::uint32_t magic;
-    auto read_stuff = [&](void *data, std::uint32_t amount) -> int {
-        return read_file(data, *io, progress_input_file, amount, "load_trophy_progress_file");
+bool Context::load_trophy_progress_data(const uint8_t *data, size_t size) {
+    size_t offset = 0;
+    const auto take = [&](void *dest, size_t amount) -> bool {
+        if (size - offset < amount)
+            return false;
+        std::memcpy(dest, data + offset, amount);
+        offset += amount;
+        return true;
     };
 
-    if (read_stuff(&magic, 4) != 4 || magic != TROPHY_USR_MAGIC)
+    std::uint32_t magic = 0;
+    if (!take(&magic, 4) || magic != TROPHY_USR_MAGIC)
         return false;
 
     std::fill_n(trophy_progress, (MAX_TROPHIES >> 5), 0);
-    if (read_stuff(trophy_progress, sizeof(trophy_progress)) != sizeof(trophy_progress))
+    return take(trophy_progress, sizeof(trophy_progress))
+        && take(trophy_availability, sizeof(trophy_availability))
+        && take(&group_count, 4)
+        && take(&trophy_count, 4)
+        && take(&platinum_trophy_id, 4)
+        && take(trophy_count_by_group.data(), trophy_count_by_group.size() * 4)
+        && take(unlock_timestamps.data(), unlock_timestamps.size() * 8)
+        && take(trophy_kinds.data(), trophy_kinds.size() * 4);
+}
+
+bool Context::load_trophy_progress_file(const SceUID &progress_input_file) {
+    // The record is fixed size, so one guest read replaces the previous
+    // field-by-field sequence and both callers share one parser.
+    constexpr size_t record_size = 4 + sizeof(TrophyFlagArray) * 2 + 4 + 4 + 4
+        + MAX_GROUPS * 4 + MAX_TROPHIES * 8 + MAX_TROPHIES * 4;
+
+    std::vector<uint8_t> buffer(record_size);
+    const int read = read_file(buffer.data(), *io, progress_input_file,
+        static_cast<std::uint32_t>(buffer.size()), "load_trophy_progress_file");
+    if (read != static_cast<int>(buffer.size()))
         return false;
 
-    if (read_stuff(trophy_availability, sizeof(trophy_availability)) != sizeof(trophy_availability))
-        return false;
-
-    // Read group count
-    if (read_stuff(&group_count, 4) != 4)
-        return false;
-
-    // Read trophy count
-    if (read_stuff(&trophy_count, 4) != 4)
-        return false;
-
-    // Read platinum trophy ID
-    if (read_stuff(&platinum_trophy_id, 4) != 4)
-        return false;
-
-    // Read trophy count by group
-    if (read_stuff(trophy_count_by_group.data(), (std::uint32_t)trophy_count_by_group.size() * 4) != (int)trophy_count_by_group.size() * 4)
-        return false;
-
-    // Read timestamps
-    if (read_stuff(unlock_timestamps.data(), (std::uint32_t)unlock_timestamps.size() * 8) != (int)unlock_timestamps.size() * 8)
-        return false;
-
-    // Read trophy type (shinyyyy!! *yes this is lord of the ring reference*)
-    if (read_stuff(trophy_kinds.data(), (std::uint32_t)trophy_kinds.size() * 4) != (int)trophy_kinds.size() * 4)
-        return false;
-
-    return true;
+    return load_trophy_progress_data(buffer.data(), buffer.size());
 }
 
 bool Context::unlock_trophy(std::int32_t id, np::NpTrophyError *err, const bool force_unlock) {

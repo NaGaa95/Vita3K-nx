@@ -41,7 +41,14 @@ public:
         if (pointer_bytes == 0) {
             addr = 0;
         } else {
-            addr = static_cast<Address>(pointer_bytes - &mem.memory[0]);
+#ifdef __SWITCH__
+            // On Switch the guest->host mapping is non-linear (page table), so the
+            // linear `host - memory` below is wrong; use the reverse page table.
+            if (mem.use_page_table)
+                addr = switch_host_to_guest(mem, pointer_bytes);
+            else
+#endif
+                addr = static_cast<Address>(pointer_bytes - &mem.memory[0]);
         }
     }
 

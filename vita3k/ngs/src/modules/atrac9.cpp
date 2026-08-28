@@ -92,6 +92,17 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
     if (state->current_byte_position_in_buffer >= bufparam.bytes_count) {
         const int32_t prev_index = state->current_buffer;
 
+        // A swap or a loop restarts the stream on a superframe boundary, so the
+        // decoder's frame index has to restart with it. Left stale, the first frame
+        // of the new buffer declares itself first-in-superframe while the decoder
+        // still believes it is mid-superframe, and LibAtrac9 rejects that and every
+        // frame after it - the stream goes silent for good. The saved state is left
+        // alone on purpose: the reload at the top of the next call restores the MDCT
+        // overlap, so a loop stays seamless. A superframe that genuinely straddles
+        // the two buffers is still mid-superframe and must not be reset.
+        if (logical->superframe_staging.empty())
+            runtime->decoder->flush();
+
         voice_lock.unlock();
         scheduler_lock.unlock();
 
@@ -310,6 +321,15 @@ bool Atrac9Module::process(KernelState &kern, const MemState &mem, const SceUID 
     bool is_finished = false;
     // call decode more data until we either have an error or reached end of data
     while (static_cast<int32_t>(logical->decoded_pcm.available_frames()) < data.parent->rack->system->granularity) {
+        // An infinitely-looped buffer with zero bytes is a stream the game has
+        // not filled yet. Decoding it wraps position 0 -> 0 without producing a
+        // frame, pinning sceNgsSystemUpdate in a spin that holds the scheduler
+        // lock - which also starves the threads that would attach the data. Pad
+        // the granule with silence and pick the stream back up once data
+        // arrives, the way the player module already waits on empty buffers.
+        const SceNgsAT9BufferParams &current_bufparam = params->buffer_params[state->current_buffer];
+        if (current_bufparam.bytes_count == 0 && current_bufparam.loop_count == -1)
+            break;
         if (!decode_more_data(kern, mem, thread_id, data, params, state, logical, runtime, scheduler_lock, voice_lock)) {
             is_finished = true;
             break;

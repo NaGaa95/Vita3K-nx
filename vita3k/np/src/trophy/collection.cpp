@@ -66,12 +66,19 @@ std::vector<std::string> list_collection_ids(const CollectionSource &source) {
     std::vector<std::string> ids;
     const fs::path conf_root = trophy_base_path(source) / "conf";
 
-    if (!fs::exists(conf_root) || fs::is_empty(conf_root))
+    // Non-throwing throughout: enumerating a missing or empty trophy directory
+    // reports ENOENT on the Switch sdmc: fsdev, and the throwing overloads would
+    // take the whole emulator down from the overlay.
+    boost::system::error_code ec;
+    fs::directory_iterator entry(conf_root, ec);
+    if (ec)
         return ids;
 
-    for (const auto &entry : fs::directory_iterator(conf_root)) {
-        if (fs::is_directory(entry))
-            ids.push_back(entry.path().filename().string());
+    for (const fs::directory_iterator end; entry != end; entry.increment(ec)) {
+        if (ec)
+            break;
+        if (fs::is_directory(entry->path(), ec) && !ec)
+            ids.push_back(entry->path().filename().string());
     }
 
     return ids;
@@ -96,26 +103,24 @@ bool load_collection(const CollectionSource &source, const std::string &np_com_i
 
     initialize_locked_progress(loaded.context);
 
-    if (fs::exists(dat_path)) {
-        const SceUID fh = open_file(*source.io,
-            loaded.context.trophy_progress_output_file_path.c_str(),
-            SCE_O_RDONLY, source.vita_fs_path, "trophy_collection");
-        if (fh < 0) {
+    boost::system::error_code path_ec;
+    if (fs::exists(dat_path, path_ec)) {
+        // Deliberately a host read rather than open_file/close_file: this runs on
+        // the frontend thread while guest threads may still be executing, and the
+        // guest descriptor table has no lock.
+        std::vector<uint8_t> progress;
+        if (!fs_utils::read_data(dat_path, progress)) {
             LOG_WARN("Failed to open TROPUSR.DAT for {}; showing all trophies as locked", np_com_id);
-        } else {
-            const bool progress_loaded = loaded.context.load_trophy_progress_file(fh);
-            close_file(*source.io, fh, "trophy_collection");
-            if (!progress_loaded) {
-                LOG_WARN("Failed to parse TROPUSR.DAT for {}; showing all trophies as locked", np_com_id);
-                initialize_locked_progress(loaded.context);
-            }
+        } else if (!loaded.context.load_trophy_progress_data(progress.data(), progress.size())) {
+            LOG_WARN("Failed to parse TROPUSR.DAT for {}; showing all trophies as locked", np_com_id);
+            initialize_locked_progress(loaded.context);
         }
     } else {
         LOG_INFO("TROPUSR.DAT missing for {}; showing all trophies as locked", np_com_id);
     }
 
     const auto localized_sfm = fmt::format("TROP_{:0>2d}.SFM", source.lang);
-    const fs::path sfm_path = fs::exists(conf_path / localized_sfm)
+    const fs::path sfm_path = fs::exists(conf_path / localized_sfm, path_ec)
         ? conf_path / localized_sfm
         : conf_path / "TROP.SFM";
 
@@ -129,7 +134,7 @@ bool load_collection(const CollectionSource &source, const std::string &np_com_i
     loaded.title = root.child("title-name").text().as_string();
 
     const auto localized_icon = fmt::format("ICON0_{:0>2d}.PNG", source.lang);
-    loaded.icon_path = fs::exists(conf_path / localized_icon)
+    loaded.icon_path = fs::exists(conf_path / localized_icon, path_ec)
         ? fs_utils::path_to_utf8(conf_path / localized_icon)
         : fs_utils::path_to_utf8(conf_path / "ICON0.PNG");
 

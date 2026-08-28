@@ -912,10 +912,21 @@ find_member(std::string name, const std::vector<std::string> names, bool ignore_
     return (it != std::end(names)) ? (it - std::begin(names)) : (-1);
 }
 
+#if defined(__SWITCH__)
+// devkitA64 GCC 16.1 ICEs while emitting cleanup state for the namespace-scope
+// std::string reference temporaries below. These are immutable character sets;
+// string_view avoids dynamic initialization and provides every operation used by
+// the parser.
+CLI11_MODULE_INLINE constexpr std::string_view escapedChars("\b\t\n\f\r\"\\");
+CLI11_MODULE_INLINE constexpr std::string_view escapedCharsCode("btnfr\"\\");
+CLI11_MODULE_INLINE constexpr std::string_view bracketChars("\"'`[(<{");
+CLI11_MODULE_INLINE constexpr std::string_view matchBracketChars("\"'`])>}");
+#else
 CLI11_MODULE_INLINE const std::string &escapedChars("\b\t\n\f\r\"\\");
 CLI11_MODULE_INLINE const std::string &escapedCharsCode("btnfr\"\\");
 CLI11_MODULE_INLINE const std::string &bracketChars("\"'`[(<{");
 CLI11_MODULE_INLINE const std::string &matchBracketChars("\"'`])>}");
+#endif
 
 CLI11_INLINE bool has_escapable_character(const std::string &str) {
     return (str.find_first_of(escapedChars) != std::string::npos);

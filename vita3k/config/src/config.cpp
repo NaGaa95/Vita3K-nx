@@ -33,13 +33,24 @@
 
 #include <algorithm>
 #include <cctype>
+#ifdef __SWITCH__
+#include <cerrno>
+#include <cstring>
+#include <dirent.h>
+#endif
 #include <exception>
 #include <iostream>
 #include <vector>
 
 namespace config {
 static bool is_numeric_scalar(const YAML::Node &node) {
-    if (!node.IsScalar())
+    // A key absent from the YAML yields an *invalid* node; IsScalar()/Type() throw
+    // InvalidNode on it. IsDefined() is the only accessor that returns false instead
+    // of throwing, so check it first (|| short-circuits before IsScalar runs). Without
+    // this, a partial config.yml (e.g. one written by the Switch launcher that omits
+    // keyboard-* keys) makes has_legacy_keyboard_bindings throw and the WHOLE config
+    // is rejected — silently falling back to defaults so no setting ever applies.
+    if (!node.IsDefined() || !node.IsScalar())
         return false;
 
     const std::string value = node.Scalar();
@@ -223,23 +234,49 @@ static bool load_new_config(Config &self, const fs::path &path) {
 
 static std::set<std::string> get_file_set(const fs::path &loc, bool dirs_only = true) {
     std::set<std::string> cur_set{};
-    if (!fs::exists(loc)) {
+
+#ifdef __SWITCH__
+    DIR *directory = opendir(loc.generic_string().c_str());
+    if (!directory) {
+        if (errno != ENOENT)
+            LOG_WARN("Could not open config validation directory '{}': {}", loc, std::strerror(errno));
         return cur_set;
     }
 
-    fs::directory_iterator it{ loc };
-    while (it != fs::directory_iterator{}) {
-        if (dirs_only) {
-            if (!it->path().empty() && fs::is_directory(it->path())) {
-                cur_set.insert(it->path().stem().string());
-            }
-        } else {
-            cur_set.insert(it->path().stem().string());
-        }
+    while (dirent *entry = readdir(directory)) {
+        const std::string name = entry->d_name;
+        if (name.empty() || name == "." || name == "..")
+            continue;
 
-        boost::system::error_code err{};
-        it.increment(err);
+        const fs::path candidate = loc / name;
+        if (dirs_only) {
+            boost::system::error_code type_error;
+            if (!fs::is_directory(candidate, type_error) || type_error)
+                continue;
+        }
+        cur_set.insert(fs::path(name).stem().string());
     }
+    closedir(directory);
+#else
+    boost::system::error_code error;
+    if (!fs::is_directory(loc, error) || error)
+        return cur_set;
+
+    fs::directory_iterator entry(loc, error);
+    const fs::directory_iterator end;
+    for (; !error && entry != end; entry.increment(error)) {
+        bool include = true;
+        if (dirs_only) {
+            boost::system::error_code type_error;
+            include = fs::is_directory(entry->path(), type_error) && !type_error;
+        }
+        if (include)
+            cur_set.insert(entry->path().stem().string());
+    }
+    if (error)
+        LOG_WARN("Stopped scanning config validation directory '{}': {}", loc, error.message());
+#endif
+
     return cur_set;
 }
 
@@ -351,12 +388,15 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
        ->default_val(false)->group("Input");
     input->add_option("--self,-S", command_line.self_path, "Path to the self to run inside Title ID")
         ->default_str("eboot.bin")->group("Input");
+    // Both validators use the same installed-title set. On Switch this avoids a
+    // second SD directory scan during every bootstrap.
+    const auto installed_app_ids = get_file_set(cfg.get_vita_fs_path() / "ux0/app");
     input->add_option("--installed-path,-r", command_line.run_app_path, "Path to the installed app to run")
-        ->default_str({})->check(CLI::IsMember(get_file_set(cfg.get_vita_fs_path() / "ux0/app")))->group("Input");
+        ->default_str({})->check(CLI::IsMember(installed_app_ids))->group("Input");
     input->add_option("--recompile-shader,-s", command_line.recompile_shader_path, "Recompile the given PS Vita shader (GXP format) to SPIR_V / GLSL and quit")
         ->default_str({})->group("Input");
     input->add_option("--deleted-id,-d", command_line.delete_title_id, "Title ID of installed app to delete")
-        ->default_str({})->check(CLI::IsMember(get_file_set(cfg.get_vita_fs_path() / "ux0/app")))->group("Input");
+        ->default_str({})->check(CLI::IsMember(installed_app_ids))->group("Input");
     input->add_option("--firmware", command_line.pup_path, "Path to the firmware file (.pup extension) to install");
     auto input_pkg = input->add_option("--pkg", command_line.pkg_path, "Path to the app file (.pkg extension) to install")
         ->default_str({})->group("Input");
@@ -369,7 +409,11 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
     config->add_flag("--archive-log,-A", command_line.archive_log, "Make a duplicate of the log file with TITLE_ID and Game ID as title")
         ->group("Logging");
     config->add_option("--backend-renderer,-B", command_line.backend_renderer, "Renderer backend to use")
-        ->ignore_case()->check(CLI::IsMember(std::set<std::string>{ "OpenGL", "Vulkan" }))->group("Vita Emulation");
+        ->ignore_case()->check(CLI::IsMember(std::set<std::string>{ "OpenGL", "Vulkan"
+#ifdef __SWITCH__
+            , "Zink"
+#endif
+        }))->group("Vita Emulation");
     config->add_flag("--color-surface-debug,-C", command_line.color_surface_debug, "Save color surfaces")
         ->group("Vita Emulation");
     config->add_option("--config-location,-c", command_line.config_path, "Get a configuration file from a given location. If a filename is given, it must end with \".yml\", otherwise it will be assumed to be a directory. \nDefault loaded: <Vita3K>/config.yml \nDefaults: <Vita3K>/data/config/default.yml")
@@ -456,6 +500,11 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
     // In portable mode, override the VitaFS path to be within the portable directory
     if (portable || cfg.vita_fs_path.empty())
         cfg.set_vita_fs_path(root_paths.get_vita_fs_path());
+
+    // Logging is initialized before configuration is parsed. Apply the selected
+    // file-sink state now, before emulator worker threads are started.
+    if (logging::set_file_logging_enabled(cfg.file_logging) != Success)
+        return InitConfigFailed;
 
     if (!cfg.console) {
         LOG_INFO_IF(cfg.load_config, "Custom configuration file loaded successfully.");

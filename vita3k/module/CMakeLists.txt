@@ -11,7 +11,7 @@ if(TRACY_ENABLE_ON_CORE_COMPONENTS)
 	target_link_libraries(module PUBLIC tracy)
 endif()
 
-if(NOT ANDROID)
+if(NOT ANDROID AND NOT SWITCH)
 	add_executable(
 		module-tests
 		tests/arg_layout_tests.cpp

@@ -1295,6 +1295,15 @@ void store(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFuncti
         if (dest.bank == RegisterBank::INDEX) {
             dest.num -= 1;
 
+            // An index register holds a single 32-bit integer, and load() reads it
+            // back as a scalar without consulting the mask. A write whose mask
+            // covered several components therefore arrives here as a vector, and
+            // reinterpreting all of it as one integer is invalid SPIR-V: strict
+            // parsers reject the module rather than truncating it. Keep the first
+            // component, which is the one load() would have read back.
+            if (b.isVector(source))
+                source = b.createCompositeExtract(source, b.getContainedTypeId(b.getTypeId(source)), 0);
+
             if (!b.isIntType(source)) {
                 std::vector<spv::Id> ops{ source };
                 source = b.createOp(spv::OpBitcast, b.makeIntType(32), ops);

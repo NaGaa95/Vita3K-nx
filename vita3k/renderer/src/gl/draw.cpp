@@ -130,6 +130,11 @@ void draw(GLState &renderer, GLContext &context, const FeatureState &features, S
 
     if (memcmp(&context.previous_vert_info, &vert_ublock, sizeof(shader::RenderVertUniformBlock)) != 0) {
         std::pair<std::uint8_t *, std::size_t> allocated_buffer = context.vertex_info_uniform_buffer.allocate(sizeof(shader::RenderVertUniformBlock));
+        if (!allocated_buffer.first) {
+            LOG_ERROR("Failed to allocate vertex info uniform buffer data from GPU!");
+            return;
+        }
+
         std::memcpy(allocated_buffer.first, &vert_ublock, sizeof(shader::RenderVertUniformBlock));
 
         context.previous_vert_info = vert_ublock;
@@ -171,6 +176,11 @@ void draw(GLState &renderer, GLContext &context, const FeatureState &features, S
 
     if (memcmp(&context.previous_frag_info, &frag_ublock, sizeof(shader::RenderFragUniformBlock)) != 0) {
         std::pair<std::uint8_t *, std::size_t> allocated_buffer = context.fragment_info_uniform_buffer.allocate(sizeof(shader::RenderFragUniformBlock));
+        if (!allocated_buffer.first) {
+            LOG_ERROR("Failed to allocate fragment info uniform buffer data from GPU!");
+            return;
+        }
+
         std::memcpy(allocated_buffer.first, &frag_ublock, sizeof(shader::RenderFragUniformBlock));
 
         context.previous_frag_info = frag_ublock;
@@ -228,6 +238,12 @@ void draw(GLState &renderer, GLContext &context, const FeatureState &features, S
 
     // Restore context for normal draws
     if (context.record.is_maskupdate) {
+#ifdef __SWITCH__
+        // The draw just wrote the mask through its framebuffer; every following
+        // fragment shader reads the same texture as an image.
+        if (renderer.features.use_mask_bit)
+            glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+#endif
         sync_depth_data(context.record);
         sync_stencil_data(context.record, mem);
         glBindFramebuffer(GL_FRAMEBUFFER, context.current_framebuffer);

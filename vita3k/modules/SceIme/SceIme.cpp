@@ -25,7 +25,7 @@
 
 #include <util/lock_and_find.h>
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__SWITCH__)
 #include <ime/keyboard.h>
 #endif
 
@@ -49,7 +49,7 @@ EXPORT(SceInt32, sceImeClose) {
         free(emuenv.mem, emuenv.ime.param.inputTextBuffer.address());
     emuenv.ime.param.inputTextBuffer = Ptr<SceWChar16>();
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__SWITCH__)
     ime::set_keyboard_active(false);
 #endif
 
@@ -92,7 +92,7 @@ EXPORT(SceInt32, sceImeOpen, SceImeParam *param) {
     emuenv.ime.event_id = SCE_IME_EVENT_OPEN;
     emuenv.ime.state = true;
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__SWITCH__)
     ime::set_keyboard_active(true);
 #endif
 

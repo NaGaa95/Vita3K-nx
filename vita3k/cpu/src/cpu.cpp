@@ -64,6 +64,10 @@ void stop(CPUState &state) {
     state.cpu->stop();
 }
 
+void preempt(CPUState &state, const bool release_core) {
+    state.cpu->preempt(release_core);
+}
+
 uint32_t read_reg(CPUState &state, size_t index) {
     return state.cpu->get_reg(index);
 }

@@ -11,7 +11,7 @@
 
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
-#elif defined(unix) || defined(__unix) || defined(__unix__)
+#elif defined(unix) || defined(__unix) || defined(__unix__) || defined(__SWITCH__)
 #include <fstream>
 #include <regex>
 #include <unistd.h>
@@ -54,7 +54,7 @@ std::string CPU::Architecture() {
         return result;
 
     return "<unknown>";
-#elif defined(unix) || defined(__unix) || defined(__unix__)
+#elif defined(unix) || defined(__unix) || defined(__unix__) || defined(__SWITCH__)
     static std::regex pattern("model name(.*): (.*)");
 
     std::string line;
@@ -100,7 +100,7 @@ int CPU::Affinity() {
         logical = -1;
 
     return logical;
-#elif defined(unix) || defined(__unix) || defined(__unix__)
+#elif defined(unix) || defined(__unix) || defined(__unix__) || defined(__SWITCH__)
     long processors = sysconf(_SC_NPROCESSORS_ONLN);
     return processors;
 #elif defined(_WIN32) || defined(_WIN64)
@@ -133,7 +133,7 @@ std::pair<int, int> CPU::TotalCores() {
         physical = -1;
 
     return std::make_pair(logical, physical);
-#elif defined(unix) || defined(__unix) || defined(__unix__)
+#elif defined(unix) || defined(__unix) || defined(__unix__) || defined(__SWITCH__)
     long processors = sysconf(_SC_NPROCESSORS_ONLN);
     return std::make_pair(processors, processors);
 #elif defined(_WIN32) || defined(_WIN64)
@@ -193,7 +193,7 @@ int64_t CPU::ClockSpeed() {
         return frequency;
 
     return -1;
-#elif defined(unix) || defined(__unix) || defined(__unix__)
+#elif defined(unix) || defined(__unix) || defined(__unix__) || defined(__SWITCH__)
     static std::regex pattern("cpu MHz(.*): (.*)");
 
     std::string line;

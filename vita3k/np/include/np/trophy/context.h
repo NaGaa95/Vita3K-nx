@@ -76,6 +76,10 @@ struct Context {
 
     void save_trophy_progress_file();
     bool load_trophy_progress_file(const SceUID &progress_input_file);
+    // Same payload, read straight from the host file system. The trophy browser
+    // uses this so it never touches the guest descriptor table, which is not
+    // synchronised against guest threads.
+    bool load_trophy_progress_data(const uint8_t *data, size_t size);
 
     int copy_file_data_from_trophy_file(const char *filename, void *buffer, SceSize *size);
     int install_trophy_conf(IOState *io, const fs::path &vita_fs_path, const std::string &np_com_id);

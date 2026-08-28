@@ -103,7 +103,7 @@ if(NOT MSVC)
 	add_compile_options(-Wformat -Werror=format-security)
 endif()
 
-if(NOT ANDROID)
+if(NOT ANDROID AND NOT SWITCH)
 	include(${CMAKE_SOURCE_DIR}/cmake/qt6.cmake)
 endif()
 
@@ -121,7 +121,7 @@ add_subdirectory(display)
 add_subdirectory(features)
 add_subdirectory(glutil)
 add_subdirectory(updater)
-if(NOT ANDROID)
+if(NOT ANDROID AND NOT SWITCH)
 	add_subdirectory(gui-qt)
 endif()
 add_subdirectory(gxm)
@@ -201,6 +201,33 @@ if(ANDROID)
 		endforeach()
 		set_target_properties(vita3k PROPERTIES LINK_FLAGS "${LIBS_TO_EXCLUDE_FLAG}")
 	endif()
+elseif(SWITCH)
+	# Nintendo Switch homebrew: a normal ELF executable (converted to .nro below),
+	# with a native SDL3 + libnx frontend mirroring the Android JNI layer.
+	add_executable(vita3k
+		switch/main_switch.cpp
+		switch/switch_state.cpp
+		switch/switch_bootstrap.cpp
+		switch/switch_installer.cpp
+		switch/switch_ime.cpp
+		switch/switch_pthread_tls.cpp
+		switch/filesystem_switch.cpp
+		switch/switch_posix_compat.c
+		interface.cpp
+		performance.cpp
+	)
+	target_include_directories(vita3k PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+	target_link_libraries(vita3k PRIVATE SDL3::SDL3 pugixml::pugixml crypto)
+	# libnx exposes only twelve process-wide pthread TLS keys. Vita3K's static
+	# dependencies (libgcc/libstdc++, SDL, OpenSSL and Mesa's Rust runtime) need
+	# more than that, and libstdc++'s __cxa_thread_atexit path does not handle an
+	# exhausted key table safely. Route the four key APIs through the Switch TLS
+	# multiplexer so they share one native libnx slot.
+	target_link_options(vita3k PRIVATE
+		-Wl,--wrap=pthread_key_create
+		-Wl,--wrap=pthread_key_delete
+		-Wl,--wrap=pthread_getspecific
+		-Wl,--wrap=pthread_setspecific)
 else()
 	add_executable(vita3k MACOSX_BUNDLE main.cpp interface.cpp interface.h performance.cpp)
 endif()
@@ -210,15 +237,51 @@ if(WIN32)
 	target_sources(vita3k PRIVATE util/src/vc_runtime_checker.cpp)
 endif()
 
-target_link_libraries(vita3k PRIVATE app audio compat config cppcommon ctrl dialog display ime lang gdbstub gxm io miniz modules motion packages patch renderer shader touch util psvpfsparser)
-if(NOT ANDROID)
+target_link_libraries(vita3k PRIVATE app audio compat config cppcommon ctrl dialog display ime lang gdbstub gxm io miniz modules motion np packages patch renderer shader touch util psvpfsparser)
+if(NOT ANDROID AND NOT SWITCH)
 	target_link_libraries(vita3k PRIVATE gui-qt)
+endif()
+
+if(SWITCH)
+	# Link libnx last and package the ELF into a .nro. The NintendoSwitch platform
+	# already appends -lnx via NX_STANDARD_LIBRARIES, but the renderer/JIT also use
+	# libnx APIs (nwindow, jit, applet), so make the dependency explicit.
+	target_link_libraries(vita3k PRIVATE nx)
+	if(SWITCH_VULKAN_LINK_DEPENDS)
+		set_property(TARGET vita3k APPEND PROPERTY LINK_DEPENDS ${SWITCH_VULKAN_LINK_DEPENDS})
+	endif()
+
+	# Build the homebrew .nro (icon + nacp + romfs with builtin shaders/data).
+	# The romfs dir must exist at configure time for nx_create_nro's validation;
+	# it is populated by the POST_BUILD step below (which runs before elf2nro,
+	# since the nro target depends on the vita3k executable).
+	set(VITA3K_SWITCH_ROMFS "${CMAKE_CURRENT_BINARY_DIR}/romfs")
+	file(MAKE_DIRECTORY "${VITA3K_SWITCH_ROMFS}")
+	add_custom_command(TARGET vita3k POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E make_directory "${VITA3K_SWITCH_ROMFS}"
+		COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/data" "${VITA3K_SWITCH_ROMFS}/data"
+		COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/vita3k/shaders-builtin" "${VITA3K_SWITCH_ROMFS}/shaders-builtin"
+		# The overlay dialogs load their button glyphs from romfs:/icons at runtime.
+		COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/vita3k/icons" "${VITA3K_SWITCH_ROMFS}/icons"
+		COMMENT "Staging Switch romfs (data + builtin shaders + icons)")
+
+	nx_generate_nacp(
+		OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/vita3k.nacp"
+		NAME "Vita3K"
+		AUTHOR "Vita3K team"
+		VERSION "${VITA3K_APP_VERSION}")
+
+	nx_create_nro(vita3k
+		NACP "${CMAKE_CURRENT_BINARY_DIR}/vita3k.nacp"
+		ICON "${CMAKE_CURRENT_SOURCE_DIR}/Vita3K.jpg"  # elf2nro requires a 256x256 JPEG
+		ROMFS "${VITA3K_SWITCH_ROMFS}"
+		OUTPUT "${CMAKE_BINARY_DIR}/Vita3K.nro")
 endif()
 if(USE_DISCORD_RICH_PRESENCE)
 	target_link_libraries(vita3k PRIVATE discord-rpc)
 endif()
 
-if(NOT ANDROID)
+if(NOT ANDROID AND NOT SWITCH)
 	file(GLOB VITA3K_QT_TS_FILES CONFIGURE_DEPENDS
 		"${CMAKE_SOURCE_DIR}/i18n/qt/*.ts")
 	set(VITA3K_QT_QM_DIR "${CMAKE_BINARY_DIR}/qt_translations")

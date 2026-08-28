@@ -27,6 +27,11 @@ struct CPUInterface {
 
     virtual int run() = 0;
     virtual void stop() = 0;
+    // Force the core out of translated code at the next block boundary. Safe to
+    // call from another thread, and a no-op for a core that cannot be preempted.
+    // release_core asks the thread to sleep rather than yield, which is the only
+    // way a lower-priority thread ever gets to run on a strict-priority kernel.
+    virtual void preempt(bool release_core) {}
 
     virtual uint32_t get_reg(uint8_t idx) = 0;
     virtual void set_reg(uint8_t idx, uint32_t val) = 0;

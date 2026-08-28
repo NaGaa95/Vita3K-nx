@@ -1,0 +1,29 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6c78b0c647ce6d867b55bc8ef6a96799793f5da2..ced1fe67896b6849d8dfa82f6eaf8aea1ad85c48 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -4,6 +4,24 @@ endif()
+ 
+ add_library(${FFMPEG_CORE_NAME} INTERFACE)
+ 
++if(SWITCH)
++	# Use the devkitPro switch-ffmpeg portlib (already cross-compiled for aarch64).
++	# Headers live in portlibs/switch/include (on the toolchain include path); the
++	# static libs are under portlibs/switch/lib.
++	target_link_libraries(${FFMPEG_CORE_NAME} INTERFACE
++		"${SWITCH_PORTLIBS}/lib/libavformat.a"
++		"${SWITCH_PORTLIBS}/lib/libavcodec.a"
++		"${SWITCH_PORTLIBS}/lib/libavfilter.a"
++		"${SWITCH_PORTLIBS}/lib/libswscale.a"
++		"${SWITCH_PORTLIBS}/lib/libswresample.a"
++		"${SWITCH_PORTLIBS}/lib/libavutil.a"
++		# Codec/demuxer dependencies the portlib libav* were built against.
++		"${SWITCH_PORTLIBS}/lib/libdav1d.a"
++		"${SWITCH_PORTLIBS}/lib/libbz2.a"
++		"${SWITCH_PORTLIBS}/lib/libz.a")
++	return()
++endif()
++
+ target_include_directories(${FFMPEG_CORE_NAME} INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+ 
+ # Detect OS

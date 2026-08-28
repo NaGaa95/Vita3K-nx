@@ -27,8 +27,19 @@ Patches get_patches(fs::path &path, const std::string &titleid, const std::strin
     // Find a file in the path with the titleid
     Patches patches;
 
-    for (auto &entry : fs::directory_iterator(path)) {
-        auto filename = fs_utils::path_to_utf8(entry.path().filename());
+    boost::system::error_code error;
+    if (!fs::is_directory(path, error) || error)
+        return patches;
+
+    fs::directory_iterator entry(path, error);
+    const fs::directory_iterator end;
+    if (error) {
+        LOG_WARN("Failed to scan patch path {}: {}", path, error.message());
+        return patches;
+    }
+
+    for (; !error && entry != end; entry.increment(error)) {
+        auto filename = fs_utils::path_to_utf8(entry->path().filename());
         // Just in case users decide to use lowercase filenames
         std::transform(filename.begin(), filename.end(), filename.begin(), ::toupper);
 
@@ -36,7 +47,7 @@ Patches get_patches(fs::path &path, const std::string &titleid, const std::strin
 
         if ((filename.contains(titleid) && filename.ends_with(".TXT")) || is_patchlist) {
             // Read the file
-            std::ifstream file(entry.path().c_str());
+            std::ifstream file(entry->path().c_str());
             PatchHeader patch_header = PatchHeader{
                 "",
                 "eboot.bin"
@@ -68,6 +79,9 @@ Patches get_patches(fs::path &path, const std::string &titleid, const std::strin
             }
         }
     }
+
+    if (error)
+        LOG_WARN("Stopped scanning patch path {}: {}", path, error.message());
 
     LOG_INFO("Found {} patches for titleid {}", patches.size(), titleid);
 

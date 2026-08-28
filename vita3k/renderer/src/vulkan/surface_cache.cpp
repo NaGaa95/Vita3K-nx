@@ -1164,7 +1164,7 @@ bool VKSurfaceCache::check_for_surface(MemState &mem, Address source_address, Ca
         // submit this command
         vk::SubmitInfo submit_info{};
         submit_info.setCommandBuffers(surface_cmd);
-        state.general_queue.submit(submit_info, fence);
+        state.submit_general(submit_info, fence, "surface synchronization submission");
 
         // now we need to wait for the fence, then destroy it along with the command buffer
         // to prevent memory leaks
@@ -1476,7 +1476,8 @@ std::vector<uint32_t> VKSurfaceCache::dump_frame(Ptr<const void> address, uint32
     // this is a raii buffer, it will be destroyed at the end of this function
     vkutil::Buffer temp_buff(width * height * 4);
     temp_buff.init_buffer(vk::BufferUsageFlagBits::eTransferDst, vkutil::vma_mapped_alloc);
-    vk::CommandBuffer cmd_buffer = vkutil::create_single_time_command(state.device, state.general_command_pool);
+    auto one_time_command = state.create_one_time_command();
+    const vk::CommandBuffer cmd_buffer = one_time_command.buffer;
 
     // layout is general, we can directly copy from it
     vk::BufferImageCopy image_copy{
@@ -1490,7 +1491,7 @@ std::vector<uint32_t> VKSurfaceCache::dump_frame(Ptr<const void> address, uint32
     cmd_buffer.copyImageToBuffer(info.texture.image, vk::ImageLayout::eGeneral, temp_buff.buffer, image_copy);
 
     // this will cause a waitIdle, not an issue
-    vkutil::end_single_time_command(state.device, state.general_queue, state.general_command_pool, cmd_buffer);
+    state.submit_one_time_command(std::move(one_time_command));
 
     memcpy(frame.data(), temp_buff.mapped_data, frame.size() * 4);
 

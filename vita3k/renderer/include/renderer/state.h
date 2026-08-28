@@ -123,6 +123,10 @@ struct State {
 
     std::unique_ptr<std::thread> render_thread;
     std::atomic<bool> render_abort{ false };
+    // Set when the Vulkan device is lost (GPU fault). No further frame can
+    // be produced; the frontend closes the session cleanly instead of letting
+    // the failed submit unwind into std::terminate.
+    std::atomic<bool> device_lost{ false };
 
     std::vector<ShadersHash> precompile_queue;
     bool precompile_requested = false;
@@ -142,6 +146,7 @@ struct State {
     // Non-owning pointer to the overlay display manager
     overlay::display_manager *overlay_manager = nullptr;
     bool show_compile_shaders = true;
+    bool shader_debug_dump = false;
 
     uint32_t m_shaders_compiled_count = 0;
     std::chrono::steady_clock::time_point m_shaders_compiled_time{};

@@ -41,10 +41,48 @@
 #endif
 
 #include <array>
+#include <cstdlib>
 #include <mutex>
 #include <string_view>
+#include <vector>
+
+#ifdef __SWITCH__
+#include <fstream>
+#include <string>
+#endif
 
 namespace renderer::gl {
+
+#ifdef __SWITCH__
+static std::string_view switch_gl_driver() {
+    const char *driver = std::getenv("MESA_SWITCH_GL_DRIVER");
+    return driver ? std::string_view(driver) : std::string_view("unknown");
+}
+
+// Nouveau returns wrong data from imageLoad in a fragment shader that also
+// declares samplers, so the mask test at the end of every generated fragment
+// shader discards the whole draw for any multi-texture material. The mask bit
+// is only used by homebrew and the Android backend already ships without it,
+// so native OpenGL drops it too. Zink is unaffected and keeps it.
+static bool switch_mask_bit_enabled() {
+    static const bool enabled = [] {
+        if (switch_gl_driver() != "nvc0")
+            return true;
+
+        std::string requested;
+        if (const char *from_environment = std::getenv("VITA3K_GL_MASK_BIT")) {
+            requested = from_environment;
+        } else {
+            std::ifstream override_file("sdmc:/switch/vita3k/gl_mask_bit.txt");
+            if (override_file)
+                override_file >> requested;
+        }
+        return requested == "1" || requested == "on" || requested == "true";
+    }();
+    return enabled;
+}
+
+#endif
 
 GLContext::GLContext()
     : vertex_stream_ring_buffer(GL_ARRAY_BUFFER, MiB(128))
@@ -120,7 +158,7 @@ static void after_callback(const char *name, void *funcptr, int len_args, ...) {
     }
 }
 
-#ifndef NDEBUG
+#if !defined(NDEBUG) || defined(__SWITCH__)
 static void debug_output_callback(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length,
     const GLchar *message, const void *userParam) {
     const char *type_str = nullptr;
@@ -191,23 +229,38 @@ bool create(std::unique_ptr<State> &state, const Config &config) {
     const char *gl_shading_language_version = reinterpret_cast<const char *>(glGetString(GL_SHADING_LANGUAGE_VERSION));
     gl_shading_language_version = gl_shading_language_version ? gl_shading_language_version : "Unknown";
 
+
     LOG_INFO("GPU = {}", state->get_gpu_name());
     LOG_INFO("GL_VERSION = {}", gl_version);
     LOG_INFO("GL_SHADING_LANGUAGE_VERSION = {}", gl_shading_language_version);
 
+#if !defined(NDEBUG) || defined(__SWITCH__)
+    if (glad_glDebugMessageCallback) {
+        glEnable(GL_DEBUG_OUTPUT);
 #ifndef NDEBUG
-    glDebugMessageCallback(reinterpret_cast<GLDEBUGPROC>(debug_output_callback), nullptr);
+        // Synchronous delivery serialises the driver against every GL call, so
+        // keep it out of release builds.
+        glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
+#endif
+        glDebugMessageCallback(reinterpret_cast<GLDEBUGPROC>(debug_output_callback), nullptr);
+        glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DEBUG_SEVERITY_NOTIFICATION, 0, nullptr, GL_FALSE);
+    }
 #endif
 
     int total_extensions = 0;
     glGetIntegerv(GL_NUM_EXTENSIONS, &total_extensions);
 
+    bool support_buffer_storage = GLAD_GL_VERSION_4_4;
+    bool support_get_texture_sub_image = GLAD_GL_VERSION_4_5;
+    bool support_clear_texture = GLAD_GL_VERSION_4_4;
     std::unordered_map<std::string, bool *> check_extensions = {
+        { "GL_ARB_buffer_storage", &support_buffer_storage },
+        { "GL_ARB_clear_texture", &support_clear_texture },
         { "GL_ARB_fragment_shader_interlock", &gl_state.features.support_shader_interlock },
         { "GL_ARB_texture_barrier", &gl_state.features.support_texture_barrier },
         { "GL_EXT_shader_framebuffer_fetch", &gl_state.features.direct_fragcolor },
         { "GL_ARB_gl_spirv", &gl_state.features.spirv_shader },
-        { "GL_ARB_get_texture_sub_image", &gl_state.features.support_get_texture_sub_image },
+        { "GL_ARB_get_texture_sub_image", &support_get_texture_sub_image },
         { "GL_EXT_shader_image_load_formatted", &gl_state.features.support_unknown_format }
     };
 
@@ -220,6 +273,20 @@ bool create(std::unique_ptr<State> &state, const Config &config) {
             check_extensions.erase(find_result);
         }
     }
+
+    // This GLAD build loads these functions only as 4.4/4.5 core entry points,
+    // while Nouveau exposes them as extensions on its 4.3 context.
+    if (support_buffer_storage && !glad_glBufferStorage)
+        glad_glBufferStorage = reinterpret_cast<PFNGLBUFFERSTORAGEPROC>(s_frame->get_proc_address("glBufferStorage"));
+    if (support_get_texture_sub_image && !glad_glGetTextureSubImage)
+        glad_glGetTextureSubImage = reinterpret_cast<PFNGLGETTEXTURESUBIMAGEPROC>(s_frame->get_proc_address("glGetTextureSubImage"));
+    // Without this, native OpenGL silently clears the mask texture through a
+    // framebuffer instead of ClearTexImage, which is the one hot path where it
+    // diverges from Zink. ARB_clear_texture is always advertised by Mesa.
+    if (support_clear_texture && !glad_glClearTexImage)
+        glad_glClearTexImage = reinterpret_cast<PFNGLCLEARTEXIMAGEPROC>(s_frame->get_proc_address("glClearTexImage"));
+    gl_state.features.support_get_texture_sub_image = support_get_texture_sub_image && glad_glGetTextureSubImage;
+
 
     if (gl_state.features.direct_fragcolor) {
         LOG_INFO("Your GPU supports direct access to last fragment color. Your performance with programmable blending games will be optimized.");
@@ -234,11 +301,14 @@ bool create(std::unique_ptr<State> &state, const Config &config) {
     }
 
     // always enabled in the opengl renderer
-#ifdef __ANDROID__
+#if defined(__ANDROID__)
     gl_state.features.use_mask_bit = false;
+#elif defined(__SWITCH__)
+    gl_state.features.use_mask_bit = switch_mask_bit_enabled();
 #else
     gl_state.features.use_mask_bit = true;
 #endif
+
 
     return gl_state.init();
 }
@@ -257,11 +327,27 @@ bool GLState::init() {
 
     shader_version = fmt::format("v{}", shader::CURRENT_VERSION);
 
+#ifdef __SWITCH__
+    // The generated GLSL differs with the mask bit, and native OpenGL shares
+    // this cache directory with Zink. Keep the two in separate namespaces so
+    // neither reads the other's text.
+    if (!features.use_mask_bit)
+        shader_version += "nomask";
+#endif
+
     return true;
 }
 
 void GLState::late_init(const Config &cfg, const std::string_view game_id, MemState &mem) {
+    shader_debug_dump = cfg.current_config.shader_debug_dump;
+#ifdef __SWITCH__
+    // Same reason as the Vulkan backend: protect_inner is a no-op on Horizon, so
+    // a texture that opts out of hashing is never invalidated again. Video frames
+    // clear the size threshold for that, which froze an FMV on its first frame.
+    texture_cache.init(false, texture_folder(), game_id);
+#else
     texture_cache.init(true, texture_folder(), game_id);
+#endif
 }
 
 bool create(std::unique_ptr<Context> &context) {
@@ -384,6 +470,7 @@ void set_context(GLState &state, GLContext &context, const MemState &mem, const 
     context.self_sampling_indices.clear();
 
     glBindFramebuffer(GL_FRAMEBUFFER, context.current_framebuffer);
+
 
     if (context.record.region_clip_mode != SCE_GXM_REGION_CLIP_NONE) {
         glDisable(GL_SCISSOR_TEST);
@@ -740,7 +827,11 @@ void GLState::render_frame(DisplayState &display, const GxmState &gxm, MemState 
 
         glBindTexture(GL_TEXTURE_2D, last_texture);
 
+
+
         screen_renderer.render(vp_pos, vp_size, need_uv ? uvs : nullptr, static_cast<GLuint>(surface_handle), texture_size, default_fbo);
+
+
     }
 
     update_overlays();

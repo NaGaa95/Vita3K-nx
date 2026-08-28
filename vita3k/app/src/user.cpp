@@ -28,6 +28,12 @@
 
 #include <fmt/format.h>
 
+#ifdef __SWITCH__
+#include <cerrno>
+#include <cstring>
+#include <dirent.h>
+#endif
+
 namespace app {
 
 namespace {
@@ -55,16 +61,14 @@ void load_users(EmuEnvState &emuenv) {
     user_list.users.clear();
 
     const auto user_path = emuenv.vita_fs_path / "ux0/user";
-    if (!fs::exists(user_path) || fs::is_empty(user_path))
-        return;
-
-    for (const auto &path : fs::directory_iterator(user_path)) {
-        if (!fs::is_directory(path))
-            continue;
+    const auto load_user_directory = [&](const fs::path &path) {
+        boost::system::error_code error;
+        if (!fs::is_directory(path, error) || error)
+            return;
 
         pugi::xml_document user_xml;
-        if (!user_xml.load_file((path.path() / "user.xml").c_str()))
-            continue;
+        if (!user_xml.load_file((path / "user.xml").c_str()))
+            return;
 
         const auto user_child = user_xml.child("user");
 
@@ -72,7 +76,7 @@ void load_users(EmuEnvState &emuenv) {
         if (!user_child.attribute("id").empty())
             user_id = user_child.attribute("id").as_string();
         else
-            user_id = path.path().stem().string();
+            user_id = path.stem().string();
 
         auto &user = user_list.users[user_id];
         user.id = user_id;
@@ -95,7 +99,35 @@ void load_users(EmuEnvState &emuenv) {
 
         for (const auto &bg : user_child.child("backgrounds"))
             user.backgrounds.emplace_back(bg.text().as_string());
+    };
+
+#ifdef __SWITCH__
+    DIR *directory = opendir(user_path.generic_string().c_str());
+    if (!directory) {
+        if (errno != ENOENT)
+            LOG_WARN("Could not open user directory '{}': {}", user_path, std::strerror(errno));
+        return;
     }
+
+    while (dirent *entry = readdir(directory)) {
+        const std::string name = entry->d_name;
+        if (name.empty() || name == "." || name == "..")
+            continue;
+        load_user_directory(user_path / name);
+    }
+    closedir(directory);
+#else
+    boost::system::error_code error;
+    if (!fs::is_directory(user_path, error) || error)
+        return;
+
+    fs::directory_iterator entry(user_path, error);
+    const fs::directory_iterator end;
+    for (; !error && entry != end; entry.increment(error))
+        load_user_directory(entry->path());
+    if (error)
+        LOG_WARN("Stopped scanning user directory '{}': {}", user_path, error.message());
+#endif
 }
 
 void save_user(EmuEnvState &emuenv, const std::string &user_id) {

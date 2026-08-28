@@ -67,7 +67,11 @@ enum class AppRunType {
 };
 
 bool init_paths(Root &root_paths);
-bool init(EmuEnvState &state, Config &cfg, const Root &root_paths);
+// paths_only: set up only cfg + the filesystem paths (default_path/vita_fs_path/
+// cache_path/...) and return, skipping io/mem/kernel/modules/renderer init. Used by
+// the Switch --install path, which must not stand up any heavyweight state (guest
+// memory pool, threads) that would survive the envSetNextLoad chainload back.
+bool init(EmuEnvState &state, Config &cfg, const Root &root_paths, bool paths_only = false);
 void shutdown_app_runtime(EmuEnvState &state);
 void reset_app_state(EmuEnvState &state);
 bool late_init(EmuEnvState &state);

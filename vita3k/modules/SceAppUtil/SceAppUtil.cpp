@@ -163,7 +163,13 @@ EXPORT(int, sceAppUtilBgdlGetStatus) {
 
 static bool is_addcont_exist(EmuEnvState &emuenv, const SceChar8 *path) {
     const auto drm_content_id_path{ emuenv.vita_fs_path / "ux0" / emuenv.io.device_paths.addcont0 / reinterpret_cast<const char *>(path) };
-    return (fs::exists(drm_content_id_path) && (!fs::is_empty(drm_content_id_path)));
+    // Non-throwing: the Switch sdmc: fsdev reports an error for a missing or
+    // empty directory rather than answering, and the throwing overloads abort.
+    boost::system::error_code ec;
+    if (!fs::exists(drm_content_id_path, ec))
+        return false;
+    const bool empty = fs::is_empty(drm_content_id_path, ec);
+    return !ec && !empty;
 }
 
 EXPORT(SceInt32, sceAppUtilDrmClose, const SceAppUtilDrmAddcontId *dirName, const SceAppUtilMountPoint *mountPoint) {
@@ -250,7 +256,12 @@ EXPORT(int, sceAppUtilSaveDataDataRemove, SceAppUtilSaveDataFileSlot *slot, SceA
     TRACY_FUNC(sceAppUtilSaveDataDataRemove, slot, files, fileNum, mountPoint);
     for (unsigned int i = 0; i < fileNum; i++) {
         const auto file = fs::path(construct_savedata0_path(files[i].dataPath.get(emuenv.mem)));
-        if (fs::is_regular_file(file)) {
+        // This is a guest path ("savedata0:/..."), which the host cannot stat. On
+        // Horizon the leading device name resolves to a real fsdev device lookup
+        // and the throwing overload aborts the emulator; everywhere else it just
+        // reports false. Keep that answer, without the abort.
+        boost::system::error_code file_ec;
+        if (fs::is_regular_file(file, file_ec)) {
             remove_file(emuenv.io, file.string().c_str(), emuenv.vita_fs_path, export_name);
         } else
             remove_dir(emuenv.io, file.string().c_str(), emuenv.vita_fs_path, export_name);
@@ -402,10 +413,14 @@ EXPORT(SceInt32, sceAppUtilSaveDataSlotSearch, SceAppUtilWorkBuffer *workBuf, co
     auto slotList = result->slotList.get(emuenv.mem);
     for (auto i = cond->from; i < (cond->from + cond->range); i++) {
         if (slotList) {
-            slotList[i].id = -1;
-            slotList[i].status = 0;
-            slotList[i].userParam = 0;
-            slotList[i].emptyParam = Ptr<SceAppUtilSaveDataSlotEmptyParam>(0);
+            // The work buffer holds cond->range entries, so it is indexed from
+            // zero. Using the absolute slot id here wrote cond->from entries past
+            // the end of the buffer the game supplied.
+            const auto slot_index = i - cond->from;
+            slotList[slot_index].id = -1;
+            slotList[slot_index].status = 0;
+            slotList[slot_index].userParam = 0;
+            slotList[slot_index].emptyParam = Ptr<SceAppUtilSaveDataSlotEmptyParam>(0);
         }
 
         const auto fd = open_file(emuenv.io, construct_slotparam_path(i).c_str(), SCE_O_RDONLY, emuenv.vita_fs_path, export_name);

@@ -188,9 +188,19 @@ static std::vector<ShadersHash>::iterator get_shaders_hash_index(std::vector<Sha
 }
 
 void pre_compile_program(GLState &renderer, const ShadersHash &hash) {
-    if (fs::exists(renderer.shaders_path) && !fs::is_empty(renderer.shaders_path)) {
+    const auto frag_hash_hex = convert_hash_to_hex(hash.frag);
+    const auto vert_hash_hex = convert_hash_to_hex(hash.vert);
+    const fs::path frag_name = renderer.shaders_path / fmt::format("{}-{}.frag", renderer.shader_version, frag_hash_hex);
+    const fs::path vert_name = renderer.shaders_path / fmt::format("{}-{}.vert", renderer.shader_version, vert_hash_hex);
+    boost::system::error_code ec;
+    const bool frag_exists = fs::is_regular_file(frag_name, ec) && !ec;
+    ec.clear();
+    const bool vert_exists = fs::is_regular_file(vert_name, ec) && !ec;
+
+    // Shader hashes are shared by every OpenGL backend, but generated GLSL is
+    // not. Only precompile a pair that exists in this driver's namespace.
+    if (frag_exists && vert_exists) {
         // Compile Fragment Shader
-        const auto frag_hash_hex = convert_hash_to_hex(hash.frag);
         const SharedGLObject frag_shader = compile_shader(renderer.shaders_path, renderer.shader_version,
             frag_hash_hex, "frag", GL_FRAGMENT_SHADER, renderer.fragment_shader_cache, hash.frag);
         if (!frag_shader) {
@@ -198,7 +208,6 @@ void pre_compile_program(GLState &renderer, const ShadersHash &hash) {
         }
 
         // Compile Vertex Shader
-        const auto vert_hash_hex = convert_hash_to_hex(hash.vert);
         const SharedGLObject vert_shader = compile_shader(renderer.shaders_path, renderer.shader_version,
             vert_hash_hex, "vert", GL_VERTEX_SHADER, renderer.vertex_shader_cache, hash.vert);
         if (!vert_shader) {
@@ -214,16 +223,18 @@ void pre_compile_program(GLState &renderer, const ShadersHash &hash) {
 }
 
 static SharedGLObject get_or_compile_shader(const SceGxmProgram *program, const FeatureState &features, const Sha256Hash &hash,
-    ShaderCache &cache, const GLenum type, const shader::Hints &hints, bool shader_cache, bool spirv, bool maskupdate, const fs::path &shader_cache_path, const fs::path &shader_log_path, const std::string &shader_version, uint32_t &shaders_count_compiled) {
+    ShaderCache &cache, const GLenum type, const shader::Hints &hints, bool shader_cache, bool spirv, bool maskupdate, const fs::path &shader_cache_path, const fs::path &shader_log_path, const std::string &shader_version, bool shader_debug_dump, uint32_t &shaders_count_compiled) {
     const auto cached = cache.find(hash);
     if (cached == cache.end()) {
         SharedGLObject obj = nullptr;
 
         // Need to compile new one and add it to cache
         if (features.spirv_shader && spirv) {
-            obj = compile_spirv(type, load_spirv_shader(*program, features, false, hints, maskupdate, shader_cache_path, shader_log_path, shader_version + "spv", shader_cache));
+            obj = compile_spirv(type, load_spirv_shader(*program, features, false, hints, maskupdate, shader_cache_path, shader_log_path, shader_version + "spv", shader_cache, shader_debug_dump));
         } else {
-            obj = compile_glsl(type, load_glsl_shader(*program, features, hints, maskupdate, shader_cache_path, shader_log_path, shader_version, shader_cache));
+            const std::string source = load_glsl_shader(*program, features, hints, maskupdate,
+                shader_cache_path, shader_log_path, shader_version, shader_cache, shader_debug_dump);
+            obj = compile_glsl(type, source);
         }
 
         cache.emplace(hash, obj);
@@ -268,7 +279,7 @@ SharedGLObject compile_program(GLState &renderer, GLContext &context, const GxmR
     context.shader_hints.attributes = &vertex_program_gxm.attributes;
 
     const SharedGLObject fragment_shader = get_or_compile_shader(fragment_program_gxm.program.get(mem), features, fragment_program.hash, renderer.fragment_shader_cache,
-        GL_FRAGMENT_SHADER, context.shader_hints, shader_cache, spirv, maskupdate, renderer.shaders_path, renderer.shaders_log_path, renderer.shader_version, renderer.shaders_count_compiled);
+        GL_FRAGMENT_SHADER, context.shader_hints, shader_cache, spirv, maskupdate, renderer.shaders_path, renderer.shaders_log_path, renderer.shader_version, renderer.shader_debug_dump, renderer.shaders_count_compiled);
 
     if (!fragment_shader) {
         LOG_CRITICAL("Error in get/compile fragment vertex shader:\n{}", hex_string(fragment_program.hash));
@@ -276,7 +287,7 @@ SharedGLObject compile_program(GLState &renderer, GLContext &context, const GxmR
     }
 
     const SharedGLObject vertex_shader = get_or_compile_shader(vertex_program_gxm.program.get(mem), features, vertex_program.hash, renderer.vertex_shader_cache,
-        GL_VERTEX_SHADER, context.shader_hints, shader_cache, spirv, maskupdate, renderer.shaders_path, renderer.shaders_log_path, renderer.shader_version, renderer.shaders_count_compiled);
+        GL_VERTEX_SHADER, context.shader_hints, shader_cache, spirv, maskupdate, renderer.shaders_path, renderer.shaders_log_path, renderer.shader_version, renderer.shader_debug_dump, renderer.shaders_count_compiled);
 
     if (!vertex_shader) {
         LOG_CRITICAL("Error in get/compiled vertex shader:\n{}", hex_string(vertex_program.hash));

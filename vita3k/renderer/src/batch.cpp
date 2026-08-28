@@ -25,10 +25,17 @@
 
 #include <config/state.h>
 #include <display/state.h>
+#include <array>
 #include <functional>
 #include <overlay/display_manager.h>
 #include <overlay/shader_precompile_progress.h>
 #include <util/log.h>
+#include <util/switch_thread.h>
+#ifdef __SWITCH__
+#include <switch.h>
+
+#include <concurrentqueue.h>
+#endif
 
 #include <memory>
 #include <thread>
@@ -40,6 +47,23 @@
 struct FeatureState;
 
 namespace renderer {
+#ifdef __SWITCH__
+// Every draw allocates several commands here and the render thread frees them
+// moments later on another core, and newlib's dlmalloc serializes both behind
+// one global lock. Recycle them through a lock-free pool instead.
+static moodycamel::ConcurrentQueue<Command *> command_pool;
+
+Command *generic_command_allocate() {
+    Command *command = nullptr;
+    if (command_pool.try_dequeue(command))
+        return command;
+    return new Command;
+}
+
+void generic_command_free(Command *cmd) {
+    command_pool.enqueue(cmd);
+}
+#else
 Command *generic_command_allocate() {
     return new Command;
 }
@@ -47,6 +71,7 @@ Command *generic_command_allocate() {
 void generic_command_free(Command *cmd) {
     delete cmd;
 }
+#endif
 
 void complete_command(State &state, CommandHelper &helper, const int code) {
     auto lock = std::unique_lock(state.command_finish_one_mutex);
@@ -78,28 +103,35 @@ static renderer::SyncWaitResult wait_cmd(MemState &mem, CommandList &command_lis
 static void process_batch(renderer::State &state, const FeatureState &features, MemState &mem, Config &config, CommandList &command_list) {
     using CommandHandlerFunc = decltype(cmd_handle_set_context);
 
-    const static std::map<CommandOpcode, CommandHandlerFunc *> handlers = {
-        { CommandOpcode::SetContext, cmd_handle_set_context },
-        { CommandOpcode::SyncSurfaceData, cmd_handle_sync_surface_data },
-        { CommandOpcode::MidSceneFlush, cmd_handle_mid_scene_flush },
-        { CommandOpcode::CreateContext, cmd_handle_create_context },
-        { CommandOpcode::CreateRenderTarget, cmd_handle_create_render_target },
-        { CommandOpcode::MemoryMap, cmd_handle_memory_map },
-        { CommandOpcode::MemoryUnmap, cmd_handle_memory_unmap },
-        { CommandOpcode::Draw, cmd_handle_draw },
-        { CommandOpcode::TransferCopy, cmd_handle_transfer_copy },
-        { CommandOpcode::TransferDownscale, cmd_handle_transfer_downscale },
-        { CommandOpcode::TransferFill, cmd_handle_transfer_fill },
-        { CommandOpcode::Nop, cmd_handle_nop },
-        { CommandOpcode::SetState, cmd_handle_set_state },
-        { CommandOpcode::SignalSyncObject, cmd_handle_signal_sync_object },
-        { CommandOpcode::WaitSyncObject, cmd_handle_wait_sync_object },
-        { CommandOpcode::SignalNotification, cmd_handle_notification },
-        { CommandOpcode::SetScreenFilter, cmd_handle_set_screen_filter },
-        { CommandOpcode::NewFrame, cmd_new_frame },
-        { CommandOpcode::DestroyRenderTarget, cmd_handle_destroy_render_target },
-        { CommandOpcode::DestroyContext, cmd_handle_destroy_context }
-    };
+    using CommandHandler = CommandHandlerFunc *;
+    static const auto handlers = [] {
+        constexpr size_t handler_count = static_cast<size_t>(CommandOpcode::DestroyContext) + 1;
+        std::array<CommandHandler, handler_count> result{};
+        const auto set = [&result](CommandOpcode opcode, CommandHandler handler) {
+            result[static_cast<size_t>(opcode)] = handler;
+        };
+        set(CommandOpcode::SetContext, cmd_handle_set_context);
+        set(CommandOpcode::SyncSurfaceData, cmd_handle_sync_surface_data);
+        set(CommandOpcode::MidSceneFlush, cmd_handle_mid_scene_flush);
+        set(CommandOpcode::CreateContext, cmd_handle_create_context);
+        set(CommandOpcode::CreateRenderTarget, cmd_handle_create_render_target);
+        set(CommandOpcode::MemoryMap, cmd_handle_memory_map);
+        set(CommandOpcode::MemoryUnmap, cmd_handle_memory_unmap);
+        set(CommandOpcode::Draw, cmd_handle_draw);
+        set(CommandOpcode::TransferCopy, cmd_handle_transfer_copy);
+        set(CommandOpcode::TransferDownscale, cmd_handle_transfer_downscale);
+        set(CommandOpcode::TransferFill, cmd_handle_transfer_fill);
+        set(CommandOpcode::Nop, cmd_handle_nop);
+        set(CommandOpcode::SetState, cmd_handle_set_state);
+        set(CommandOpcode::SignalSyncObject, cmd_handle_signal_sync_object);
+        set(CommandOpcode::WaitSyncObject, cmd_handle_wait_sync_object);
+        set(CommandOpcode::SignalNotification, cmd_handle_notification);
+        set(CommandOpcode::SetScreenFilter, cmd_handle_set_screen_filter);
+        set(CommandOpcode::NewFrame, cmd_new_frame);
+        set(CommandOpcode::DestroyRenderTarget, cmd_handle_destroy_render_target);
+        set(CommandOpcode::DestroyContext, cmd_handle_destroy_context);
+        return result;
+    }();
 
     Command *cmd = command_list.first;
 
@@ -109,12 +141,13 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
             break;
         }
 
-        auto handler = handlers.find(cmd->opcode);
-        if (handler == handlers.end()) {
+        const size_t opcode = static_cast<size_t>(cmd->opcode);
+        const CommandHandler handler = opcode < handlers.size() ? handlers[opcode] : nullptr;
+        if (!handler) {
             LOG_ERROR("Unimplemented command opcode {}", static_cast<int>(cmd->opcode));
         } else {
             CommandHelper helper(cmd);
-            handler->second(state, mem, config, helper, features, command_list.context);
+            handler(state, mem, config, helper, features, command_list.context);
         }
 
         Command *last_cmd = cmd;
@@ -139,8 +172,9 @@ void process_batches(renderer::State &state, const FeatureState &features, MemSt
         if (state.async_flip_requested.load(std::memory_order_relaxed))
             return;
 
-        // Try to wait for a batch (about 2 or 3ms, game should be fast for this)
-        auto cmd_list = state.command_buffer_queue.top(3);
+        // Queue waits are expressed in microseconds. Wait about 3 ms instead of
+        // polling every 3 us, which would keep the renderer busy while idle.
+        auto cmd_list = state.command_buffer_queue.top(3000);
 
         if (!cmd_list || !is_cmd_ready(mem, *cmd_list)) {
             // beginning of the game or homebrew not using gxm
@@ -182,7 +216,14 @@ void reset_command_list(CommandList &command_list) {
 }
 
 static void render_loop(renderer::State &state, DisplayState &display, GxmState &gxm, MemState &mem, Config &config) {
+    switch_pin_to_hardware_priority("render thread", 47);
+
     if (state.precompile_requested) {
+        // Compiling the shader cache is CPU bound and only ever draws a progress
+        // bar, so trade the GPU clock for the CPU one. The guard ends with this
+        // block, before the game's first frame.
+        const SwitchCpuBoost boost("shader precompile");
+
         auto progress_overlay = state.overlay_manager
             ? state.overlay_manager->create<overlay::shader_precompile_progress>()
             : std::shared_ptr<overlay::shader_precompile_progress>();
@@ -242,39 +283,50 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
             state.swap_window();
         }
     }
-    while (!state.render_abort.load(std::memory_order_relaxed)) {
-#ifdef TRACY_ENABLE
-        ZoneScopedN("Game rendering");
-#endif
-        if (!state.set_current())
-            break;
+    try {
+        while (!state.render_abort.load(std::memory_order_relaxed)) {
+    #ifdef TRACY_ENABLE
+            ZoneScopedN("Game rendering");
+    #endif
+            if (!state.set_current())
+                break;
 
-        process_batches(state, state.features, mem, config, 500);
+            process_batches(state, state.features, mem, config, 500);
 
-        if (state.render_abort.load(std::memory_order_relaxed))
-            break;
 
-        if (state.overlay_manager) {
-            auto precompile = state.overlay_manager->get<overlay::shader_precompile_progress>();
-            if (precompile) {
-                DisplayFrameInfo peek;
-                {
-                    std::lock_guard<std::mutex> guard(display.display_info_mutex);
-                    peek = display.next_rendered_frame;
-                }
-                if (peek.base) {
-                    state.overlay_manager->remove<overlay::shader_precompile_progress>();
+            if (state.render_abort.load(std::memory_order_relaxed))
+                break;
+
+            if (state.overlay_manager) {
+                auto precompile = state.overlay_manager->get<overlay::shader_precompile_progress>();
+                if (precompile) {
+                    DisplayFrameInfo peek;
+                    {
+                        std::lock_guard<std::mutex> guard(display.display_info_mutex);
+                        peek = display.next_rendered_frame;
+                    }
+                    if (peek.base) {
+                        state.overlay_manager->remove<overlay::shader_precompile_progress>();
+                    }
                 }
             }
+
+            state.render_frame(display, gxm, mem);
+            state.swap_window();
+            state.async_flip_requested.store(false, std::memory_order_relaxed);
+
+    #ifdef TRACY_ENABLE
+            FrameMark;
+    #endif
         }
-
-        state.render_frame(display, gxm, mem);
-        state.swap_window();
-        state.async_flip_requested.store(false, std::memory_order_relaxed);
-
-#ifdef TRACY_ENABLE
-        FrameMark;
-#endif
+    } catch (const std::exception &e) {
+        // A lost Vulkan device cannot produce another frame, and letting the
+        // failed submit unwind into std::terminate tears the process down under
+        // every other thread. Flag the session to close cleanly instead.
+        LOG_CRITICAL("Render thread stopped: {}", e.what());
+        state.render_abort = true;
+        state.device_lost.store(true, std::memory_order_release);
+        state.command_finish_one.notify_all();
     }
 
     state.done_current();

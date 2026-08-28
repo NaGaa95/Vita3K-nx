@@ -23,6 +23,11 @@
 #include <renderer/functions.h>
 #include <renderer/types.h>
 #include <renderer/vulkan/functions.h>
+#ifdef __SWITCH__
+#endif
+#ifdef __SWITCH__
+#include <renderer/vulkan/lsfg.h>
+#endif
 #include <renderer/vulkan/state.h>
 
 #include <config/state.h>
@@ -43,6 +48,15 @@
 
 #ifdef __APPLE__
 #include <MoltenVK/mvk_vulkan.h>
+#endif
+
+#ifdef __SWITCH__
+// Enter native NVK through its ICD entry point, as the other Switch ports do.
+// Mesa's public loaderless vkGetInstanceProcAddr is the Zink-facing path and
+// links the lite Vulkan instance runtime, which assumes that Gallium already
+// owns the GLSL type singleton. Native Vita3K does not have that owner.
+extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName);
+#include <xxhash.h>
 #endif
 
 #ifdef __ANDROID__
@@ -78,6 +92,18 @@ decltype(AHardwareBuffer_unlock) *_AHardwareBuffer_unlock;
 decltype(AHardwareBuffer_release) *_AHardwareBuffer_release;
 #endif
 
+#ifdef __SWITCH__
+// Small enough to avoid clobbering unrelated GPU-written data when the CPU
+// changes another part of the same allocation, while keeping checksum metadata
+// modest (3.125% of the mapped range).
+// Measured at 1024: the dirty-tracking path did get ~35% faster per frame, but
+// the render thread it runs on never exceeds 35% of core 3, so none of that
+// reaches the frame rate - while the coarser granularity uploaded ~30% more
+// bytes per frame, competing for memory bandwidth with the guest cores that
+// are the actual constraint. Kept fine-grained.
+static constexpr uint32_t SWITCH_DOUBLE_BUFFER_HASH_BLOCK_SIZE = 256;
+#endif
+
 static void debug_log_message(std::string_view msg) {
     static const char *ignored_errors[] = {
         "VUID-vkCmdDrawIndexed-None-02721", // using r8g8b8a8 with non-multiple of 4 stride
@@ -100,8 +126,13 @@ static void debug_log_message(std::string_view msg) {
         }
     }
 
-    if (log_error)
+    if (log_error) {
+#ifdef __SWITCH__
+        LOG_ERROR("Vulkan driver: {}", msg);
+#else
         LOG_ERROR("Validation layer: {}", msg);
+#endif
+    }
 }
 
 static vk::DebugUtilsMessengerEXT debug_messenger;
@@ -115,6 +146,13 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_util_callback(
         && (message_type & ~vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance)) {
         debug_log_message(callback_data->pMessage);
     }
+#ifdef __SWITCH__
+    // The driver's own lifetime diagnostics arrive at Info severity; there is
+    // no validation layer here to bury them in noise.
+    else if (message_severity == vk::DebugUtilsMessageSeverityFlagBitsEXT::eInfo) {
+        LOG_INFO("Vulkan driver: {}", callback_data->pMessage);
+    }
+#endif
     return VK_FALSE;
 }
 
@@ -357,6 +395,97 @@ VKState::VKState(int gpu_idx)
     , buffer_trapping(*this) {
 }
 
+void VKState::submit_general(const vk::SubmitInfo &submit_info, vk::Fence fence, const char *stage) {
+    const std::lock_guard<std::mutex> lock(general_queue_mutex);
+    try {
+        general_queue.submit(submit_info, fence);
+    } catch (const vk::SystemError &error) {
+        LOG_CRITICAL("Vulkan {} failed: {}", stage, error.what());
+        throw;
+    }
+}
+
+void VKState::submit_general_pair(const vk::SubmitInfo &first_submit_info,
+    const vk::SubmitInfo &second_submit_info, vk::Fence second_fence) {
+    // Keep dependent submissions adjacent on the queue. In particular, the
+    // Switch NVK path needs the pre-render upload work submitted separately
+    // from, but immediately before, the render work that consumes it.
+    const std::lock_guard<std::mutex> lock(general_queue_mutex);
+    try {
+        general_queue.submit(first_submit_info);
+    } catch (const vk::SystemError &error) {
+        LOG_CRITICAL("Vulkan scene pre-render submission failed: {}", error.what());
+        throw;
+    }
+    try {
+        general_queue.submit(second_submit_info, second_fence);
+    } catch (const vk::SystemError &error) {
+        LOG_CRITICAL("Vulkan scene render submission failed: {}", error.what());
+        throw;
+    }
+}
+
+vk::Result VKState::present_general(const vk::PresentInfoKHR &present_info) {
+    const std::lock_guard<std::mutex> lock(general_queue_mutex);
+#ifdef __SWITCH__
+    return lsfg::present(*this, present_info);
+#else
+    return general_queue.presentKHR(&present_info);
+#endif
+}
+
+vk::Result VKState::submit_and_present_general(const vk::SubmitInfo &submit_info,
+    vk::Fence fence, const vk::PresentInfoKHR &present_info) {
+    // Present waits on a semaphore signalled by this submission. Keep the pair
+    // atomic with respect to worker-thread uploads and surface synchronisation.
+    const std::lock_guard<std::mutex> lock(general_queue_mutex);
+    try {
+        general_queue.submit(submit_info, fence);
+    } catch (const vk::SystemError &error) {
+        LOG_CRITICAL("Vulkan swapchain frame submission failed: {}", error.what());
+        throw;
+    }
+#ifdef __SWITCH__
+    return lsfg::present(*this, present_info);
+#else
+    return general_queue.presentKHR(&present_info);
+#endif
+}
+
+void VKState::wait_device_idle() {
+    const std::lock_guard<std::mutex> lock(general_queue_mutex);
+    // A lost device has no work left to wait for and answers every call with the
+    // same error. Teardown runs through here on the way out of a lost session, so
+    // letting it throw turns a device loss the frontend already handled into an
+    // abort - the process dies instead of returning to the launcher.
+    if (device_lost.load(std::memory_order_acquire))
+        return;
+    try {
+        device.waitIdle();
+    } catch (const vk::SystemError &error) {
+        LOG_ERROR("Vulkan device wait failed: {}", error.what());
+        device_lost.store(true, std::memory_order_release);
+    }
+}
+
+VKState::OneTimeCommand VKState::create_one_time_command() {
+    std::unique_lock<std::mutex> command_pool_lock(one_time_command_pool_mutex);
+    vk::CommandBuffer buffer = vkutil::create_single_time_command(device, one_time_command_pool);
+    return OneTimeCommand{ buffer, std::move(command_pool_lock) };
+}
+
+void VKState::submit_one_time_command(OneTimeCommand command, const char *stage) {
+    // command.command_pool_lock stays held until vkutil has submitted, waited,
+    // and freed the command buffer from the shared pool.
+    const std::lock_guard<std::mutex> queue_lock(general_queue_mutex);
+    try {
+        vkutil::end_single_time_command(device, general_queue, one_time_command_pool, command.buffer);
+    } catch (const vk::SystemError &error) {
+        LOG_CRITICAL("Vulkan {} failed: {}", stage, error.what());
+        throw;
+    }
+}
+
 bool VKState::init() {
     shader_version = fmt::format("v{}", shader::CURRENT_VERSION);
     return true;
@@ -378,6 +507,9 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
 
         if (!detect_patch_bcn(&texture_cache.support_dxt))
             return false;
+#elif defined(__SWITCH__)
+        // The Mesa NVK ICD is statically linked (no shared object to dlopen).
+        VULKAN_HPP_DEFAULT_DISPATCHER.init(&::vk_icdGetInstanceProcAddr);
 #else
         VULKAN_HPP_DEFAULT_DISPATCHER.init();
 #endif
@@ -399,6 +531,8 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         instance_extensions.push_back(vk::EXTMetalSurfaceExtensionName);
 #elif defined(__ANDROID__)
         instance_extensions.push_back(vk::KHRAndroidSurfaceExtensionName);
+#elif defined(__SWITCH__)
+        instance_extensions.push_back(vk::NNViSurfaceExtensionName);
 #else
         auto *frame_host = this->renderer::State::frame;
         if (!select_linux_surface_extension(*this, frame_host->handle(), instance_extensions))
@@ -447,6 +581,17 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             }
         }
 
+#ifdef __SWITCH__
+        // There is no validation layer on Horizon, but NVK implements
+        // VK_EXT_debug_utils itself, so the driver's own diagnostics - shader
+        // compiler faults above all - are still reachable. Without this they are
+        // dropped and a failed pipeline reaches the log as a bare vk::Result.
+        const bool driver_debug_messages = !has_validation_layer
+            && found_debug_extension == VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+        if (driver_debug_messages)
+            instance_extensions.push_back(found_debug_extension.data());
+#endif
+
         std::vector<const char *> instance_layers;
         if (has_validation_layer && !found_debug_extension.empty()) {
             if (config.validation_layer) {
@@ -494,14 +639,27 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         instance_info.setPEnabledLayerNames(instance_layers);
         instance_info.setPEnabledExtensionNames(instance_extensions);
 
+#ifdef __SWITCH__
+        lsfg::begin_session(config.current_config.switch_lsfg_enabled,
+            config.current_config.switch_lsfg_flow_scale,
+            config.current_config.switch_lsfg_performance);
+#endif
         instance = vk::createInstance(instance_info);
         VULKAN_HPP_DEFAULT_DISPATCHER.init(instance);
 
-        if (has_validation_layer && !found_debug_extension.empty() && config.validation_layer) {
+        bool create_debug_messenger = has_validation_layer && !found_debug_extension.empty() && config.validation_layer;
+#ifdef __SWITCH__
+        create_debug_messenger |= driver_debug_messages;
+#endif
+        if (create_debug_messenger) {
             // we support two debugging extensions
             if (found_debug_extension == VK_EXT_DEBUG_UTILS_EXTENSION_NAME) {
                 vk::DebugUtilsMessengerCreateInfoEXT debug_info{
                     .messageSeverity = vk::DebugUtilsMessageSeverityFlagBitsEXT::eVerbose
+#ifdef __SWITCH__
+                        // NVK reports its lifetime statistics at Info severity.
+                        | vk::DebugUtilsMessageSeverityFlagBitsEXT::eInfo
+#endif
                         | vk::DebugUtilsMessageSeverityFlagBitsEXT::eWarning | vk::DebugUtilsMessageSeverityFlagBitsEXT::eError,
                     .messageType = vk::DebugUtilsMessageTypeFlagBitsEXT::eGeneral
                         | vk::DebugUtilsMessageTypeFlagBitsEXT::eValidation | vk::DebugUtilsMessageTypeFlagBitsEXT::ePerformance,
@@ -622,6 +780,9 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         bool support_buffer_device_address = false;
         bool support_external_memory = false;
         bool support_shader_interlock = false;
+#ifdef __SWITCH__
+        bool support_timeline_semaphore = false;
+#endif
         const std::map<std::string_view, bool *> optional_extensions = {
             { vk::KHRGetMemoryRequirements2ExtensionName, &temp_bool },
             // can be used by vma to improve performance
@@ -638,6 +799,11 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             { vk::KHRBufferDeviceAddressExtensionName, &support_buffer_device_address },
             // needed for uniform uvec2 arrays not to take twice the size
             { vk::KHRUniformBufferStandardLayoutExtensionName, &support_standard_layout },
+#ifdef __SWITCH__
+            // LSFG's internal scheduling uses timeline semaphores. On Vulkan
+            // 1.0/1.1 drivers this extension must be enabled explicitly.
+            { vk::KHRTimelineSemaphoreExtensionName, &support_timeline_semaphore },
+#endif
             // needed for FSR
             { vk::KHRShaderFloat16Int8ExtensionName, &support_fsr },
             // used for accurate programmable blending on desktop GPUs
@@ -668,6 +834,22 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             }
         }
 
+#ifdef __SWITCH__
+        support_timeline_semaphore = support_timeline_semaphore
+            || physical_device_properties.apiVersion >= VK_API_VERSION_1_2;
+        if (lsfg::is_session_prepared()) {
+            if (!support_timeline_semaphore) {
+                lsfg::disable_session("Timeline semaphores are unavailable on this Vulkan device");
+            } else {
+                const auto timeline_features = physical_device.getFeatures2<
+                    vk::PhysicalDeviceFeatures2,
+                    vk::PhysicalDeviceTimelineSemaphoreFeatures>();
+                if (!timeline_features.get<vk::PhysicalDeviceTimelineSemaphoreFeatures>().timelineSemaphore)
+                    lsfg::disable_session("Timeline semaphores are unavailable on this Vulkan device");
+            }
+        }
+#endif
+
         bool support_memory_mapping = true;
         if (support_buffer_device_address) {
             auto features = physical_device.getFeatures2<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceBufferDeviceAddressFeatures>();
@@ -697,7 +879,14 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             // No additional check needed for these methods
             mapping_method = MappingMethod::DoubleBuffer;
             supported_mapping_methods_mask |= (1 << static_cast<int>(MappingMethod::DoubleBuffer));
+#ifndef __SWITCH__
+            // PageTable requires HOST_COHERENT memory, and on NVK/Tegra the only
+            // coherent type is CPU-uncached (svcSetMemoryAttribute(MemAttr_IsUncached)).
+            // add_external_mapping would then point the guest page table - which
+            // dynarmic reads inline - at uncached memory, so every guest access to a
+            // mapped region bypasses the cache. It cannot win here.
             supported_mapping_methods_mask |= (1 << static_cast<int>(MappingMethod::PageTable));
+#endif
 
             if (support_external_memory) {
                 // disable this extension on GPUs with an alignment requirement higher than 4096 (should only
@@ -757,7 +946,8 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             vk::PhysicalDeviceUniformBufferStandardLayoutFeatures,
             vk::PhysicalDeviceShaderFloat16Int8Features,
             vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT,
-            vk::PhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT>
+            vk::PhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT,
+            vk::PhysicalDeviceTimelineSemaphoreFeatures>
             device_info{
                 vk::DeviceCreateInfo{
                     .pEnabledFeatures = &enabled_features },
@@ -771,7 +961,9 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
                 vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT{
                     .fragmentShaderSampleInterlock = VK_TRUE },
                 vk::PhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT{
-                    .rasterizationOrderColorAttachmentAccess = VK_TRUE }
+                    .rasterizationOrderColorAttachmentAccess = VK_TRUE },
+                vk::PhysicalDeviceTimelineSemaphoreFeatures{
+                    .timelineSemaphore = VK_TRUE }
             };
         device_info.get().setQueueCreateInfos(queue_infos);
         device_info.get().setPEnabledExtensionNames(device_extensions);
@@ -790,6 +982,11 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
 
         if (!support_shader_interlock)
             device_info.unlink<vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT>();
+
+#ifdef __SWITCH__
+        if (!lsfg::is_session_prepared())
+#endif
+            device_info.unlink<vk::PhysicalDeviceTimelineSemaphoreFeatures>();
 
         try {
             device = physical_device.createDevice(device_info.get());
@@ -825,6 +1022,7 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         transfer_command_pool = device.createCommandPool(transfer_pool_info);
 
         general_pool_info.flags |= vk::CommandPoolCreateFlagBits::eTransient;
+        one_time_command_pool = device.createCommandPool(general_pool_info);
         multithread_command_pool = device.createCommandPool(general_pool_info);
     }
 
@@ -865,7 +1063,8 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         default_image = vkutil::Image(1, 1, vk::Format::eR8G8B8A8Unorm);
 
         default_image.init_image(vk::ImageUsageFlagBits::eSampled | vk::ImageUsageFlagBits::eTransferDst);
-        vk::CommandBuffer cmd_buffer = vkutil::create_single_time_command(device, general_command_pool);
+        auto one_time_command = create_one_time_command();
+        const vk::CommandBuffer cmd_buffer = one_time_command.buffer;
         default_image.transition_to(cmd_buffer, vkutil::ImageLayout::TransferDst);
         // make it white
         vk::ClearColorValue white{
@@ -873,7 +1072,7 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         };
         cmd_buffer.clearColorImage(default_image.image, vk::ImageLayout::eTransferDstOptimal, white, vkutil::color_subresource_range);
         default_image.transition_to(cmd_buffer, vkutil::ImageLayout::StorageImage);
-        vkutil::end_single_time_command(device, general_queue, general_command_pool, cmd_buffer);
+        submit_one_time_command(std::move(one_time_command));
 
         // create the default sampler
         vk::SamplerCreateInfo sampler_info{
@@ -920,6 +1119,7 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
 
 void VKState::late_init(const Config &cfg, const std::string_view game_id, MemState &mem) {
     this->mem = &mem;
+    shader_debug_dump = cfg.current_config.shader_debug_dump;
 
     bool use_high_accuracy = cfg.current_config.high_accuracy;
 
@@ -953,9 +1153,15 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
 #endif
     const std::string_view mapping_string[] = { "Disabled", "Double buffer", "External Host", "Page Table", "Native Buffer" };
 
-    if ((1 << static_cast<int>(request_mapping)) & supported_mapping_methods_mask)
+    if ((1 << static_cast<int>(request_mapping)) & supported_mapping_methods_mask) {
         // we support the requested mapping method
         mapping_method = request_mapping;
+    } else {
+        LOG_WARN("Requested memory mapping method {} is not supported by {}; using {} instead",
+            mapping_string[static_cast<int>(request_mapping)],
+            physical_device_properties.deviceName.data(),
+            mapping_string[static_cast<int>(mapping_method)]);
+    }
 
     features.enable_memory_mapping = mapping_method != MappingMethod::Disabled;
 
@@ -971,7 +1177,17 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
     }
 #endif
 
+#ifdef __SWITCH__
+    // Keep the effective settings visible in normal Switch crash logs. The
+    // launcher's default warning log level otherwise filters the corresponding
+    // renderer and pipeline-cache informational messages.
+    LOG_WARN("Switch Vulkan runtime: memory mapping={}, async pipeline compilation={}, surface sync={}",
+        mapping_string[static_cast<int>(mapping_method)],
+        cfg.current_config.async_pipeline_compilation ? "enabled" : "disabled",
+        cfg.current_config.disable_surface_sync ? "disabled" : "enabled");
+#else
     LOG_INFO("Using the following memory mapping method: {}", mapping_string[static_cast<int>(mapping_method)]);
+#endif
 
 #if defined(__linux__) && !defined(__ANDROID__) // According to my tests (Macdu), mprotect on buffers (mapped with external memory host) only works with Nvidia drivers
     surface_cache.can_mprotect_mapped_memory = mapping_method == MappingMethod::DoubleBuffer
@@ -980,7 +1196,13 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
 
     pipeline_cache.init(support_rasterized_order_access);
 
+#ifdef __SWITCH__
+    // Horizon cannot resume page faults from generated guest code, so retain the
+    // established hash-based texture invalidation path on Switch.
+    texture_cache.init(false, texture_folder(), game_id);
+#else
     texture_cache.init(true, texture_folder(), game_id);
+#endif
 }
 
 void VKState::cleanup() {
@@ -989,7 +1211,13 @@ void VKState::cleanup() {
         descriptor.descriptors_idx = 0;
     };
 
-    device.waitIdle();
+    wait_device_idle();
+
+#ifdef __SWITCH__
+    // LSFG owns Vulkan objects borrowed from this device. Do not release them
+    // until every generated/original presentation has completed.
+    lsfg::end_session();
+#endif
 
     request_queue.abort();
 
@@ -1050,6 +1278,8 @@ void VKState::cleanup() {
 
     device.destroy(general_command_pool);
     general_command_pool = nullptr;
+    device.destroy(one_time_command_pool);
+    one_time_command_pool = nullptr;
     device.destroy(transfer_command_pool);
     transfer_command_pool = nullptr;
     device.destroy(multithread_command_pool);
@@ -1407,7 +1637,7 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
         buffer.init_buffer(mapped_memory_flags, memory_mapped_alloc);
         const uint64_t buffer_ptr_val = std::bit_cast<uint64_t>(buffer.mapped_data);
         const uint64_t buffer_offset = align(buffer_ptr_val, KiB(4)) - buffer_ptr_val;
-        buffer.mapped_data = std::bit_cast<void *>(buffer_ptr_val + buffer_offset);
+        auto *const mapped_start = std::bit_cast<uint8_t *>(buffer_ptr_val + buffer_offset);
 
         vk::BufferDeviceAddressInfoKHR address_info{
             .buffer = buffer.buffer
@@ -1415,8 +1645,8 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
         const uint64_t buffer_address = device.getBufferAddress(address_info) + buffer_offset;
         const vk::Buffer mapped_buffer = buffer.buffer;
 
-        add_external_mapping(mem, address.address(), size, static_cast<uint8_t *>(buffer.mapped_data));
-        mapped_memories[address.address()] = { address.address(), std::move(buffer), mapped_buffer, size, buffer_address };
+        add_external_mapping(mem, address.address(), size, mapped_start);
+        mapped_memories[address.address()] = { address.address(), std::move(buffer), mapped_buffer, size, buffer_address, static_cast<uint32_t>(buffer_offset) };
         break;
     }
 
@@ -1485,7 +1715,31 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
 
     case MappingMethod::DoubleBuffer: {
         vkutil::Buffer buffer(size + KiB(4));
-        buffer.init_buffer(mapped_memory_flags, vkutil::vma_mapped_alloc);
+#ifdef __SWITCH__
+        // NVK exposes cached/non-coherent and uncached/coherent mappings as two
+        // separate Tegra memory types. Double Buffer has explicit upload and
+        // readback points, so use the faster cached type and synchronize those
+        // points with vkFlush/InvalidateMappedMemoryRanges.
+        constexpr vma::AllocationCreateInfo double_buffer_alloc = {
+            .flags = vma::AllocationCreateFlagBits::eMapped | vma::AllocationCreateFlagBits::eHostAccessSequentialWrite,
+            .usage = vma::MemoryUsage::eAutoPreferHost,
+            .requiredFlags = vk::MemoryPropertyFlagBits::eHostVisible,
+            .preferredFlags = vk::MemoryPropertyFlagBits::eHostCached,
+        };
+#else
+        constexpr vma::AllocationCreateInfo double_buffer_alloc = {
+            .flags = vma::AllocationCreateFlagBits::eMapped | vma::AllocationCreateFlagBits::eHostAccessSequentialWrite,
+            .usage = vma::MemoryUsage::eAutoPreferHost,
+            .requiredFlags = vk::MemoryPropertyFlagBits::eHostCoherent,
+            .preferredFlags = vk::MemoryPropertyFlagBits::eHostCached,
+        };
+#endif
+        buffer.init_buffer(mapped_memory_flags, double_buffer_alloc);
+
+#ifdef __SWITCH__
+        LOG_WARN_ONCE("Switch Double Buffer selected {} host memory; explicit cache synchronization is active",
+            buffer.is_host_coherent() ? "coherent/uncached" : "cached/non-coherent");
+#endif
 
         vk::BufferDeviceAddressInfoKHR address_info{
             .buffer = buffer.buffer
@@ -1493,6 +1747,13 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
         const uint64_t buffer_address = device.getBufferAddress(address_info);
         const vk::Buffer mapped_buffer = buffer.buffer;
         mapped_memories[address.address()] = { address.address(), std::move(buffer), mapped_buffer, size, buffer_address };
+#ifdef __SWITCH__
+        MappedMemory &mapping = mapped_memories.at(address.address());
+        const size_t hash_block_count = (size + SWITCH_DOUBLE_BUFFER_HASH_BLOCK_SIZE - 1) / SWITCH_DOUBLE_BUFFER_HASH_BLOCK_SIZE;
+        mapping.cpu_block_hashes.resize(hash_block_count);
+        mapping.cpu_block_hash_valid.resize((hash_block_count + 63) / 64);
+        mapping.cpu_block_scene.resize(hash_block_count);
+#endif
         break;
     }
 
@@ -1514,7 +1775,7 @@ void VKState::unmap_memory(MemState &mem, Ptr<void> address) {
     }
 
     // we need to wait in case the buffer is being used
-    device.waitIdle();
+    wait_device_idle();
 
     switch (mapping_method) {
     case MappingMethod::ExernalHost:
@@ -1523,7 +1784,12 @@ void VKState::unmap_memory(MemState &mem, Ptr<void> address) {
         break;
 
     case MappingMethod::DoubleBuffer:
+#ifndef __SWITCH__
+        // Desktop Double Buffer may have active mprotect ranges. Horizon uses
+        // checksums instead and never registered an external page-table mapping;
+        // calling remove_external_mapping there would assert on a missing entry.
         remove_external_mapping(mem, address.cast<uint8_t>().get(mem), ite->second.size);
+#endif
         // remove all the trapping related to these locations
         buffer_trapping.remove_range(address.address(), address.address() + ite->second.size);
         break;
@@ -1558,18 +1824,19 @@ void VKState::unmap_memory(MemState &mem, Ptr<void> address) {
 std::tuple<vk::Buffer, uint32_t> VKState::get_matching_mapping(const Ptr<void> address) {
     auto mapped_memory = mapped_memories.lower_bound(address.address());
     if (mapped_memory == mapped_memories.end()
-        || mapped_memory->first + mapped_memory->second.size < address.address()) {
+        || mapped_memory->first + mapped_memory->second.size <= address.address()) {
         LOG_ERROR("Could not find matching mapped buffer for vertex stream");
         return { nullptr, 0 };
     }
 
-    return std::make_tuple(mapped_memory->second.buffer, address.address() - mapped_memory->first);
+    return std::make_tuple(mapped_memory->second.buffer,
+        mapped_memory->second.buffer_offset + address.address() - mapped_memory->first);
 }
 
 uint64_t VKState::get_matching_device_address(const Address address) {
     auto mapped_memory = mapped_memories.lower_bound(address);
     if (mapped_memory == mapped_memories.end()
-        || mapped_memory->first + mapped_memory->second.size < address) {
+        || mapped_memory->first + mapped_memory->second.size <= address) {
         LOG_ERROR("Could not find matching mapped buffer for vertex stream");
         return 0;
     }
@@ -1651,7 +1918,10 @@ static int get_supported_mapping_methods_mask(const vk::PhysicalDevice &gpu, con
 
         if (support_memory_mapping) {
             mask |= (1 << static_cast<int>(MappingMethod::DoubleBuffer));
+#ifndef __SWITCH__
+            // See VKState::create: no cached+coherent memory type exists on NVK/Tegra.
             mask |= (1 << static_cast<int>(MappingMethod::PageTable));
+#endif
 
             if (support_external_memory) {
                 auto props = gpu.getProperties2KHR<vk::PhysicalDeviceProperties2, vk::PhysicalDeviceExternalMemoryHostPropertiesEXT>(dispatch);
@@ -1685,6 +1955,8 @@ renderer::VulkanDeviceInfo renderer::enumerate_vulkan_devices(const std::string 
             return info;
 
         dispatch.init(vk_get_instance_proc_addr);
+#elif defined(__SWITCH__)
+        dispatch.init(&::vk_icdGetInstanceProcAddr);
 #else
         dispatch.init();
 #endif
@@ -1788,6 +2060,131 @@ BufferTrapping::BufferTrapping(VKState &state)
     : state(state) {}
 
 TrappedBuffer *BufferTrapping::access_buffer(Address addr, uint32_t size, MemState &mem, bool always_trap, bool cover_everything) {
+#ifdef __SWITCH__
+    // Desktop Double Buffer marks cached GPU copies dirty with mprotect faults.
+    // Horizon cannot resume that kind of guest write fault. Copying on every
+    // draw is not equivalent: it overwrites data produced by Vita shader buffer
+    // stores before a later draw can consume it. Compare small guest blocks with
+    // the bytes last uploaded instead. Unchanged CPU blocks remain GPU-owned;
+    // changed blocks are copied and explicitly flushed for NVK's cached mapping.
+    // Base-address lookup on purpose: resolving buffers suballocated inside a
+    // mapping walks tracking state this path was never built for.
+    auto mem_it = state.mapped_memories.lower_bound(addr);
+    if (mem_it == state.mapped_memories.end()
+        || static_cast<uint64_t>(mem_it->first) + mem_it->second.size < static_cast<uint64_t>(addr) + size) {
+        LOG_ERROR_ONCE("Buffer at address {} is not completely mapped", log_hex(addr));
+        return &temp_buffer;
+    }
+
+    MappedMemory &mapping = mem_it->second;
+    // External allocations have no host buffer to double-buffer against.
+    vkutil::Buffer *const gpu_buffer_ptr = std::get_if<vkutil::Buffer>(&mapping.buffer_impl);
+    if (!gpu_buffer_ptr) {
+        LOG_ERROR_ONCE("Buffer at address {} is in an externally mapped region", log_hex(addr));
+        return &temp_buffer;
+    }
+    vkutil::Buffer &gpu_buffer = *gpu_buffer_ptr;
+    if (!gpu_buffer.mapped_data) {
+        LOG_ERROR_ONCE("Buffer at address {} is in a mapping with no host pointer", log_hex(addr));
+        return &temp_buffer;
+    }
+
+    // Not every mapping path sizes the tracking arrays; size them on first use.
+    const size_t hash_block_count = (mapping.size + SWITCH_DOUBLE_BUFFER_HASH_BLOCK_SIZE - 1)
+        / SWITCH_DOUBLE_BUFFER_HASH_BLOCK_SIZE;
+    if (mapping.cpu_block_scene.size() != hash_block_count) {
+        mapping.cpu_block_hashes.assign(hash_block_count, 0);
+        mapping.cpu_block_hash_valid.assign((hash_block_count + 63) / 64, 0);
+        mapping.cpu_block_scene.assign(hash_block_count, 0);
+    }
+
+    const uint32_t request_offset = addr - mem_it->first;
+    const uint32_t first_block = request_offset / SWITCH_DOUBLE_BUFFER_HASH_BLOCK_SIZE;
+    const uint32_t end_offset = request_offset + size;
+    const uint32_t end_block = size == 0
+        ? first_block
+        : (end_offset + SWITCH_DOUBLE_BUFFER_HASH_BLOCK_SIZE - 1) / SWITCH_DOUBLE_BUFFER_HASH_BLOCK_SIZE;
+
+    bool any_cpu_block_changed = false;
+    uint32_t dirty_run_begin = 0;
+    bool dirty_run_active = false;
+
+    const auto upload_dirty_run = [&](const uint32_t begin_block, const uint32_t end_block_exclusive) {
+        const uint32_t begin = begin_block * SWITCH_DOUBLE_BUFFER_HASH_BLOCK_SIZE;
+        const uint32_t end = std::min<uint32_t>(end_block_exclusive * SWITCH_DOUBLE_BUFFER_HASH_BLOCK_SIZE, mapping.size);
+        const uint32_t bytes = end - begin;
+        auto *const destination = static_cast<uint8_t *>(gpu_buffer.mapped_data) + mapping.buffer_offset + begin;
+        const void *const source = Ptr<const void>(mem_it->first + begin).get(mem);
+        if (!source)
+            return;
+        memcpy(destination, source, bytes);
+        gpu_buffer.flush(mapping.buffer_offset + begin, bytes);
+    };
+
+    // Shader-store ranges must be re-checked every draw, and uniform ranges are
+    // exempted conservatively (a guest uniform ring could legally reuse bytes
+    // between draws of one scene). Vertex and index data is protected by GXM's
+    // own contract: rewriting it while the scene is in flight would corrupt the
+    // real console too.
+    const bool memo_allowed = !always_trap && !cover_everything;
+    const uint32_t scene_epoch = static_cast<uint32_t>(state.texture_cache.memo_scene);
+    for (uint32_t block = first_block; block < end_block; block++) {
+        const uint32_t block_offset = block * SWITCH_DOUBLE_BUFFER_HASH_BLOCK_SIZE;
+        // Skip guest pages with no translation (never committed).
+        const void *const guest_block = Ptr<const void>(mem_it->first + block_offset).get(mem);
+        if (!guest_block) {
+            if (dirty_run_active) {
+                upload_dirty_run(dirty_run_begin, block);
+                dirty_run_active = false;
+            }
+            continue;
+        }
+        const uint64_t valid_bit = uint64_t{ 1 } << (block & 63);
+        const bool valid = mapping.cpu_block_hash_valid[block / 64] & valid_bit;
+        bool changed = false;
+        const bool verified_this_scene = memo_allowed && valid
+            && mapping.cpu_block_scene[block] == scene_epoch;
+        if (!verified_this_scene) {
+            const uint32_t block_size = std::min<uint32_t>(SWITCH_DOUBLE_BUFFER_HASH_BLOCK_SIZE, mapping.size - block_offset);
+            const uint64_t hash = XXH3_64bits(guest_block, block_size);
+            changed = !valid || mapping.cpu_block_hashes[block] != hash;
+
+            if (changed) {
+                mapping.cpu_block_hashes[block] = hash;
+                mapping.cpu_block_hash_valid[block / 64] |= valid_bit;
+                any_cpu_block_changed = true;
+                if (!dirty_run_active) {
+                    dirty_run_begin = block;
+                    dirty_run_active = true;
+                }
+            }
+            mapping.cpu_block_scene[block] = scene_epoch;
+        }
+
+        // Keep each memcpy inside one guest page. Switch guest allocations are
+        // contiguous, but this also remains safe for a mapping at an allocation
+        // boundary or any future non-contiguous backing scheme.
+        const bool page_ends = ((block + 1) * SWITCH_DOUBLE_BUFFER_HASH_BLOCK_SIZE) % KiB(4) == 0;
+        if (dirty_run_active && (!changed || page_ends)) {
+            const uint32_t dirty_run_end = changed ? block + 1 : block;
+            upload_dirty_run(dirty_run_begin, dirty_run_end);
+            dirty_run_active = false;
+        }
+    }
+    if (dirty_run_active)
+        upload_dirty_run(dirty_run_begin, end_block);
+
+    auto [tracked_it, switch_is_new] = trapped_buffers.try_emplace(addr);
+    TrappedBuffer &tracked = tracked_it->second;
+    if (switch_is_new || tracked.size != size || any_cpu_block_changed)
+        tracked.extra = ~0U;
+    tracked.size = size;
+    tracked.dirty = false;
+    tracked.mapped_location = static_cast<uint8_t *>(gpu_buffer.mapped_data)
+        + mapping.buffer_offset + request_offset;
+    return &tracked;
+#endif
+
     const bool is_buffer_small = (size < 3 * KiB(4));
 
     if (is_buffer_small && always_trap) {

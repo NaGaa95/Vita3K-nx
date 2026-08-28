@@ -24,6 +24,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <vector>
 
 struct AllocMemPage {
     uint32_t allocated : 4;
@@ -60,6 +61,17 @@ typedef std::map<Address, ProtectSegmentInfo, std::greater<>> ProtectSegmentTree
 struct MemExternalMapping {
     Address address;
     uint32_t size;
+    // The page-table entry that backed this range before it was redirected to the
+    // external (GPU) buffer. Saved so remove_external_mapping can restore the real
+    // backing without assuming a linear address space (&mem.memory[addr] is wrong on
+    // the Switch's non-linear pool). On desktop this is just mem.memory.get().
+    uint8_t *original_entry = nullptr;
+#ifdef __SWITCH__
+    // A normal Switch guest allocation has one constant entry because its pool
+    // pages are contiguous. Preserve every entry as well so an unusual GXM map
+    // spanning allocation boundaries can still be restored correctly.
+    std::vector<uint8_t *> original_entries;
+#endif
 };
 
 struct MemState {

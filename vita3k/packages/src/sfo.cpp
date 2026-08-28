@@ -76,9 +76,11 @@ bool get_data_by_key(std::string &out_data, SfoFile &file, const std::string &ke
 
 void get_param_info(sfo::SfoAppInfo &app_info, const vfs::FileBuffer &param, int sys_lang) {
     SfoFile sfo_handle;
-    sfo::load(sfo_handle, param);
+    app_info = {};
+    if (!sfo::load(sfo_handle, param))
+        return;
     sfo::get_data_by_key(app_info.app_version, sfo_handle, "APP_VER");
-    if (app_info.app_version[0] == '0')
+    if (!app_info.app_version.empty() && app_info.app_version[0] == '0')
         app_info.app_version.erase(app_info.app_version.begin());
     sfo::get_data_by_key(app_info.app_category, sfo_handle, "CATEGORY");
     sfo::get_data_by_key(app_info.app_content_id, sfo_handle, "CONTENT_ID");
@@ -97,64 +99,78 @@ void get_param_info(sfo::SfoAppInfo &app_info, const vfs::FileBuffer &param, int
 }
 
 bool load(SfoFile &sfile, const std::vector<uint8_t> &content) {
-    if (content.empty()) {
+    sfile = {};
+    if (content.size() < sizeof(SfoHeader)) {
         return false;
     }
 
     memcpy(&sfile.header, content.data(), sizeof(SfoHeader));
+    constexpr uint32_t SFO_MAGIC = 0x46535000; // "\0PSF", little-endian
+    if (sfile.header.magic != SFO_MAGIC)
+        return false;
 
-    sfile.entries.resize(sfile.header.tables_entries + 1);
+    const size_t entry_count = sfile.header.tables_entries;
+    const size_t max_entries = (content.size() - sizeof(SfoHeader)) / sizeof(SfoIndexTableEntry);
+    if (entry_count > max_entries)
+        return false;
 
-    for (uint32_t i = 0; i < sfile.header.tables_entries; i++) {
+    const size_t index_end = sizeof(SfoHeader) + entry_count * sizeof(SfoIndexTableEntry);
+    const size_t key_table_start = sfile.header.key_table_start;
+    const size_t data_table_start = sfile.header.data_table_start;
+    if (key_table_start < index_end || data_table_start < key_table_start
+        || data_table_start > content.size())
+        return false;
+
+    sfile.entries.resize(entry_count);
+
+    for (size_t i = 0; i < entry_count; i++) {
         memcpy(&sfile.entries[i].entry, content.data() + sizeof(SfoHeader) + i * sizeof(SfoIndexTableEntry), sizeof(SfoIndexTableEntry));
-    }
+        const auto &entry = sfile.entries[i].entry;
 
-    sfile.entries[sfile.header.tables_entries].entry.key_offset = sfile.header.data_table_start - sfile.header.key_table_start;
+        const size_t key_offset = entry.key_offset;
+        const size_t key_table_size = data_table_start - key_table_start;
+        if (key_offset >= key_table_size)
+            return false;
+        const uint8_t *const key_begin = content.data() + key_table_start + key_offset;
+        const size_t key_bytes_available = key_table_size - key_offset;
+        const auto *const key_end = static_cast<const uint8_t *>(
+            std::memchr(key_begin, '\0', key_bytes_available));
+        if (!key_end || key_end == key_begin)
+            return false;
+        sfile.entries[i].data.first.assign(
+            reinterpret_cast<const char *>(key_begin), static_cast<size_t>(key_end - key_begin));
 
-    // Parse each SFO entry and extract its associated key
-    for (uint32_t i = 0; i < sfile.header.tables_entries; i++) {
-        // Calculate the size of the key for the current entry by subtracting the offsets
-        uint32_t keySize = sfile.entries[i + 1].entry.key_offset - sfile.entries[i].entry.key_offset;
-
-        // Resize the 'key' data to hold the correct amount of characters for the key
-        sfile.entries[i].data.first.resize(keySize);
-
-        // Calculate the starting address of the key data in the content buffer
-        const auto key_begin = content.begin() + sfile.header.key_table_start + sfile.entries[i].entry.key_offset;
-
-        // Extract the key data from the content buffer and assign it to 'key' as a string
-        // Subtract 1 from keySize to avoid including the null terminator
-        sfile.entries[i].data.first = std::string(key_begin, key_begin + keySize - 1);
-    }
-
-    // Parse each SFO entry and extract its associated data
-    for (uint32_t i = 0; i < sfile.header.tables_entries; i++) {
-        const uint32_t dataSize = sfile.entries[i].entry.data_len;
-
-        // Resize the destination string to match the data size
-        sfile.entries[i].data.second.resize(dataSize);
-
-        // Compute the data's starting position in the content buffer
-        const auto data_begin = content.begin() + sfile.header.data_table_start + sfile.entries[i].entry.data_offset;
-
-        // Copy the raw data into a temporary buffer
-        std::vector<char> data(data_begin, data_begin + dataSize);
+        const size_t data_offset = entry.data_offset;
+        const size_t data_size = entry.data_len;
+        const size_t data_max_size = entry.data_max_len;
+        if (data_size > data_max_size || data_offset > content.size() - data_table_start
+            || data_max_size > content.size() - data_table_start - data_offset)
+            return false;
+        const uint8_t *const data = content.data() + data_table_start + data_offset;
 
         // Interpret and convert the raw data based on its format
-        switch (sfile.entries[i].entry.data_fmt) {
-        case SfoDataFormat::UINT32_T:
-            // Convert the first 4 bytes to a uint32_t and store as string
-            sfile.entries[i].data.second = std::to_string(*reinterpret_cast<const uint32_t *>(data.data()));
+        switch (entry.data_fmt) {
+        case SfoDataFormat::UINT32_T: {
+            if (data_size != sizeof(uint32_t))
+                return false;
+            uint32_t value;
+            memcpy(&value, data, sizeof(value));
+            sfile.entries[i].data.second = std::to_string(value);
             break;
+        }
         case SfoDataFormat::ASCII:
         case SfoDataFormat::UTF8:
             // Interpret the data as a raw string (may not be null-terminated)
-            sfile.entries[i].data.second = std::string(data.begin(), data.end());
+            sfile.entries[i].data.second.assign(reinterpret_cast<const char *>(data), data_size);
             break;
-        case SfoDataFormat::UTF8_NULL:
-            // Interpret the data as a null-terminated UTF-8 string (exclude the null byte)
-            sfile.entries[i].data.second = std::string(data.begin(), data.end() - 1);
+        case SfoDataFormat::UTF8_NULL: {
+            const auto *const terminator = static_cast<const uint8_t *>(std::memchr(data, '\0', data_size));
+            if (!terminator)
+                return false;
+            sfile.entries[i].data.second.assign(
+                reinterpret_cast<const char *>(data), static_cast<size_t>(terminator - data));
             break;
+        }
         default:
             // Unknown or unsupported data format
             return false;

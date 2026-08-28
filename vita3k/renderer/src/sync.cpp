@@ -58,7 +58,18 @@ COMMAND(handle_wait_sync_object) {
     SceGxmSyncObject *sync = helper.pop<Ptr<SceGxmSyncObject>>().get(mem);
     const uint32_t timestamp = helper.pop<uint32_t>();
 
+#ifdef __SWITCH__
+    // Guest threads are suspended while the quick menu is open, so nothing can
+    // signal this object. Give the wait up while paused so the render thread can
+    // draw the menu; the guest resubmits on resume.
+    while (renderer::wishlist(sync, timestamp, 2000) == renderer::SyncWaitResult::TimedOut) {
+        if (renderer.paused.load(std::memory_order_relaxed)
+            || renderer.render_abort.load(std::memory_order_relaxed))
+            break;
+    }
+#else
     renderer::wishlist(sync, timestamp);
+#endif
 }
 
 COMMAND(handle_notification) {
@@ -178,6 +189,10 @@ void subject_done(SceGxmSyncObject *sync_object, const uint32_t timestamp) {
 }
 
 void submit_command_list(State &state, renderer::Context *context, CommandList &command_list) {
+#ifdef __SWITCH__
+    if (context)
+        context->clear_emission_dedup();
+#endif
     command_list.context = context;
     state.command_buffer_queue.push(std::move(command_list));
 }

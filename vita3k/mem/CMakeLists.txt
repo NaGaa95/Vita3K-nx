@@ -16,7 +16,7 @@ add_library(
 target_include_directories(mem PUBLIC include)
 target_link_libraries(mem PUBLIC util)
 
-if(NOT ANDROID)
+if(NOT ANDROID AND NOT SWITCH)
 	add_executable(
 		mem-tests
 		tests/allocator_tests.cpp

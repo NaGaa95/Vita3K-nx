@@ -29,6 +29,7 @@
 #include <mem/ptr.h>
 #include <util/lock_and_find.h>
 #include <util/log.h>
+#include <util/switch_thread.h>
 
 #include <SDL3/SDL_mutex.h>
 #include <SDL3/SDL_thread.h>
@@ -62,6 +63,15 @@ static int SDLCALL thread_function(void *data) {
     const ThreadParams params = *static_cast<const ThreadParams *>(data);
     SDL_SignalSemaphore(params.host_may_destroy_params);
     const ThreadStatePtr thread = params.kernel->get_thread(params.thid);
+
+    // Keep guest CPU threads off the OS-reserved core 3. A game spawns a dozen or more
+    // of these and they can spin (guest spinlocks); on core 3 that starves Horizon's
+    // system services and hard-locks the console with every core at 100%.
+    switch_pin_to_app_cores("guest CPU thread");
+    // Give the host thread the priority the game asked for. Until now every guest
+    // thread ran at the process default, level with the render and audio threads.
+    switch_apply_guest_thread_priority(thread->priority);
+    switch_apply_guest_thread_affinity(thread->affinity_mask);
 #ifdef TRACY_ENABLE
     if (!thread->name.empty()) {
         tracy::SetThreadName(thread->name.c_str());
@@ -202,18 +212,31 @@ void KernelState::pause_threads() {
     const std::lock_guard<std::mutex> lock(mutex);
     for (auto &[_, thread] : threads) {
         paused_threads_status[thread->id] = thread->status;
-        if (thread->status == ThreadStatus::run)
+        if (thread->status == ThreadStatus::run) {
             thread->suspend();
+        } else {
+            // A thread waiting in sceKernelDelayThread wakes on its own
+            // timeout and re-enters the JIT, so the request has to be raised
+            // here for it to be honoured at that re-entry.
+            thread->request_suspend();
+        }
     }
+    threads_paused.store(true, std::memory_order_release);
 }
 
 void KernelState::resume_threads() {
     const std::lock_guard<std::mutex> lock(mutex);
     for (auto &[_, thread] : threads) {
-        if (paused_threads_status[thread->id] == ThreadStatus::run)
-            thread->resume();
+        // Threads created during the pause were never suspended.
+        if (!paused_threads_status.contains(thread->id))
+            continue;
+        // Never resume(): a thread recorded as running may have reached a wait
+        // instead of the suspend park, and resume() would force it to run and
+        // drop that wait. cancel_suspend() releases it only if it really parked.
+        thread->cancel_suspend();
     }
     paused_threads_status.clear();
+    threads_paused.store(false, std::memory_order_release);
 }
 
 void KernelState::deinit(MemState &mem) {

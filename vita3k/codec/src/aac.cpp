@@ -25,7 +25,20 @@ extern "C" {
 #include <libavutil/opt.h>
 #include <libswresample/swresample.h>
 
+#ifdef __SWITCH__
+// The devkitPro portlib ships libavcodec's public headers but not this internal
+// one, which defines FFCodec and ffcodec(). Without it the AAC decoder has to be
+// driven through avcodec_send_packet/avcodec_receive_frame, which cannot report
+// how many bytes of the elementary stream a frame consumed - sceAudiodec hands
+// over a 1536-byte window holding several frames and needs exactly that number.
+// external/ffmpeg carries the matching headers: its avcodec.h, codec.h,
+// codec_id.h, packet.h and defs.h are byte-identical to the portlib's (both
+// libavcodec 61.19), so this describes the same FFCodec layout the portlib's
+// libavcodec.a was compiled with.
+#include "../../../external/ffmpeg/include/libavcodec/codec_internal.h"
+#else
 #include <libavcodec/codec_internal.h>
+#endif
 }
 
 #include <util/log.h>

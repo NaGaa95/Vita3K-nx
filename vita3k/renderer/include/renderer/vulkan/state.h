@@ -27,6 +27,7 @@
 #include <renderer/vulkan/types.h>
 
 #include <chrono>
+#include <mutex>
 
 struct Config;
 
@@ -49,6 +50,11 @@ struct Viewport {
 };
 
 struct VKState : public renderer::State {
+    struct OneTimeCommand {
+        vk::CommandBuffer buffer;
+        std::unique_lock<std::mutex> command_pool_lock;
+    };
+
     MemState *mem;
 
     // 0 = automatic, > 0 = order in instance.enumeratePhysicalDevices
@@ -81,8 +87,18 @@ struct VKState : public renderer::State {
     vk::Queue general_queue;
     vk::Queue transfer_queue;
 
+    // Vulkan queues and command pools require external synchronization.  The
+    // renderer can submit work from the render, texture, and surface-sync
+    // threads, so all access to the shared general queue is serialized here.
+    std::mutex general_queue_mutex;
+
     // These might be merged into one queue, but for now they are different.
     vk::CommandPool general_command_pool;
+    // One-time uploads/transitions have a dedicated pool. Keeping them out of
+    // the general pool also prevents their worker-thread recording from racing
+    // with swapchain command-buffer recording.
+    vk::CommandPool one_time_command_pool;
+    std::mutex one_time_command_pool_mutex;
     // Transfer pool has transient bit set.
     vk::CommandPool transfer_command_pool;
     // command pool which can be used from multiple thread
@@ -123,6 +139,18 @@ struct VKState : public renderer::State {
 #endif
 
     VKState(int gpu_idx);
+
+    void submit_general(const vk::SubmitInfo &submit_info, vk::Fence fence = {},
+        const char *stage = "general queue submission");
+    void submit_general_pair(const vk::SubmitInfo &first_submit_info,
+        const vk::SubmitInfo &second_submit_info, vk::Fence second_fence = {});
+    vk::Result present_general(const vk::PresentInfoKHR &present_info);
+    vk::Result submit_and_present_general(const vk::SubmitInfo &submit_info,
+        vk::Fence fence, const vk::PresentInfoKHR &present_info);
+    void wait_device_idle();
+    OneTimeCommand create_one_time_command();
+    void submit_one_time_command(OneTimeCommand command,
+        const char *stage = "one-time command submission");
 
     bool init() override;
     bool create(std::unique_ptr<renderer::State> &state, const Config &config);

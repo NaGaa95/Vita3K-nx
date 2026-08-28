@@ -30,6 +30,7 @@
 #include <thread>
 
 #include <util/tracy.h>
+#include <util/switch_thread.h>
 TRACY_MODULE_NAME(SceThreadmgr);
 
 inline static uint64_t get_current_time() {
@@ -915,6 +916,11 @@ EXPORT(SceInt32, sceKernelChangeThreadCpuAffinityMask, SceUID thid, SceInt32 aff
 
     thread->affinity_mask = affinity_mask;
     thread->tls.get_ptr<int>().get(emuenv.mem)[TLS_CPU_AFFINITY_MASK] = affinity_mask;
+    // Only the calling thread can be re-pinned from here: the host thread of
+    // another guest thread is not reachable, and the new mask still takes
+    // effect for it on its next start.
+    if (!thid || thid == thread_id)
+        switch_apply_guest_thread_affinity(affinity_mask);
     return old_affinity;
 }
 

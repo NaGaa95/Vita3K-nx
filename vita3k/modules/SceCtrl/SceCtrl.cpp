@@ -22,6 +22,9 @@
 #include <kernel/types.h>
 #include <util/log.h>
 #include <util/tracy.h>
+#ifdef __SWITCH__
+#include <util/switch_vibration.h>
+#endif
 
 TRACY_MODULE_NAME(SceCtrl);
 
@@ -192,6 +195,11 @@ EXPORT(int, sceCtrlSetActuator, int port, const SceCtrlActuator *pState) {
     if (!emuenv.cfg.current_config.pstv_mode) {
         return RET_ERROR(SCE_CTRL_ERROR_NOT_SUPPORTED);
     }
+
+#ifdef __SWITCH__
+    if (port == 1 && switch_set_vibration(pState->small, pState->large))
+        return 0;
+#endif
 
     CtrlState &state = emuenv.ctrl;
     for (const auto &controller : state.controllers) {

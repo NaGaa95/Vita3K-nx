@@ -136,7 +136,10 @@ bool AppSessionController::load_and_run() {
 
 bool AppSessionController::set_pause_reason(const AppSessionPauseReason reason, const bool enabled) {
     std::lock_guard<std::mutex> lock(mutex);
-    if (current_phase.load(std::memory_order_relaxed) != AppSessionPhase::Running)
+    // Taking a pause outside Running is meaningless, but dropping one must always
+    // be honoured: a reason still set once the session leaves Running would leave
+    // guest threads suspended with nothing left to release them.
+    if (enabled && current_phase.load(std::memory_order_relaxed) != AppSessionPhase::Running)
         return false;
 
     const uint32_t mask = to_pause_mask(reason);

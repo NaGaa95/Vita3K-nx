@@ -208,8 +208,21 @@ EXPORT(int, sceSysmoduleLoadModule, SceSysmoduleModuleId module_id) {
     if (is_module_enabled(emuenv, module_id)) {
         if (load_sys_module(emuenv, module_id))
             return SCE_SYSMODULE_LOADED;
-        else
-            return RET_ERROR(SCE_SYSMODULE_ERROR_FATAL);
+#ifdef __SWITCH__
+        // The Switch port frequently runs without the full PS Vita firmware
+        // installed (vs0:sys/external/*.suprx). Returning FATAL makes the game
+        // sceKernelExitProcess and quit; instead pretend the LLE module loaded and
+        // rely on HLE stubs. Install the firmware for full compatibility.
+        LOG_WARN("sceSysmoduleLoadModule: module {} unavailable (firmware not installed?) — treating as loaded",
+            to_debug_str(emuenv.mem, module_id));
+        {
+            const std::lock_guard<std::mutex> guard(emuenv.kernel.mutex);
+            emuenv.kernel.loaded_sysmodules[module_id] = {};
+        }
+        return SCE_SYSMODULE_LOADED;
+#else
+        return RET_ERROR(SCE_SYSMODULE_ERROR_FATAL);
+#endif
     } else {
         std::lock_guard<std::mutex> guard(emuenv.kernel.mutex);
         emuenv.kernel.loaded_sysmodules[module_id] = {};

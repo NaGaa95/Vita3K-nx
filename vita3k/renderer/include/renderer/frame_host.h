@@ -48,12 +48,20 @@ struct AndroidDisplayHandle {
     SDL_Window *window = nullptr;
 };
 
+// Nintendo Switch: the Vulkan surface is created directly from a libnx NWindow*
+// (VK_NN_vi_surface), independent of SDL. `nwindow` is an `NWindow*` obtained
+// from nwindowGetDefault().
+struct SwitchDisplayHandle {
+    void *nwindow = nullptr;
+};
+
 using DisplayHandle = std::variant<std::monostate,
     Win32DisplayHandle,
     MacOSDisplayHandle,
     X11DisplayHandle,
     WaylandDisplayHandle,
-    AndroidDisplayHandle>;
+    AndroidDisplayHandle,
+    SwitchDisplayHandle>;
 
 class FrameHost {
 public:

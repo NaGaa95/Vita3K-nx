@@ -113,19 +113,38 @@ static GLenum translate_stencil_func(SceGxmStencilFunc stencil_func) {
 void sync_mask(const GLState &state, GLContext &context, const MemState &mem) {
     GLubyte initial_byte = context.record.depth_stencil_surface.mask ? 0xFF : 0;
 
-#ifdef __ANDROID__
-    auto width = context.render_target->width;
-    auto height = context.render_target->height;
-    std::vector<GLubyte> emptyData(width * height * 4, initial_byte);
-    GLint texId;
-    glGetIntegerv(GL_TEXTURE_BINDING_2D, &texId);
-    glBindTexture(GL_TEXTURE_2D, context.render_target->masktexture[0]);
-    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, &emptyData[0]);
-    glBindTexture(GL_TEXTURE_2D, texId);
+#ifdef __SWITCH__
+    // Every fragment shader discards where this image reads back below 0.5, so
+    // the clear has to be visible to image loads before the next draw. Ordinary
+    // framebuffer writes are ordered by the GL, but the barrier costs one
+    // command per scene and removes the whole question on a young driver.
+    const auto finish_mask_clear = [] {
+        glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+    };
 #else
-    GLubyte clear_bytes[4] = { initial_byte, initial_byte, initial_byte, initial_byte };
-    glClearTexImage(context.render_target->masktexture[0], 0, GL_RGBA, GL_UNSIGNED_BYTE, clear_bytes);
+    const auto finish_mask_clear = [] {};
 #endif
+
+#ifndef __ANDROID__
+    if (glad_glClearTexImage) {
+        GLubyte clear_bytes[4] = { initial_byte, initial_byte, initial_byte, initial_byte };
+        glClearTexImage(context.render_target->masktexture[0], 0, GL_RGBA, GL_UNSIGNED_BYTE, clear_bytes);
+        finish_mask_clear();
+        return;
+    }
+
+#endif
+
+    // GLES and any context without ARB_clear_texture.
+    const auto width = context.render_target->width;
+    const auto height = context.render_target->height;
+    std::vector<GLubyte> clear_data(width * height * 4, initial_byte);
+    GLint texture = 0;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+    glBindTexture(GL_TEXTURE_2D, context.render_target->masktexture[0]);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, clear_data.data());
+    glBindTexture(GL_TEXTURE_2D, texture);
+    finish_mask_clear();
 }
 
 void sync_viewport_flat(const GLState &state, GLContext &context) {
@@ -237,7 +256,9 @@ void sync_stencil_func(const GxmStencilStateOp &state_op, const GxmStencilStateV
 void sync_stencil_data(const GxmRecordState &state, const MemState &mem) {
     // Stencil test.
     glEnable(GL_STENCIL_TEST);
-    glStencilMask(GL_TRUE);
+    // GL_TRUE is the integer value 1, not an all-bits write mask.  Using it
+    // here left bits 1-7 of the packed D24S8 attachment uncleared.
+    glStencilMask(0xFFu);
     if (!state.depth_stencil_surface.force_load) {
         glClearStencil(state.depth_stencil_surface.stencil);
         glClear(GL_STENCIL_BUFFER_BIT);
@@ -455,7 +476,9 @@ void sync_vertex_streams_and_attributes(GLContext &context, GxmRecordState &stat
 
     // Each draw will upload the stream data. Assuming that, we can just bind buffer, upload data
     // The GXM submit side should already submit used buffer, but we just delete all just in case
-    std::array<std::size_t, SCE_GXM_MAX_VERTEX_STREAMS> offset_in_buffer;
+    // Value-initialised: a failed ring allocation below leaves its entry unset, and
+    // the attribute loop reads every entry as a GL buffer offset regardless.
+    std::array<std::size_t, SCE_GXM_MAX_VERTEX_STREAMS> offset_in_buffer{};
     for (std::size_t i = 0; i < SCE_GXM_MAX_VERTEX_STREAMS; i++) {
         if (state.vertex_streams[i].data) {
             std::pair<std::uint8_t *, std::size_t> result = context.vertex_stream_ring_buffer.allocate(state.vertex_streams[i].size);

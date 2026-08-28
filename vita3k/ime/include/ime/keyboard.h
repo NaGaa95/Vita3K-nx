@@ -17,14 +17,17 @@
 
 #pragma once
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__SWITCH__)
 
 struct SDL_Window;
+struct EmuEnvState;
 
 namespace ime {
 
+#ifdef __ANDROID__
 // Called once after the SDL window is created to allow text-input APIs to reference it.
 void set_sdl_window(SDL_Window *window);
+#endif
 
 // Show or hide the soft keyboard and toggle the on-screen controller overlay accordingly.
 void set_keyboard_active(bool active);
@@ -32,6 +35,13 @@ void set_keyboard_active(bool active);
 // Push the current native IME snapshot to the Android activity/UI.
 void notify_ime_state_changed();
 
+#ifdef __SWITCH__
+// Runs a queued Vita IME request on the frontend thread. swkbdShow is a
+// blocking library-applet call and therefore must never run on a guest thread.
+bool process_pending_request(EmuEnvState &emuenv);
+bool has_pending_request();
+#endif
+
 } // namespace ime
 
-#endif // __ANDROID__
+#endif // __ANDROID__ || __SWITCH__
