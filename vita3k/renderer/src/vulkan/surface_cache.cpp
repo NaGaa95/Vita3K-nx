@@ -59,6 +59,51 @@ static bool format_need_additional_memory(SceGxmColorBaseFormat format) {
 
 namespace renderer::vulkan {
 
+static bool surface_is_repacked_u4u4u4u4(const ColorSurfaceCacheInfo &surface) {
+    return surface.format == SCE_GXM_COLOR_BASE_FORMAT_U4U4U4U4
+        && (surface.texture.format == vk::Format::eR8G8B8A8Unorm
+            || surface.texture.format == vk::Format::eR8G8B8A8Srgb);
+}
+
+static uint8_t unorm8_to_unorm4(uint8_t value) {
+    return static_cast<uint8_t>((static_cast<uint32_t>(value) * 15 + 127) / 255);
+}
+
+// R4G4B4A4_UNORM_PACK16 stores R in bits 12..15 and A in bits 0..3.
+static uint32_t r4g4b4a4_shift(vk::ComponentSwizzle component) {
+    switch (component) {
+    case vk::ComponentSwizzle::eR:
+        return 12;
+    case vk::ComponentSwizzle::eG:
+        return 8;
+    case vk::ComponentSwizzle::eB:
+        return 4;
+    default:
+        return 0;
+    }
+}
+
+static void pack_rgba8_to_r4g4b4a4(uint8_t *dst, const uint8_t *src, uint32_t pixel_stride, uint32_t height, const vk::ComponentMapping &swizzle) {
+    const uint32_t shift_r = r4g4b4a4_shift(swizzle.r);
+    const uint32_t shift_g = r4g4b4a4_shift(swizzle.g);
+    const uint32_t shift_b = r4g4b4a4_shift(swizzle.b);
+    const uint32_t shift_a = r4g4b4a4_shift(swizzle.a);
+
+    for (uint32_t y = 0; y < height; y++) {
+        uint16_t *dst_row = reinterpret_cast<uint16_t *>(dst + y * pixel_stride * sizeof(uint16_t));
+        const uint8_t *src_row = src + y * pixel_stride * 4;
+
+        for (uint32_t x = 0; x < pixel_stride; x++) {
+            const uint32_t r = unorm8_to_unorm4(src_row[x * 4 + 0]);
+            const uint32_t g = unorm8_to_unorm4(src_row[x * 4 + 1]);
+            const uint32_t b = unorm8_to_unorm4(src_row[x * 4 + 2]);
+            const uint32_t a = unorm8_to_unorm4(src_row[x * 4 + 3]);
+
+            dst_row[x] = static_cast<uint16_t>((r << shift_r) | (g << shift_g) | (b << shift_b) | (a << shift_a));
+        }
+    }
+}
+
 static void protect_surface(MemState &mem, ColorSurfaceCacheInfo &info) {
     const bool trap_reads = (info.tiling == SurfaceTiling::Linear
         && format_support_surface_sync(info.format));
@@ -225,7 +270,7 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
     overlap = (overlap && (ite->first + ite->second->total_bytes) > address);
 
     const SceGxmColorBaseFormat base_format = gxm::get_base_format(color->colorFormat);
-    vk::Format vk_format = color::translate_format(base_format);
+    vk::Format vk_format = color::translate_surface_format(base_format);
 
     SurfaceTiling tiling;
     if (color->surfaceType == SCE_GXM_COLOR_SURFACE_LINEAR)
@@ -414,7 +459,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         return std::nullopt;
 
     const vk::ComponentMapping swizzle = texture::translate_swizzle(gxm::get_format(texture));
-    vk::Format vk_format = color::translate_format(base_format);
+    vk::Format vk_format = color::translate_surface_format(base_format);
 
     const bool is_srgb = texture.gamma_mode != 0;
     if (is_srgb) {
@@ -606,9 +651,10 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                     0,
                     0 },
                 .extent = {
-                    // Don't try to copy what is in the stride
-                    std::min<uint32_t>(width, info.width),
-                    std::min<uint32_t>(height, info.height),
+                    // Don't try to copy what is in the stride, and the copy starts at
+                    // srcOffset, so the room left is measured from there
+                    std::min<uint32_t>(width, info.width - start_x),
+                    std::min<uint32_t>(height, info.height - start_sourced_line),
                     1 }
             };
             cmd_buffer.copyImage(info.texture.image, vk::ImageLayout::eGeneral, casted->texture.image, vk::ImageLayout::eTransferDstOptimal, image_copy);
@@ -1251,14 +1297,18 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
 
     vk::Buffer buffer;
     uint32_t offset;
-    if (format_need_additional_memory(last_written_surface->format)) {
+    const uint32_t pixel_stride = (last_written_surface->stride_bytes * 8) / gxm::bits_per_pixel(last_written_surface->format);
+    if (format_need_additional_memory(last_written_surface->format)
+        || surface_is_repacked_u4u4u4u4(*last_written_surface)) {
         if (!last_written_surface->copy_buffer)
             last_written_surface->copy_buffer = std::make_unique<vkutil::Buffer>();
 
         vkutil::Buffer &copy_buffer = *last_written_surface->copy_buffer;
 
         if (!copy_buffer.buffer) {
-            copy_buffer.size = last_written_surface->stride_bytes * last_written_surface->original_height;
+            // Size for the wider host format, before guest-format packing.
+            copy_buffer.size = static_cast<vk::DeviceSize>(pixel_stride) * last_written_surface->original_height
+                * vk::blockSize(last_written_surface->texture.format);
             copy_buffer.init_buffer(vk::BufferUsageFlagBits::eTransferDst, vkutil::vma_mapped_alloc);
         }
 
@@ -1272,7 +1322,6 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
         last_written_surface->need_post_surface_sync = !is_swizzle_identity;
         std::tie(buffer, offset) = state.get_matching_mapping(last_written_surface->data);
     }
-    const uint32_t pixel_stride = (last_written_surface->stride_bytes * 8) / gxm::bits_per_pixel(last_written_surface->format);
     vk::BufferImageCopy copy{
         .bufferOffset = offset,
         .bufferRowLength = pixel_stride,
@@ -1352,6 +1401,11 @@ void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, ColorSurface
     const uint32_t pixel_stride = (surface->stride_bytes * 8) / gxm::bits_per_pixel(surface->format);
     const uint32_t nb_pixels = pixel_stride * surface->original_height;
     uint8_t *pixels = surface->data.cast<uint8_t>().get(mem);
+
+    if (surface_is_repacked_u4u4u4u4(*surface)) {
+        pack_rgba8_to_r4g4b4a4(pixels, static_cast<const uint8_t *>(surface->copy_buffer->mapped_data), pixel_stride, surface->original_height, surface->swizzle);
+        return;
+    }
 
     if (format_need_additional_memory(surface->format)) {
         // special case, use a custom function

@@ -476,6 +476,14 @@ vk::Format translate_format(SceGxmColorBaseFormat format) {
         return {};
     }
 }
+
+vk::Format translate_surface_format(SceGxmColorBaseFormat base_format) {
+    // Emulate unsupported R4G4B4A4 attachments with RGBA8, packing on readback.
+    if (base_format == SCE_GXM_COLOR_BASE_FORMAT_U4U4U4U4)
+        return vk::Format::eR8G8B8A8Unorm;
+
+    return translate_format(base_format);
+}
 } // namespace color
 
 namespace texture {
