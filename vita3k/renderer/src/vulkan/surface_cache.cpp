@@ -166,6 +166,10 @@ void VKSurfaceCache::destroy_surface(ColorSurfaceCacheInfo &info) {
 
     destroy_framebuffers(info.texture.view);
     destroy_queue.add_image(info.texture);
+
+    // Reallocate for the new surface size while keeping queued readback mappings alive.
+    if (info.copy_buffer)
+        destroy_queue.add_buffer(*info.copy_buffer);
 }
 
 void VKSurfaceCache::destroy_surface(DepthStencilSurfaceCacheInfo &info) {
