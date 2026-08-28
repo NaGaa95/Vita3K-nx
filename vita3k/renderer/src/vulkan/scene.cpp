@@ -331,6 +331,10 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
 
 void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format,
     Ptr<void> indices, size_t count, uint32_t instance_count, MemState &mem, const Config &config) {
+    // Without a mask attachment, mask updates would overwrite the color surface.
+    if (!context.state.features.use_mask_bit && context.record.fragment_program.get(mem)->is_maskupdate)
+        return;
+
     void *indices_ptr = indices.get(mem);
 
     context.check_for_macroblock_change(true);
