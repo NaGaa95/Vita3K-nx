@@ -175,6 +175,8 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     }
     context.current_color_format = vk_format;
 
+    rt->width = rt->base_width;
+    rt->height = rt->base_height;
     if (rt->multisample_mode && !context.record.color_surface.downscale) {
         // using MSAA without downscaling, emulate this as best as we can by multiplying the width and height of the render target by 2
         rt->width *= 2;
@@ -489,12 +491,6 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
 
     if (!submit)
         return;
-
-    if (render_target->multisample_mode && !record.color_surface.downscale) {
-        // revert changes made in set_context
-        render_target->width /= 2;
-        render_target->height /= 2;
-    }
 
     vk::Fence fence = next_fence;
     next_fence = nullptr;

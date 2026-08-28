@@ -366,6 +366,9 @@ struct VKRenderTarget : public renderer::RenderTarget {
     vk::Device device;
     uint16_t width;
     uint16_t height;
+    // Original dimensions, restored before applying per-scene MSAA scaling.
+    uint16_t base_width;
+    uint16_t base_height;
     vkutil::Image color;
     vkutil::Image depthstencil;
 
