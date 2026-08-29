@@ -28,6 +28,8 @@
 #include <util/overloaded.h>
 #include <util/switch_thread.h>
 
+#include <algorithm>
+
 namespace renderer::vulkan {
 
 void VKContext::wait_thread_function(const MemState &mem) {
@@ -214,6 +216,8 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.current_framebuffer = framebuffer.standard;
     context.current_shader_interlock_framebuffer = framebuffer.shader_interlock;
     context.current_color_base_image = framebuffer.base_image;
+    context.current_fb_width = framebuffer.width;
+    context.current_fb_height = framebuffer.height;
 
     // make sure we are not keeping any texture from the previous pass
     // (textures can be still bound even though they are not used)
@@ -369,6 +373,16 @@ void VKContext::start_render_pass(bool create_descriptor_set) {
             .offset = { 0, 0 },
             .extent = { render_target->width, render_target->height }
         };
+    }
+
+    // Zero width means no framebuffer; it can otherwise be smaller than the target.
+    if (current_fb_width != 0) {
+        const uint32_t offset_x = static_cast<uint32_t>(curr_renderpass_info.renderArea.offset.x);
+        const uint32_t offset_y = static_cast<uint32_t>(curr_renderpass_info.renderArea.offset.y);
+        const uint32_t max_width = current_fb_width - std::min(current_fb_width, offset_x);
+        const uint32_t max_height = current_fb_height - std::min(current_fb_height, offset_y);
+        curr_renderpass_info.renderArea.extent.width = std::min(curr_renderpass_info.renderArea.extent.width, max_width);
+        curr_renderpass_info.renderArea.extent.height = std::min(curr_renderpass_info.renderArea.extent.height, max_height);
     }
 
     // only the depth-stencil attachment may be clear if not force loaded
