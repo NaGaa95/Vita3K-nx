@@ -78,6 +78,9 @@ struct VKTextureCache : public TextureCache {
 
     void configure_sampler(size_t index, const SceGxmTexture &texture, bool no_linear) override;
 
+    bool format_supports_sampled_image(vk::Format format);
+    unordered_map_fast<uint32_t, bool> sampled_image_support_cache;
+
     void import_configure_impl(SceGxmTextureBaseFormat base_format, uint32_t width, uint32_t height, bool is_srgb, uint16_t nb_components, uint16_t mipcount, bool swap_rb) override;
 
     vk::Sampler get_retrieved_sampler() const {

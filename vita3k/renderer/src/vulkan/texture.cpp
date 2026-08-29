@@ -397,8 +397,11 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
     if (gxm::is_bcn_format(base_format) && !support_dxt)
         // texture will be decompressed
         vk_format = bcn_to_rgba8(vk_format);
-    if (gxm_texture.gamma_mode)
-        vk_format = linear_to_srgb(vk_format);
+    if (gxm_texture.gamma_mode) {
+        const vk::Format srgb_format = linear_to_srgb(vk_format);
+        if (srgb_format == vk_format || format_supports_sampled_image(srgb_format))
+            vk_format = srgb_format;
+    }
 
     current_texture->mip_count = mip_count;
     current_texture->is_cube = is_cube;
@@ -595,6 +598,19 @@ void VKTextureCache::upload_done() {
     // this should not be necessary
     cmd_buffer = nullptr;
     is_texture_transfer_ready = false;
+}
+
+bool VKTextureCache::format_supports_sampled_image(vk::Format format) {
+    const uint32_t key = static_cast<uint32_t>(format);
+    const auto it = sampled_image_support_cache.find(key);
+    if (it != sampled_image_support_cache.end())
+        return it->second;
+
+    const vk::FormatProperties props = state.physical_device.getFormatProperties(format);
+    constexpr vk::FormatFeatureFlags needed = vk::FormatFeatureFlagBits::eSampledImage | vk::FormatFeatureFlagBits::eTransferDst;
+    const bool supported = (props.optimalTilingFeatures & needed) == needed;
+    sampled_image_support_cache.emplace(key, supported);
+    return supported;
 }
 
 void VKTextureCache::configure_sampler(size_t index, const SceGxmTexture &texture, bool no_linear) {
