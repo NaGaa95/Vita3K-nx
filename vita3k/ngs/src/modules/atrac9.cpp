@@ -207,6 +207,8 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
     runtime->decoded_superframe_samples.resize(static_cast<size_t>(runtime->decoder->get(DecoderQuery::AT9_SAMPLE_PER_SUPERFRAME)) * sizeof(float) * 2);
     uint32_t decoded_superframe_pos = 0;
     bool got_decode_error = false;
+    // A decoder flush must resume at a superframe boundary, including after errors.
+    const int32_t pos_after_this_superframe = state->current_byte_position_in_buffer + static_cast<int32_t>(superframe_size);
     // decode a whole superframe at a time
     for (uint32_t frame = 0; frame < runtime->decoder->get(DecoderQuery::AT9_FRAMES_IN_SUPERFRAME); frame++) {
         if (!runtime->decoder->send(input, 0)) {
@@ -280,6 +282,8 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
     }
 
     if (got_decode_error) {
+        // Update before the callback, which may key off and reset this position.
+        state->current_byte_position_in_buffer = pos_after_this_superframe;
         voice_lock.unlock();
         scheduler_lock.unlock();
 
