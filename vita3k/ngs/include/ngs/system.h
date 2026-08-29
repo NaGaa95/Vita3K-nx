@@ -295,6 +295,9 @@ struct Voice {
     std::unique_ptr<std::mutex> voice_mutex;
     VoiceProduct products[MAX_VOICE_OUTPUT];
 
+    // Gain for the implicit master route when the guest's patch handle is missing.
+    float implicit_volume_matrix[2][2] = { { 1.0f, 0.0f }, { 0.0f, 1.0f } };
+
     Ptr<void> finished_callback;
     Ptr<void> finished_callback_user_data;
 
@@ -347,6 +350,7 @@ struct System : public MempoolObject {
 
 bool deliver_data(const MemState &mem, const std::vector<Voice *> &voice_queue, Voice *source, const uint8_t output_port,
     const VoiceProduct &data_to_deliver);
+bool deliver_data_to_master(const MemState &mem, Voice *master, Voice *source, const VoiceProduct &data_to_deliver);
 
 bool init_system(State &ngs, const MemState &mem, SceNgsSystemInitParams *parameters, Ptr<void> memspace, const uint32_t memspace_size);
 void release_system(State &ngs, const MemState &mem, System *system);
