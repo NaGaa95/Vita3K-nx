@@ -69,6 +69,23 @@ static uint8_t unorm8_to_unorm4(uint8_t value) {
     return static_cast<uint8_t>((static_cast<uint32_t>(value) * 15 + 127) / 255);
 }
 
+// No render-pass dependency covers these transfer reads.
+// Shader writes also cover the interlock path.
+static void barrier_render_to_transfer_read(vk::CommandBuffer cmd_buffer, vk::Image image) {
+    const vk::ImageMemoryBarrier barrier{
+        .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite | vk::AccessFlagBits::eShaderWrite,
+        .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+        .oldLayout = vk::ImageLayout::eGeneral,
+        .newLayout = vk::ImageLayout::eGeneral,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = image,
+        .subresourceRange = vkutil::color_subresource_range
+    };
+    cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eFragmentShader,
+        vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlags(), {}, {}, barrier);
+}
+
 // R4G4B4A4_UNORM_PACK16 stores R in bits 12..15 and A in bits 0..3.
 static uint32_t r4g4b4a4_shift(vk::ComponentSwizzle component) {
     switch (component) {
@@ -661,6 +678,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                     std::min<uint32_t>(height, info.height - start_sourced_line),
                     1 }
             };
+            barrier_render_to_transfer_read(cmd_buffer, info.texture.image);
             cmd_buffer.copyImage(info.texture.image, vk::ImageLayout::eGeneral, casted->texture.image, vk::ImageLayout::eTransferDstOptimal, image_copy);
         } else {
             LOG_INFO_ONCE("Game is doing typeless copies");
@@ -685,6 +703,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                     0 },
                 .imageExtent = { info.width, height, 1 }
             };
+            barrier_render_to_transfer_read(cmd_buffer, info.texture.image);
             cmd_buffer.copyImageToBuffer(info.texture.image, vk::ImageLayout::eGeneral, casted->transition_buffer.buffer, copy_image_buffer);
 
             const vk::BufferMemoryBarrier transition_barrier{
@@ -1274,6 +1293,7 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
 
     vk::Image image_to_copy = last_written_surface->texture.image;
     vk::ImageLayout image_layout = vk::ImageLayout::eGeneral;
+    barrier_render_to_transfer_read(cmd_buffer, image_to_copy);
 
     // this works for surface swizzles
     bool is_swizzle_identity = last_written_surface->swizzle.r == vk::ComponentSwizzle::eR;
