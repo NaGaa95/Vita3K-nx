@@ -683,8 +683,10 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
 
         configure = true;
         upload = true;
-        // only hash the first mips, assume no game would modify other mips (and faces) without modifying the first one
-        info->texture_size = gxm::texture_size_first_mip(gxm_texture);
+        // Hash all mip levels, falling back to the first when the full range is unmapped.
+        info->texture_size = gxm::texture_size(gxm_texture);
+        if (info->texture_size > 0 && !is_valid_addr_range(mem, gxm_texture.data_addr << 2, (gxm_texture.data_addr << 2) + info->texture_size))
+            info->texture_size = gxm::texture_size_first_mip(gxm_texture);
         // use the texture_repr representation, it contains everything we need and we can use it to erase the key
         // from texture_lookup later
         info->texture = std::bit_cast<SceGxmTexture>(texture_repr);
