@@ -1775,7 +1775,7 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
             // Size for the wider host format, before guest-format packing.
             copy_buffer.size = static_cast<vk::DeviceSize>(pixel_stride) * last_written_surface->original_height
                 * vk::blockSize(last_written_surface->texture.format);
-            copy_buffer.init_buffer(vk::BufferUsageFlagBits::eTransferDst, vkutil::vma_mapped_alloc);
+            copy_buffer.init_buffer(vk::BufferUsageFlagBits::eTransferDst, vkutil::vma_mapped_alloc_cached);
         }
 
         buffer = copy_buffer.buffer;
@@ -1869,11 +1869,14 @@ void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, ColorSurface
     uint8_t *pixels = surface->data.cast<uint8_t>().get(mem);
 
     if (surface_is_repacked_u4u4u4u4(*surface)) {
+        surface->copy_buffer->invalidate(0, VK_WHOLE_SIZE);
         pack_rgba8_to_r4g4b4a4(pixels, static_cast<const uint8_t *>(surface->copy_buffer->mapped_data), pixel_stride, surface->original_height, surface->swizzle);
         return;
     }
 
     if (format_need_additional_memory(surface->format)) {
+        surface->copy_buffer->invalidate(0, VK_WHOLE_SIZE);
+
         // special case, use a custom function
         const bool is_swizzle_identity = surface->swizzle.r == vk::ComponentSwizzle::eR;
         if (!surface->sws_context) {
