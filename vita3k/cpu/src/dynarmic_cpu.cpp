@@ -56,6 +56,44 @@ SwitchJitPoolShutdownResult switch_shutdown_jit_code_pool() {
 }
 #endif
 
+// Dynarmic asserts on unhandled coprocessor operations, even in release builds.
+static std::uint64_t coproc_noop(void *, std::uint32_t, std::uint32_t) {
+    return 0;
+}
+
+static Dynarmic::A32::Coprocessor::Callback coproc_noop_callback() {
+    return Dynarmic::A32::Coprocessor::Callback{ &coproc_noop, std::nullopt };
+}
+
+class ArmDynarmicNullCP : public Dynarmic::A32::Coprocessor {
+public:
+    using CoprocReg = Dynarmic::A32::CoprocReg;
+
+    ~ArmDynarmicNullCP() override = default;
+
+    std::optional<Callback> CompileInternalOperation(bool, unsigned, CoprocReg, CoprocReg, CoprocReg, unsigned) override {
+        return coproc_noop_callback();
+    }
+    CallbackOrAccessOneWord CompileSendOneWord(bool, unsigned, CoprocReg, CoprocReg, unsigned) override {
+        return coproc_noop_callback();
+    }
+    CallbackOrAccessTwoWords CompileSendTwoWords(bool, unsigned, CoprocReg) override {
+        return coproc_noop_callback();
+    }
+    CallbackOrAccessOneWord CompileGetOneWord(bool, unsigned, CoprocReg, CoprocReg, unsigned) override {
+        return coproc_noop_callback();
+    }
+    CallbackOrAccessTwoWords CompileGetTwoWords(bool, unsigned, CoprocReg) override {
+        return coproc_noop_callback();
+    }
+    std::optional<Callback> CompileLoadWords(bool, bool, CoprocReg, std::optional<std::uint8_t>) override {
+        return coproc_noop_callback();
+    }
+    std::optional<Callback> CompileStoreWords(bool, bool, CoprocReg, std::optional<std::uint8_t>) override {
+        return coproc_noop_callback();
+    }
+};
+
 class ArmDynarmicCP15 : public Dynarmic::A32::Coprocessor {
     uint32_t tpidruro;
     uint32_t sctlr;
@@ -75,7 +113,7 @@ public:
     std::optional<Callback> CompileInternalOperation(bool two, unsigned opc1, CoprocReg CRd,
         CoprocReg CRn, CoprocReg CRm,
         unsigned opc2) override {
-        return std::nullopt;
+        return coproc_noop_callback();
     }
 
     CallbackOrAccessOneWord CompileSendOneWord(bool two, unsigned opc1, CoprocReg CRn,
@@ -96,11 +134,11 @@ public:
         }
 
         LOG_WARN("Unhandled CP15 MCR: two={} opc1={} CRn={} CRm={} opc2={}", two, opc1, (int)CRn, (int)CRm, opc2);
-        return CallbackOrAccessOneWord{};
+        return coproc_noop_callback();
     }
 
     CallbackOrAccessTwoWords CompileSendTwoWords(bool two, unsigned opc, CoprocReg CRm) override {
-        return CallbackOrAccessTwoWords{};
+        return coproc_noop_callback();
     }
 
     CallbackOrAccessOneWord CompileGetOneWord(bool two, unsigned opc1, CoprocReg CRn, CoprocReg CRm,
@@ -121,21 +159,21 @@ public:
         }
 
         LOG_WARN("Unhandled CP15 MRC: two={} opc1={} CRn={} CRm={} opc2={}", two, opc1, (int)CRn, (int)CRm, opc2);
-        return CallbackOrAccessOneWord{};
+        return coproc_noop_callback();
     }
 
     CallbackOrAccessTwoWords CompileGetTwoWords(bool two, unsigned opc, CoprocReg CRm) override {
-        return CallbackOrAccessTwoWords{};
+        return coproc_noop_callback();
     }
 
     std::optional<Callback> CompileLoadWords(bool two, bool long_transfer, CoprocReg CRd,
         std::optional<std::uint8_t> option) override {
-        return std::nullopt;
+        return coproc_noop_callback();
     }
 
     std::optional<Callback> CompileStoreWords(bool two, bool long_transfer, CoprocReg CRd,
         std::optional<std::uint8_t> option) override {
-        return std::nullopt;
+        return coproc_noop_callback();
     }
 
     void set_tpidruro(uint32_t tpidruro) {
@@ -546,6 +584,11 @@ std::unique_ptr<Dynarmic::A32::Jit> DynarmicCPU::make_jit() {
     config.hook_hint_instructions = true;
     config.global_monitor = &shared_monitor;
     config.coprocessors[15] = cp15;
+    static const std::shared_ptr<ArmDynarmicNullCP> null_cp = std::make_shared<ArmDynarmicNullCP>();
+    for (auto &coproc : config.coprocessors) {
+        if (!coproc)
+            coproc = null_cp;
+    }
     config.processor_id = core_id;
     config.optimizations = cpu_opt ? Dynarmic::all_safe_optimizations : Dynarmic::no_optimizations;
     config.enable_cycle_counting = false;
