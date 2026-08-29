@@ -1447,7 +1447,7 @@ EXPORT(int, sceKernelTryLockWriteRWLock) {
 
 EXPORT(int, sceKernelUnlockMutex, SceUID mutexid, int unlock_count) {
     TRACY_FUNC(sceKernelUnlockMutex, mutexid, unlock_count);
-    return mutex_unlock(emuenv.kernel, export_name, thread_id, mutexid, unlock_count, SyncWeight::Heavy);
+    return mutex_unlock(emuenv.kernel, emuenv.mem, export_name, thread_id, mutexid, unlock_count, SyncWeight::Heavy);
 }
 
 EXPORT(int, sceKernelUnlockReadRWLock, SceUID lock_id) {
