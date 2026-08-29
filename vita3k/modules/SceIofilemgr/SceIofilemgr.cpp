@@ -125,9 +125,9 @@ EXPORT(int, _sceIoOpenAsync) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceIoPread) {
-    TRACY_FUNC(_sceIoPread);
-    return UNIMPLEMENTED();
+EXPORT(SceSSize, _sceIoPread, SceUID fd, void *buf, SceSize nbyte, SceOff offset) {
+    TRACY_FUNC(_sceIoPread, fd, buf, nbyte, offset);
+    return read_file_at(buf, emuenv.io, fd, nbyte, offset, export_name);
 }
 
 EXPORT(int, _sceIoPreadAsync) {
@@ -135,9 +135,9 @@ EXPORT(int, _sceIoPreadAsync) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceIoPwrite) {
-    TRACY_FUNC(_sceIoPwrite);
-    return UNIMPLEMENTED();
+EXPORT(SceSSize, _sceIoPwrite, SceUID fd, const void *buf, SceSize nbyte, SceOff offset) {
+    TRACY_FUNC(_sceIoPwrite, fd, buf, nbyte, offset);
+    return write_file_at(fd, buf, nbyte, offset, emuenv.io, export_name);
 }
 
 EXPORT(int, _sceIoPwriteAsync) {

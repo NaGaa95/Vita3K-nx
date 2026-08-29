@@ -642,14 +642,7 @@ EXPORT(int, sceIoOpenAsync) {
 
 EXPORT(SceSSize, sceIoPread, SceUID fd, void *buf, SceSize nbyte, SceOff offset) {
     TRACY_FUNC(sceIoPread, fd, buf, nbyte, offset);
-    auto pos = tell_file(emuenv.io, fd, export_name);
-    if (pos < 0) {
-        return static_cast<SceSSize>(pos);
-    }
-    seek_file(fd, offset, SCE_SEEK_SET, emuenv.io, export_name);
-    const auto res = read_file(buf, emuenv.io, fd, nbyte, export_name);
-    seek_file(fd, pos, SCE_SEEK_SET, emuenv.io, export_name);
-    return res;
+    return read_file_at(buf, emuenv.io, fd, nbyte, offset, export_name);
 }
 
 EXPORT(int, sceIoPreadAsync) {
@@ -659,14 +652,7 @@ EXPORT(int, sceIoPreadAsync) {
 
 EXPORT(SceSSize, sceIoPwrite, SceUID fd, const void *buf, SceSize nbyte, SceOff offset) {
     TRACY_FUNC(sceIoPwrite, fd, buf, nbyte, offset);
-    auto pos = tell_file(emuenv.io, fd, export_name);
-    if (pos < 0) {
-        return static_cast<SceSSize>(pos);
-    }
-    seek_file(fd, offset, SCE_SEEK_SET, emuenv.io, export_name);
-    const auto res = write_file(fd, buf, nbyte, emuenv.io, export_name);
-    seek_file(fd, pos, SCE_SEEK_SET, emuenv.io, export_name);
-    return res;
+    return write_file_at(fd, buf, nbyte, offset, emuenv.io, export_name);
 }
 
 EXPORT(int, sceIoPwriteAsync) {

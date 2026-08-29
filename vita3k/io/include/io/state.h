@@ -124,6 +124,9 @@ struct IOState {
     std::unordered_map<std::string, std::string> cachemap;
     bool case_isens_find_enabled = false;
 
+    // Serializes positional I/O while the shared file position is temporarily changed.
+    std::mutex file_mutex;
+
     std::mutex overlay_mutex;
     SceUID next_overlay_id = 1;
     // overlay in the order they should be applied

@@ -424,6 +424,57 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
     return fd;
 }
 
+int read_file_at(void *data, IOState &io, const SceUID fd, const SceSize size, const SceOff offset, const char *export_name) {
+    assert(data != nullptr);
+    if (fd < 0)
+        return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
+
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
+
+    const auto file = io.std_files.find(fd);
+    if (file == io.std_files.end())
+        return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
+
+    const SceOff previous = file->second.tell();
+    if (previous < 0)
+        return static_cast<int>(previous);
+    if (!file->second.seek(offset, SCE_SEEK_SET))
+        return IO_ERROR_UNK();
+
+    const auto read = file->second.read(data, 1, size);
+
+    file->second.seek(previous, SCE_SEEK_SET);
+
+    LOG_TRACE_IF(log_file_op && log_file_read, "{}: Reading {} bytes of fd {} at {}", export_name, read, log_hex(fd), offset);
+    return static_cast<int>(read);
+}
+
+int write_file_at(const SceUID fd, const void *data, const SceSize size, const SceOff offset, IOState &io, const char *export_name) {
+    assert(data != nullptr);
+    if (fd < 0)
+        return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
+
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
+
+    const auto file = io.std_files.find(fd);
+    if (file == io.std_files.end())
+        return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
+    if (!file->second.can_write_file())
+        return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
+
+    const SceOff previous = file->second.tell();
+    if (previous < 0)
+        return static_cast<int>(previous);
+    if (!file->second.seek(offset, SCE_SEEK_SET))
+        return IO_ERROR_UNK();
+
+    const auto written = file->second.write(data, 1, size);
+    file->second.seek(previous, SCE_SEEK_SET);
+
+    LOG_TRACE_IF(log_file_op, "{}: Writing to fd: {}, size: {} at {}", export_name, log_hex(fd), size, offset);
+    return static_cast<int>(written);
+}
+
 int read_file(void *data, IOState &io, const SceUID fd, const SceSize size, const char *export_name) {
     assert(data != nullptr);
     assert(size >= 0);
