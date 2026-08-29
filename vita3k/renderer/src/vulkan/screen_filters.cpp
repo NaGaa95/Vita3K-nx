@@ -95,7 +95,7 @@ void SinglePassScreenFilter::create_layout_sync() {
 
     // create vao
     vao.size = sizeof(screen_vertices_t) * screen.swapchain_size;
-    vao.init_buffer(vk::BufferUsageFlagBits::eVertexBuffer | vk::BufferUsageFlagBits::eTransferDst);
+    vao.init_buffer(vk::BufferUsageFlagBits::eVertexBuffer, vkutil::vma_mapped_alloc);
 
     // create and zero-fill uvs
     last_uvs.resize(screen.swapchain_size);
@@ -242,7 +242,9 @@ void SinglePassScreenFilter::render(bool is_pre_renderpass, vk::ImageView src_im
             vertex_buffer_data[3].uv[0] = uvs[0];
             vertex_buffer_data[3].uv[1] = uvs[3];
 
-            screen.current_cmd_buffer.updateBuffer(vao.buffer, screen.swapchain_image_idx * sizeof(screen_vertices_t), sizeof(screen_vertices_t), &vertex_buffer_data);
+            // acquire_swapchain_image already waited for this buffer.
+            memcpy(static_cast<uint8_t *>(vao.mapped_data) + screen.swapchain_image_idx * sizeof(screen_vertices_t),
+                &vertex_buffer_data, sizeof(screen_vertices_t));
             last_uvs[screen.swapchain_image_idx] = uvs;
         }
 
