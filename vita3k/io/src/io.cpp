@@ -493,7 +493,7 @@ int write_file(SceUID fd, const void *data, const SceSize size, const IOState &i
             if (io.redirect_stdio) {
                 std::cout << s;
             } else {
-                if (s.back() == '\n')
+                if (!s.empty() && s.back() == '\n')
                     s.pop_back();
                 LOG_TRACE_IF(log_file_op, "*** TTY: {}", s);
             }
