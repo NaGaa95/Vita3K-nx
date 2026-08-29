@@ -1510,7 +1510,7 @@ static spv::Function *make_frag_finalize_function(spv::Builder &b, const SpirvSh
         precision = spv::NoPrecision;
 
     int reg_off = 0;
-    if (!program.is_native_color() && vertex_varyings_ptr->output_param_type == 1) {
+    if (!program.is_native_color() && (vertex_varyings_ptr->output_param_type == 1 || vertex_varyings_ptr->output_param_type == 3)) {
         reg_off = vertex_varyings_ptr->fragment_output_start;
         if (reg_off != 0) {
             LOG_INFO("Non zero pa offset: {} at {}", reg_off, translate_state.hash.c_str());
