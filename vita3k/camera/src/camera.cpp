@@ -332,9 +332,16 @@ int Camera::read(SceCameraRead *read, void *pIBase, void *pUBase, void *pVBase, 
             // convert SDL_PIXELFORMAT_YUY2 Y0+U0+Y1+V0 to planar format
             const int width = pImpl->frame->w;
             const int height = pImpl->frame->h;
-            if (sizeIBase < (SceSize)(width * height) || sizeUBase < (SceSize)((width / 2) * height) || sizeVBase < (SceSize)((width / 2) * height)) {
+            const bool chroma_fits = sizeUBase >= (SceSize)((width / 2) * height) && sizeVBase >= (SceSize)((width / 2) * height);
+            if (sizeIBase < (SceSize)(width * height) || !chroma_fits) {
                 LOG_ERROR_ONCE("Buffer sizes too small for YUV422 planar conversion: IBase {}, UBase {}, VBase {}, required I {}, U {}, V {}", sizeIBase, sizeUBase, sizeVBase, width * height, (width / 2) * height, (width / 2) * height);
-                return SCE_CAMERA_ERROR_PARAM;
+                if (sizeIBase < (SceSize)(width * height))
+                    return SCE_CAMERA_ERROR_PARAM;
+                // Return luma with neutral chroma when only the chroma buffers are too small.
+                if (pUBase && sizeUBase)
+                    memset(pUBase, 127, sizeUBase);
+                if (pVBase && sizeVBase)
+                    memset(pVBase, 127, sizeVBase);
             }
             if (!SDL_LockSurface(pImpl->frame.get())) {
                 LOG_ERROR("Failed to lock camera frame surface: {}", SDL_GetError());
@@ -351,8 +358,10 @@ int Camera::read(SceCameraRead *read, void *pIBase, void *pUBase, void *pVBase, 
                     ptrdiff_t pair_idx = x / 2;
                     Y[y * width + x] = row[pair_idx * 4];
                     Y[y * width + x + 1] = row[pair_idx * 4 + 2];
-                    U[y * (width / 2) + pair_idx] = row[pair_idx * 4 + 1];
-                    V[y * (width / 2) + pair_idx] = row[pair_idx * 4 + 3];
+                    if (chroma_fits) {
+                        U[y * (width / 2) + pair_idx] = row[pair_idx * 4 + 1];
+                        V[y * (width / 2) + pair_idx] = row[pair_idx * 4 + 3];
+                    }
                 }
             }
             SDL_UnlockSurface(pImpl->frame.get());
