@@ -792,6 +792,7 @@ static SwitchControllerFrame switch_poll_controller(EmuEnvState &emuenv, PadStat
             vmouse.cursor->set_pressed(false);
         clear_switch_controller_input(emuenv);
         emuenv.touch.touchscreen_port = SCE_TOUCH_PORT_FRONT;
+        emuenv.touch.touchscreen_both = false;
         std::fill_n(emuenv.touch.rear_touch_held, 4, false);
         if (!frame.connected)
             emuenv.ctrl.has_motion_support = false;
@@ -879,6 +880,7 @@ static SwitchControllerFrame switch_poll_controller(EmuEnvState &emuenv, PadStat
     emuenv.touch.touchscreen_port = (rear_zl || rear_zr) && !vmouse.enabled
         ? SCE_TOUCH_PORT_BACK
         : SCE_TOUCH_PORT_FRONT;
+    emuenv.touch.touchscreen_both = !rear_triggers && emuenv.cfg.switch_rear_touch == "both" && !vmouse.enabled;
     if (!rear_triggers && emuenv.cfg.switch_rear_touch != "zl")
         set_ext(HidNpadButton_ZL, SCE_CTRL_L2);
     if (!rear_triggers && emuenv.cfg.switch_rear_touch != "zr")

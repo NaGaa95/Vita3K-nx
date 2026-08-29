@@ -44,20 +44,20 @@ static bool is_common_dialog_running(const EmuEnvState &emuenv) {
         && emuenv.common_dialog.status == SCE_COMMON_DIALOG_STATUS_RUNNING;
 }
 
-static SceTouchData recover_touch_events(const EmuEnvState &emuenv) {
+static SceTouchData recover_touch_events(const EmuEnvState &emuenv, const int port) {
     const auto &touch = emuenv.touch;
     SceTouchData touch_data;
     memset(&touch_data, 0, sizeof(touch_data));
 
     for (uint8_t i = 0; i < touch.finger_count; i++) {
         touch_data.report[i].id = static_cast<uint8_t>(touch.finger_buffer[i].touchID);
-        touch_data.report[i].force = touch.force_touch_enabled[touch.touchscreen_port] ? 128 : 0;
+        touch_data.report[i].force = touch.force_touch_enabled[port] ? 128 : 0;
 
         float x = (touch.finger_buffer[i].x * emuenv.display.viewport_drawable_w - emuenv.display.viewport_x) / emuenv.display.viewport_w;
         float y = (touch.finger_buffer[i].y * emuenv.display.viewport_drawable_h - emuenv.display.viewport_y) / emuenv.display.viewport_h;
         touch_data.report[i].x = static_cast<uint16_t>(x * 1920);
 
-        if (touch.touchscreen_port == SCE_TOUCH_PORT_FRONT) {
+        if (port == SCE_TOUCH_PORT_FRONT) {
             touch_data.report[i].y = static_cast<uint16_t>(y * 1088);
         } else {
             touch_data.report[i].y = static_cast<uint16_t>(108 + y * 781);
@@ -69,17 +69,17 @@ static SceTouchData recover_touch_events(const EmuEnvState &emuenv) {
     return touch_data;
 }
 
-static SceTouchData recover_touchpad_events(const EmuEnvState &emuenv) {
+static SceTouchData recover_touchpad_events(const EmuEnvState &emuenv, const int port) {
     const auto &touch = emuenv.touch;
     SceTouchData touch_data;
     memset(&touch_data, 0, sizeof(touch_data));
 
     for (uint8_t i = 0; i < touch.touchpad_finger_count; i++) {
         touch_data.report[i].id = static_cast<uint8_t>(touch.touchpad_buffer[i].which);
-        touch_data.report[i].force = touch.force_touch_enabled[touch.touchscreen_port] ? 128 : 0;
+        touch_data.report[i].force = touch.force_touch_enabled[port] ? 128 : 0;
 
         touch_data.report[i].x = static_cast<uint16_t>(touch.touchpad_buffer[i].x * 1920);
-        if (touch.touchscreen_port == SCE_TOUCH_PORT_FRONT) {
+        if (port == SCE_TOUCH_PORT_FRONT) {
             touch_data.report[i].y = static_cast<uint16_t>(touch.touchpad_buffer[i].y * 1088);
         } else {
             touch_data.report[i].y = static_cast<uint16_t>(108 + touch.touchpad_buffer[i].y * 781);
@@ -140,16 +140,19 @@ void touch_vsync_update(EmuEnvState &emuenv) {
     constexpr bool on_android = false;
 #endif
     if (touch.finger_count > 0 || touch.touchpad_finger_count > 0 || on_android) {
-        SceTouchData touch_data = touch.is_touchpad ? recover_touchpad_events(emuenv) : recover_touch_events(emuenv);
-        touch_data.timeStamp = timestamp;
-
         SceTouchData *buffers = touch.touch_buffers[(touch.touch_buffer_idx + 1) % MAX_TOUCH_BUFFER_SAVED];
         for (int port = 0; port < 2; port++) {
             buffers[port].status = 0;
             buffers[port].reportNum = 0;
             buffers[port].timeStamp = timestamp;
         }
-        buffers[touch.touchscreen_port] = touch_data;
+        for (int port = 0; port < 2; port++) {
+            if (!touch.touchscreen_both && port != touch.touchscreen_port)
+                continue;
+            SceTouchData touch_data = touch.is_touchpad ? recover_touchpad_events(emuenv, port) : recover_touch_events(emuenv, port);
+            touch_data.timeStamp = timestamp;
+            buffers[port] = touch_data;
+        }
 
     } else {
         const auto &ts = emuenv.touch;

@@ -326,7 +326,7 @@ static const Choice C_aniso[]    = { {"Off","1"}, {"2x","2"}, {"4x","4"}, {"8x",
 // that would only fall back to another mode at runtime.
 static const Choice C_memmap[]   = { {"Double buffer","double-buffer"}, {"Disabled","disabled"} };
 static const Choice C_analog[]   = { {"0.5x","0.5"}, {"1.0x","1.0"}, {"1.5x","1.5"}, {"2.0x","2.0"} };
-static const Choice C_reartouch[]= { {"Off","off"}, {"ZL + touchscreen","zl"}, {"ZR + touchscreen","zr"} };
+static const Choice C_reartouch[]= { {"Off","off"}, {"ZL + touchscreen","zl"}, {"ZR + touchscreen","zr"}, {"Front and rear together","both"} };
 static const Choice C_vitaface[]= { {"Cross","cross"}, {"Circle","circle"}, {"Triangle","triangle"}, {"Square","square"} };
 static const Choice C_sysbtn[]   = { {"Circle","0"}, {"Cross","1"} };  // SCE_SYSTEM_PARAM_ENTER_BUTTON_*
 static const Choice C_datefmt[]  = { {"YYYY/MM/DD","0"}, {"DD/MM/YYYY","1"}, {"MM/DD/YYYY","2"} }; // SCE_SYSTEM_PARAM_DATE_FORMAT_*
@@ -2282,7 +2282,7 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"disable-motion","Controls","Disables Vita motion-sensor input derived from the active Switch controller."},
   {"controller-analog-multiplier","Controls","Scales analog stick movement before it is sent to the emulated Vita."},
   {"switch-stick-deadzone","Controls","Ignores small stick movements to reduce drift. Too high a value reduces fine control."},
-  {"switch-rear-touch","Controls","Chooses the shoulder-button modifier used with the touchscreen to emulate the Vita rear touch panel."},
+  {"switch-rear-touch","Controls","Chooses the shoulder-button modifier used with the touchscreen to emulate the Vita rear touch panel. \"Front and rear together\" uses no modifier and reports every touch on both panels at once, for games that ask for the two to be pressed together. Like the other choices here it needs \"Rear touch buttons\" below turned off."},
   {"switch-rear-touch-triggers","Controls","Puts L2, R2, L3 and R3 on the quadrants of the Vita rear touch panel, where most games expect them: ZL and ZR press the top two, the stick clicks the bottom two. Takes over those four buttons, so the rear touch modifier above is ignored."},
   {"switch-button-a","Controls","Chooses which Vita face button is produced by Nintendo Switch A."},
   {"switch-button-b","Controls","Chooses which Vita face button is produced by Nintendo Switch B."},
