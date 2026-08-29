@@ -19,6 +19,7 @@
 
 #include "../SceProcessmgr/SceProcessmgr.h"
 
+#include <kernel/state.h>
 #include <ngs/state.h>
 #include <ngs/system.h>
 #include <util/log.h>
@@ -328,7 +329,14 @@ EXPORT(SceInt32, sceNgsRackRelease, ngs::Rack *rack, Ptr<void> callback) {
 
     std::unique_lock<std::recursive_mutex> lock(rack->system->voice_scheduler.mutex);
     if (!rack->system->voice_scheduler.is_updating) {
+        const Address released_rack = Ptr<void>(rack, emuenv.mem).address();
         ngs::release_rack(emuenv.ngs, emuenv.mem, rack->system, rack);
+
+        if (callback) {
+            lock.unlock();
+            if (const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id))
+                thread->run_callback(callback.address(), { released_rack });
+        }
     } else if (!callback) {
         // wait for the update to finish
         // if this is called in an interrupt handler it will softlock ngs
