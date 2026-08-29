@@ -693,17 +693,13 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
         // (for example, uniform buffer value and texture data got mixed, so page faults are triggered too many, it's not always good).
         // This works under the assumption that once this big enough texture decided to modify. It will have to modify either all of its data,
         // or replace with an entire new texture.
-        bool should_use_hash = true;
+        // GPU writes bypass page protection, so textures still need hashing.
         if (use_protect && info->texture_size >= mem.host_page_size * 4) {
             range_protect_begin = align(gxm_texture.data_addr << 2, mem.host_page_size);
             range_protect_end = align_down((gxm_texture.data_addr << 2) + info->texture_size, mem.host_page_size);
-
-            if (range_protect_end - range_protect_begin >= mem.host_page_size * 4) {
-                should_use_hash = false;
-            }
         }
 
-        info->use_hash = should_use_hash;
+        info->use_hash = true;
         if (info->use_hash) {
 #ifdef __SWITCH__
             info->last_hashed_scene = memo_scene;
