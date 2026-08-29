@@ -652,11 +652,8 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
                 centroid_str = "_CENTROID";
             }
 
-            uint32_t num_component = 4;
-
-            if ((descriptor->component_info & 0x40) != 0x40) {
-                num_component = 4;
-            } /* else number of components = texture pixel component count. Too bad its not yet supported */
+            const bool program_defines_component_count = (descriptor->component_info & 0x40) == 0;
+            const uint32_t num_component = 4;
 
             std::string texcoord_name = (tex_coord_index == 10) ? "POINTCOORD" : ("TEXCOORD" + std::to_string(tex_coord_index));
             LOG_TRACE("pa{} = tex{}{}<{}{}>({}, {}{}{})", pa_offset, sampling_type, projecting,
@@ -676,6 +673,16 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
             // Size of this extra pa occupied
             // Force this to be PRIVATE
             const auto size = ((descriptor->size >> 6) & 3) + 1;
+
+            // Limit the store to the query's PA allocation, preserving adjacent inputs.
+            const DataType effective_store_type = (store_type == DataType::UNK) ? tex_query_info.component_type : store_type;
+            if (effective_store_type != DataType::UNK) {
+                const uint32_t components_per_register = effective_store_type == DataType::C10 ? 4 : 4 / get_data_type_size(effective_store_type);
+                const uint32_t fits = static_cast<uint32_t>(size) * components_per_register;
+                const uint32_t requested = program_defines_component_count ? num_component : tex_query_info.component_count;
+                tex_query_info.store_component_count = static_cast<uint8_t>(std::min(fits, requested));
+            }
+
             tex_query_info.dest_offset = pa_offset;
 
             tex_query_info.coord_index = tex_coord_index;

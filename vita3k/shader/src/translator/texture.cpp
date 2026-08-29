@@ -330,7 +330,8 @@ void shader::usse::USSETranslatorVisitor::do_texture_queries(const NonDependentT
         spv::Id fetch_result = do_fetch_texture(m_b.createLoad(texture_query.sampler, spv::NoPrecision), texture_query.sampler_index, texture_query.dim, coord_inst, store_op.type, proj ? 4 : 0, 0);
         store_op.num = texture_query.dest_offset;
 
-        const Imm4 mask = (1U << texture_query.component_count) - 1;
+        const uint8_t stored_components = texture_query.store_component_count ? texture_query.store_component_count : texture_query.component_count;
+        const Imm4 mask = (1U << stored_components) - 1;
 
         store(store_op, fetch_result, mask);
     }
