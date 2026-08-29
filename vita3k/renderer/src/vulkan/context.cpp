@@ -202,8 +202,8 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
         force_load = false;
         force_store = false;
     }
-    if (context.state.features.support_shader_interlock)
-        // we must always store the depth stencil
+    if (ds_surface_fin != nullptr || context.state.features.support_shader_interlock)
+        // Preserve depth-stencil across render passes even without guest readback.
         force_store = true;
     context.current_render_pass = context.state.pipeline_cache.retrieve_render_pass(vk_format, force_load, force_store, color_surface_fin == nullptr);
     if (context.state.features.support_shader_interlock)
