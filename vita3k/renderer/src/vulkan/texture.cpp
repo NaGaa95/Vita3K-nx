@@ -402,6 +402,9 @@ void VKTextureCache::configure_texture(const SceGxmTexture &gxm_texture) {
     if (gxm::is_bcn_format(base_format) && !support_dxt)
         // texture will be decompressed
         vk_format = bcn_to_rgba8(vk_format);
+    // Use a valid fallback for unsupported formats, including S5S5U6 and X8S8S8U8.
+    if (vk_format == vk::Format::eUndefined)
+        vk_format = vk::Format::eR8G8B8A8Unorm;
     if (gxm_texture.gamma_mode) {
         const vk::Format srgb_format = linear_to_srgb(vk_format);
         if (srgb_format == vk_format || format_supports_sampled_image(srgb_format))
