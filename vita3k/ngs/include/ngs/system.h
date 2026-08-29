@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -211,6 +212,9 @@ struct ModuleData {
 
     void invoke_callback(KernelState &kern, const MemState &mem, const SceUID thread_id, const uint32_t reason1,
         const uint32_t reason2, Address reason_ptr);
+    bool invoke_callback(KernelState &kern, const MemState &mem, SceUID thread_id, uint32_t reason1,
+        uint32_t reason2, Address reason_ptr, std::unique_lock<std::recursive_mutex> &scheduler_lock,
+        std::unique_lock<std::mutex> &voice_lock);
 
     SceNgsBufferInfo *lock_params(const MemState &mem);
     bool unlock_params(const MemState &mem);
@@ -285,6 +289,9 @@ struct Voice {
     bool is_paused;
     bool is_keyed_off;
     uint32_t frame_count;
+    // Voices are placed into game memory with 4-byte alignment, so this must not
+    // be a 64-bit atomic: misaligned exclusives fault on ARM.
+    std::atomic<uint32_t> state_generation = 0;
 
     using Patches = std::vector<Ptr<Patch>>;
 

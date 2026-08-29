@@ -791,6 +791,7 @@ EXPORT(SceInt32, sceNgsVoiceInit, ngs::Voice *voice, const SceNgsVoicePreset *pr
     std::lock_guard<std::mutex> guard(*voice->voice_mutex);
 
     if (init_flags == SCE_NGS_VOICE_INIT_BASE || init_flags == SCE_NGS_VOICE_INIT_ALL) {
+        voice->state_generation++;
         voice->state = ngs::VoiceState::VOICE_STATE_AVAILABLE;
         voice->is_paused = false;
         voice->is_pending = false;

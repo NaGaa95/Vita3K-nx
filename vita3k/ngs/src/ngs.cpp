@@ -151,6 +151,20 @@ void ModuleData::invoke_callback(KernelState &kernel, const MemState &mem, const
         reason1, reason2, reason_ptr);
 }
 
+bool ModuleData::invoke_callback(KernelState &kernel, const MemState &mem, const SceUID thread_id, const uint32_t reason1,
+    const uint32_t reason2, Address reason_ptr, std::unique_lock<std::recursive_mutex> &scheduler_lock,
+    std::unique_lock<std::mutex> &voice_lock) {
+    const uint32_t generation = parent->state_generation;
+    voice_lock.unlock();
+    scheduler_lock.unlock();
+    invoke_callback(kernel, mem, thread_id, reason1, reason2, reason_ptr);
+    scheduler_lock.lock();
+    voice_lock.lock();
+
+    return parent->state_generation == generation && !parent->is_paused
+        && (parent->state == VOICE_STATE_ACTIVE || parent->state == VOICE_STATE_FINALIZING);
+}
+
 void Voice::init(Rack *mama) {
     rack = mama;
     state = VoiceState::VOICE_STATE_AVAILABLE;
@@ -252,6 +266,7 @@ ModuleData *Voice::module_storage(const uint32_t index) {
 void Voice::transition(const MemState &mem, const VoiceState new_state) {
     const VoiceState old = state;
     state = new_state;
+    state_generation++;
 
     for (size_t i = 0; i < datas.size(); i++) {
         rack->modules[i]->on_state_change(mem, datas[i], old);

@@ -103,9 +103,6 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
         if (logical->superframe_staging.empty())
             runtime->decoder->flush();
 
-        voice_lock.unlock();
-        scheduler_lock.unlock();
-
         logical->current_loop_count++;
         state->current_byte_position_in_buffer = 0;
 
@@ -113,26 +110,19 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
             state->current_buffer = bufparam.next_buffer_index;
             logical->current_loop_count = 0;
 
-            if ((state->current_buffer == -1)
-                || !params->buffer_params[state->current_buffer].buffer
-                || (params->buffer_params[state->current_buffer].bytes_count == 0)) {
-                data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_END_OF_DATA, 0, 0);
+            if (state->current_buffer < 0 || state->current_buffer >= SCE_NGS_AT9_MAX_BUFFER_PARAMS) {
+                data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_END_OF_DATA, 0, 0, scheduler_lock, voice_lock);
 
                 // we are done
-                scheduler_lock.lock();
-                voice_lock.lock();
                 return false;
             } else {
                 data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_SWAPPED_BUFFER, prev_index,
-                    params->buffer_params[state->current_buffer].buffer.address());
+                    params->buffer_params[state->current_buffer].buffer.address(), scheduler_lock, voice_lock);
             }
         } else {
             data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_LOOPED_BUFFER, logical->current_loop_count,
-                params->buffer_params[state->current_buffer].buffer.address());
+                params->buffer_params[state->current_buffer].buffer.address(), scheduler_lock, voice_lock);
         }
-
-        scheduler_lock.lock();
-        voice_lock.lock();
 
         // re-call this function
         return true;
@@ -284,14 +274,11 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
     if (got_decode_error) {
         // Update before the callback, which may key off and reset this position.
         state->current_byte_position_in_buffer = pos_after_this_superframe;
-        voice_lock.unlock();
-        scheduler_lock.unlock();
+        if (!data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_DECODE_ERROR, state->current_byte_position_in_buffer,
+                params->buffer_params[state->current_buffer].buffer.address(), scheduler_lock, voice_lock))
+            return true;
 
-        data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_DECODE_ERROR, state->current_byte_position_in_buffer,
-            params->buffer_params[state->current_buffer].buffer.address());
-
-        scheduler_lock.lock();
-        voice_lock.lock();
+        params = data.get_parameters<SceNgsAT9Params>(mem);
 
         // flush or we'll get an error next time we want to decode
         runtime->decoder->flush();
@@ -314,27 +301,26 @@ bool Atrac9Module::process(KernelState &kern, const MemState &mem, const SceUID 
     Atrac9LogicalState *logical = data.get_logical_state<Atrac9LogicalState>();
     Atrac9RuntimeState *runtime = data.get_runtime_state<Atrac9RuntimeState>();
     assert(state);
-
-    if (state->current_buffer == -1
-        || !params->buffer_params[state->current_buffer].buffer) {
-        return true;
-    }
+    const uint32_t generation = data.parent->state_generation;
 
     logical->decoded_pcm.compact();
 
     bool is_finished = false;
     // call decode more data until we either have an error or reached end of data
     while (static_cast<int32_t>(logical->decoded_pcm.available_frames()) < data.parent->rack->system->granularity) {
-        // An infinitely-looped buffer with zero bytes is a stream the game has
-        // not filled yet. Decoding it wraps position 0 -> 0 without producing a
-        // frame, pinning sceNgsSystemUpdate in a spin that holds the scheduler
-        // lock - which also starves the threads that would attach the data. Pad
-        // the granule with silence and pick the stream back up once data
-        // arrives, the way the player module already waits on empty buffers.
-        const SceNgsAT9BufferParams &current_bufparam = params->buffer_params[state->current_buffer];
-        if (current_bufparam.bytes_count == 0 && current_bufparam.loop_count == -1)
+        if (state->current_buffer < 0 || state->current_buffer >= SCE_NGS_AT9_MAX_BUFFER_PARAMS) {
+            is_finished = true;
             break;
-        if (!decode_more_data(kern, mem, thread_id, data, params, state, logical, runtime, scheduler_lock, voice_lock)) {
+        }
+        const SceNgsAT9BufferParams &current_bufparam = params->buffer_params[state->current_buffer];
+        // Wait for publication without wrapping an empty buffer or ending its chain.
+        if (!current_bufparam.buffer || current_bufparam.bytes_count <= 0)
+            break;
+        const bool more_data = decode_more_data(kern, mem, thread_id, data, params, state, logical, runtime, scheduler_lock, voice_lock);
+        if (data.parent->state_generation != generation || data.parent->is_paused)
+            return false;
+        params = data.get_parameters<SceNgsAT9Params>(mem);
+        if (!more_data) {
             is_finished = true;
             break;
         }

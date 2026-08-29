@@ -218,6 +218,10 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
     for (ngs::Voice *voice : queue_copy) {
         // Modify the state, in peace....
         std::unique_lock<std::mutex> voice_lock(*voice->voice_mutex);
+        if (voice->is_paused || (voice->state != VOICE_STATE_ACTIVE && voice->state != VOICE_STATE_FINALIZING))
+            continue;
+
+        const uint32_t generation = voice->state_generation;
         memset(voice->products, 0, sizeof(voice->products));
 
         bool finished = false;
@@ -225,7 +229,13 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
 
         for (size_t i = 0; i < voice->rack->modules.size(); i++) {
             if (voice->rack->modules[i]) {
-                if (voice->rack->modules[i]->process(kern, mem, thread_id, voice->datas[i], scheduler_lock, voice_lock)) {
+                const bool module_finished = voice->rack->modules[i]->process(kern, mem, thread_id, voice->datas[i], scheduler_lock, voice_lock);
+                if (voice->state_generation != generation || voice->is_paused) {
+                    finished = false;
+                    memset(voice->products, 0, sizeof(voice->products));
+                    break;
+                }
+                if (module_finished) {
                     finished = true;
                     finished_module = voice->rack->modules[i]->module_id();
                 }
@@ -237,6 +247,7 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
             // Stop first because the callback may restart the voice.
             voice->is_keyed_off = false;
             stop(mem, voice);
+            const uint32_t stopped_generation = voice->state_generation;
             if (voice->finished_callback) {
                 voice_lock.unlock();
                 scheduler_lock.unlock();
@@ -244,6 +255,8 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
                 scheduler_lock.lock();
                 voice_lock.lock();
             }
+            if (voice->state_generation != stopped_generation || voice->is_paused)
+                memset(voice->products, 0, sizeof(voice->products));
         }
 
         const bool can_route_to_master = implicit_master && std::ranges::contains(implicit_sources, voice);
