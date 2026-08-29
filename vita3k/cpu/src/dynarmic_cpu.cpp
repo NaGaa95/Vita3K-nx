@@ -33,8 +33,11 @@
 #include <dynarmic/interface/A32/coprocessor.h>
 #include <dynarmic/interface/exclusive_monitor.h>
 
+#include <atomic>
 #include <bit>
+#include <chrono>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
@@ -253,7 +256,97 @@ public:
         LOG_TRACE("{} ({}): {} {}", log_hex(self_), self.parent->thread_id, log_hex(address), disassembly);
     }
 
+    inline static std::recursive_timed_mutex loader_lock_mutex;
+    inline static std::atomic<int> loader_lock_timeouts{ 0 };
+    int loader_lock_held = 0;
+
+    static void MonoLoaderLockAcquire(uint64_t self_, uint64_t, uint64_t) {
+        ArmDynarmicCallback &self = *reinterpret_cast<ArmDynarmicCallback *>(self_);
+        if (self.loader_lock_held > 0) {
+            ++self.loader_lock_held;
+            return;
+        }
+        // A halted guest can strand the lock; do not block other threads indefinitely.
+        if (!loader_lock_mutex.try_lock_for(std::chrono::seconds(5))) {
+            if (loader_lock_timeouts.fetch_add(1) < 20)
+                LOG_WARN("Timed out waiting for the emulated mono loader lock on thread {}, proceeding unserialised", self.parent->thread_id);
+            return;
+        }
+        self.loader_lock_held = 1;
+    }
+
+    static void MonoLoaderLockRelease(uint64_t self_, uint64_t, uint64_t) {
+        ArmDynarmicCallback &self = *reinterpret_cast<ArmDynarmicCallback *>(self_);
+        if (self.loader_lock_held == 0)
+            return;
+        if (--self.loader_lock_held == 0)
+            loader_lock_mutex.unlock();
+    }
+
+    enum class MonoLoaderOp {
+        None,
+        Lock,
+        Unlock,
+    };
+
+    static constexpr bool is_movw(uint32_t insn, uint32_t rd) {
+        return (insn & 0xFFF0F000) == (0xE3000000 | (rd << 12));
+    }
+
+    static constexpr bool is_movt(uint32_t insn, uint32_t rd) {
+        return (insn & 0xFFF0F000) == (0xE3400000 | (rd << 12));
+    }
+
+    // Matches unexported Mono loader lock routines by shape; their mutex is compiled out.
+    MonoLoaderOp classify_mono_loader_lock(Dynarmic::A32::VAddr pc) {
+        static constexpr uint32_t PUSH_R4_LR = 0xE92D4010;
+        static constexpr uint32_t LDR_R0_R0 = 0xE5900000;
+        static constexpr uint32_t CMP_R0_0 = 0xE3500000;
+        static constexpr uint32_t BEQ_EPILOGUE = 0x0A00000B; // beq +11 words -> the pop below
+        static constexpr uint32_t LDR_R4_R0 = 0xE5904000;
+        static constexpr uint32_t MOV_R0_R4 = 0xE1A00004;
+        static constexpr uint32_t BLX_IP = 0xE12FFF3C;
+        static constexpr uint32_t ADD_R1_R0_1 = 0xE2801001; // lock:   nest + 1
+        static constexpr uint32_t SUB_R1_R0_1 = 0xE2401001; // unlock: nest - 1
+        static constexpr uint32_t POP_R4_PC = 0xE8BD8010;
+        static constexpr size_t BODY_WORDS = 19;
+
+        // Address validation accepts the allocated but inaccessible null page.
+        if (pc < parent->mem->host_page_size || !is_valid_addr_range_size(*parent->mem, pc, sizeof(uint32_t)))
+            return MonoLoaderOp::None;
+
+        const uint32_t *w = Ptr<uint32_t>(static_cast<Address>(pc)).get(*parent->mem);
+        if (w[0] != PUSH_R4_LR)
+            return MonoLoaderOp::None;
+        if (!is_valid_addr_range_size(*parent->mem, pc, sizeof(uint32_t) * BODY_WORDS))
+            return MonoLoaderOp::None;
+
+        const bool shape = is_movw(w[1], 0) && is_movt(w[2], 0) && w[3] == LDR_R0_R0
+            && w[4] == CMP_R0_0 && w[5] == BEQ_EPILOGUE
+            && is_movw(w[6], 0) && is_movt(w[7], 0) && w[8] == LDR_R4_R0
+            && is_movw(w[9], 12) && is_movt(w[10], 12) && w[11] == MOV_R0_R4 && w[12] == BLX_IP
+            && is_movw(w[13], 12) && is_movt(w[15], 12) && w[16] == MOV_R0_R4 && w[17] == BLX_IP
+            && w[18] == POP_R4_PC;
+        if (!shape)
+            return MonoLoaderOp::None;
+
+        if (w[14] == ADD_R1_R0_1)
+            return MonoLoaderOp::Lock;
+        if (w[14] == SUB_R1_R0_1)
+            return MonoLoaderOp::Unlock;
+        return MonoLoaderOp::None;
+    }
+
     void PreCodeTranslationHook(bool is_thumb, Dynarmic::A32::VAddr pc, Dynarmic::A32::IREmitter &ir) override {
+        // Matched routines start unconditionally, so the host call needs no predicate.
+        if (!is_thumb) {
+            const MonoLoaderOp op = classify_mono_loader_lock(pc);
+            if (op != MonoLoaderOp::None) {
+                LOG_INFO_ONCE("Serialising mono's loader lock: it takes no mutex in this build");
+                ir.CallHostFunction(op == MonoLoaderOp::Lock ? &MonoLoaderLockAcquire : &MonoLoaderLockRelease,
+                    ir.Imm64((uint64_t)this), ir.Imm64(0), ir.Imm64(0));
+            }
+        }
         if (cpu->log_code) {
             ir.CallHostFunction(&TraceInstruction, ir.Imm64((uint64_t)this), ir.Imm64(pc), ir.Imm64(is_thumb));
         }
