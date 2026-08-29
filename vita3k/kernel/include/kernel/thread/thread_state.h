@@ -180,7 +180,9 @@ struct ThreadState {
     uint32_t run_guest_function(Address callback_address, SceSize args = 0, const Ptr<void> argp = Ptr<void>{});
 
     void suspend();
+    void suspend_and_wait();
     void resume(bool step = false);
+    void resume_if_suspended();
     // For a thread that is not running when a pause begins. suspend() cannot be
     // used on one: it asserts the thread is running and stops its CPU. These only
     // raise and clear the request, so a thread that wakes mid-pause honours it at
@@ -207,6 +209,7 @@ private:
     // Atomic so the preemption watchdog can tell a thread the kernel is stopping
     // from one spinning in translated code, without taking ThreadState::mutex.
     std::atomic<bool> suspend_requested{ false };
+    bool vm_suspended = false;
     // Single stepping mode.
     bool single_stepping = false;
 

@@ -25,6 +25,7 @@
 #include <util/log.h>
 
 #include <cassert>
+#include <chrono>
 #include <cstring>
 #include <memory>
 #include <sstream>
@@ -302,7 +303,7 @@ void ThreadState::run_loop() {
 
             lock.lock();
 
-            if (do_step || suspend_requested || hit_breakpoint(*cpu)) {
+            if (do_step || suspend_requested || vm_suspended || hit_breakpoint(*cpu)) {
                 // Breakpoints are implemented by writing BKPT into guest code, so this
                 // exception is raised both by the debugger's own breakpoints and by a
                 // BKPT the guest executes. Only the first is ever resumed; the second
@@ -462,6 +463,25 @@ void ThreadState::suspend() {
     stop(*cpu);
 }
 
+void ThreadState::suspend_and_wait() {
+    std::unique_lock<std::mutex> lock(mutex);
+    vm_suspended = true;
+
+    if (status.load(std::memory_order_acquire) != ThreadStatus::run)
+        return;
+
+    suspend_requested.store(true, std::memory_order_release);
+    lock.unlock();
+    stop(*cpu);
+    lock.lock();
+
+    if (!status_cond.wait_for(lock, std::chrono::seconds(5), [&] {
+            return status.load(std::memory_order_acquire) != ThreadStatus::run
+                || delete_requested.load(std::memory_order_acquire);
+        }))
+        LOG_WARN("Timed out waiting for thread {} ({}) to suspend", name, id);
+}
+
 void ThreadState::request_suspend() {
     const std::lock_guard<std::mutex> lock(mutex);
     suspend_requested = true;
@@ -474,6 +494,14 @@ void ThreadState::cancel_suspend() {
     // request and parked itself in suspend. It only reaches that point from the
     // run loop, i.e. once its wait had already completed, so releasing it to run
     // is right - and required, or it would stay parked forever.
+    if (status.load(std::memory_order_acquire) == ThreadStatus::suspend)
+        update_status(ThreadStatus::run);
+}
+
+void ThreadState::resume_if_suspended() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    vm_suspended = false;
+    suspend_requested.store(false, std::memory_order_release);
     if (status.load(std::memory_order_acquire) == ThreadStatus::suspend)
         update_status(ThreadStatus::run);
 }

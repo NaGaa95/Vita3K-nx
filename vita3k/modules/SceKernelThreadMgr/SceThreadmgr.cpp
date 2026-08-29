@@ -1341,13 +1341,12 @@ EXPORT(int, sceKernelRegisterCallbackToEvent) {
 
 EXPORT(int, sceKernelResumeThreadForVM, SceUID threadId) {
     TRACY_FUNC(sceKernelResumeThreadForVM, threadId);
-    STUBBED("STUB");
 
     const ThreadStatePtr thread = emuenv.kernel.get_thread(threadId);
     if (!thread)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
 
-    thread->resume();
+    thread->resume_if_suspended();
 
     return 0;
 }
@@ -1419,13 +1418,17 @@ EXPORT(int, sceKernelStopTimer, SceUID timer_handle) {
 
 EXPORT(int, sceKernelSuspendThreadForVM, SceUID threadId) {
     TRACY_FUNC(sceKernelSuspendThreadForVM, threadId);
-    STUBBED("STUB");
 
     const ThreadStatePtr thread = emuenv.kernel.get_thread(threadId);
     if (!thread)
         return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
 
-    thread->suspend();
+    if (threadId == thread_id) {
+        thread->suspend();
+        return 0;
+    }
+
+    thread->suspend_and_wait();
 
     return 0;
 }
