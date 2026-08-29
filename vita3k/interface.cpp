@@ -176,7 +176,11 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
     auto output_path{ emuenv.vita_fs_path / "ux0" };
     const bool has_sfo = mz_zip_reader_extract_file_to_callback(zip.get(), (content_path + sfo_path).c_str(), &write_to_buffer, &buffer, 0);
     if (has_sfo) {
-        sfo::get_param_info(emuenv.app_info, buffer, emuenv.cfg.sys_lang);
+        // Invalid metadata would resolve the install destination to ux0 itself.
+        if (!sfo::get_param_info(emuenv.app_info, buffer, emuenv.cfg.sys_lang)) {
+            LOG_CRITICAL("Failed to parse {} in the archive", content_path + sfo_path);
+            return false;
+        }
         if (!set_content_path(emuenv, is_theme, output_path))
             return false;
     } else if (is_theme) {
@@ -376,7 +380,11 @@ static bool install_content(EmuEnvState &emuenv, const fs::path &content_path) {
     const auto is_theme = fs::exists(theme_path);
     auto dst_path{ emuenv.vita_fs_path / "ux0" };
     if (fs_utils::read_data(sfo_path, buffer)) {
-        sfo::get_param_info(emuenv.app_info, buffer, emuenv.cfg.sys_lang);
+        // Invalid metadata would make the replacement below remove ux0 itself.
+        if (!sfo::get_param_info(emuenv.app_info, buffer, emuenv.cfg.sys_lang)) {
+            LOG_CRITICAL("Failed to parse {}", sfo_path.string());
+            return false;
+        }
         if (!set_content_path(emuenv, is_theme, dst_path))
             return false;
 

@@ -74,11 +74,11 @@ bool get_data_by_key(std::string &out_data, SfoFile &file, const std::string &ke
     return true;
 }
 
-void get_param_info(sfo::SfoAppInfo &app_info, const vfs::FileBuffer &param, int sys_lang) {
+bool get_param_info(sfo::SfoAppInfo &app_info, const vfs::FileBuffer &param, int sys_lang) {
     SfoFile sfo_handle;
     app_info = {};
     if (!sfo::load(sfo_handle, param))
-        return;
+        return false;
     sfo::get_data_by_key(app_info.app_version, sfo_handle, "APP_VER");
     if (!app_info.app_version.empty() && app_info.app_version[0] == '0')
         app_info.app_version.erase(app_info.app_version.begin());
@@ -96,6 +96,8 @@ void get_param_info(sfo::SfoAppInfo &app_info, const vfs::FileBuffer &param, int
     std::replace(app_info.app_title.begin(), app_info.app_title.end(), '\n', ' ');
     boost::trim(app_info.app_title);
     sfo::get_data_by_key(app_info.app_title_id, sfo_handle, "TITLE_ID");
+
+    return true;
 }
 
 bool load(SfoFile &sfile, const std::vector<uint8_t> &content) {
