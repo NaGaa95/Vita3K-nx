@@ -389,6 +389,9 @@ struct AttributeInputSource {
     bool regformat;
 };
 
+// Non-zero for front-facing fragments.
+constexpr uint32_t GLOBAL_REG_FRONT_FACING = 16;
+
 struct LiteralInputSource {
     // The constant data
     float data;
