@@ -734,10 +734,14 @@ SceUID load_self(KernelState &kernel, MemState &mem, const void *self, const std
     if (module_info->module_stop != 0xffffffff && module_info->module_stop != 0)
         sceKernelModuleInfo->stop_entry = module_info_segment_address + module_info->module_stop;
 
-    sceKernelModuleInfo->exidx_top = Ptr<const void>(module_info->exidx_top);
-    sceKernelModuleInfo->exidx_btm = Ptr<const void>(module_info->exidx_end);
-    sceKernelModuleInfo->extab_top = Ptr<const void>(module_info->extab_top);
-    sceKernelModuleInfo->extab_btm = Ptr<const void>(module_info->extab_end);
+    // Unwind bounds are segment-relative; absent tables must remain null.
+    const auto relocate_offset = [&](uint32_t offset) {
+        return Ptr<const void>((offset == 0 || offset == 0xFFFFFFFF) ? 0 : (module_info_segment_address.address() + offset));
+    };
+    sceKernelModuleInfo->exidx_top = relocate_offset(module_info->exidx_top);
+    sceKernelModuleInfo->exidx_btm = relocate_offset(module_info->exidx_end);
+    sceKernelModuleInfo->extab_top = relocate_offset(module_info->extab_top);
+    sceKernelModuleInfo->extab_btm = relocate_offset(module_info->extab_end);
 
     sceKernelModuleInfo->tlsInit = Ptr<const void>(!module_info->tls_start ? 0 : (module_info_segment_address.address() + module_info->tls_start));
     sceKernelModuleInfo->tlsInitSize = module_info->tls_filesz;
@@ -767,6 +771,7 @@ SceUID load_self(KernelState &kernel, MemState &mem, const void *self, const std
         segment.vaddr = it->second.addr;
         segment.memsz = segments[segment_index].p_memsz;
         segment.filesz = segments[segment_index].p_filesz;
+        segment.perms = segments[segment_index].p_flags;
     }
 
     sceKernelModuleInfo->state = module_info->type;
