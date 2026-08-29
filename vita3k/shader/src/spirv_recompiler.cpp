@@ -907,6 +907,8 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
 
         store_source_result();
     }
+
+    parameters.frag_input_pa_regs = pa_offset;
 }
 
 // For uniform buffer resigned in registers

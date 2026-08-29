@@ -92,6 +92,9 @@ struct SpirvShaderParameters {
 
     int buffer_count = 0;
 
+    // PA registers populated by fragment inputs; exclude them from VPCK clearing.
+    std::uint32_t frag_input_pa_regs = 0;
+
     // when using a thread, texture or literal buffer, if not -1, this fields contain the sa register
     // with the matching address, this assumes of course that this address is not copied somewhere
     // else and that this register is not overwritten

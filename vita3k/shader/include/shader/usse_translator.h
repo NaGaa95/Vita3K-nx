@@ -25,6 +25,8 @@
 
 #include <SPIRV/SpvBuilder.h>
 
+#include <map>
+
 struct FeatureState;
 
 namespace shader::usse {
@@ -119,6 +121,12 @@ public:
         reset_repeat_increase();
     }
 
+    // Protect fragment inputs from VPCK slot clearing.
+    void seed_entry_populated_pa(std::uint32_t reg_count) {
+        for (std::uint32_t r = 0; r < reg_count; r++)
+            m_vpck_written_bytes[(static_cast<std::uint32_t>(RegisterBank::PRIMATTR) << 24) | (r & 0xFFFFFF)] = 0xF;
+    }
+
 private:
     //
     // Translation helpers
@@ -196,6 +204,10 @@ private:
     static size_t dest_mask_to_comp_count(Imm4 dest_mask);
 
     bool m_second_program{ false };
+
+    // Bytes already filled by VPCK, keyed by register bank and word.
+    std::map<std::uint32_t, std::uint8_t> m_vpck_written_bytes;
+    bool m_store_from_vpck{ false };
 
     spv::Id do_alu_op(Instruction &inst, const Imm4 source_mask, const Imm4 possible_dest_mask);
 
