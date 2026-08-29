@@ -708,7 +708,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                 .setImageExtent({ width, height, 1 });
             cmd_buffer.copyBufferToImage(casted->transition_buffer.buffer, casted->texture.image, vk::ImageLayout::eTransferDstOptimal, copy_image_buffer);
         }
-        casted->texture.transition_to(cmd_buffer, vkutil::ImageLayout::ColorAttachmentReadWrite);
+        casted->texture.transition_to(cmd_buffer, vkutil::ImageLayout::SampledImage);
 
         return TextureLookupResult{
             casted->texture.view,
