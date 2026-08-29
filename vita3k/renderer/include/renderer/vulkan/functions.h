@@ -43,6 +43,7 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
 void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *program, const bool vertex_shader, const int block_num, const int size, Ptr<uint8_t> data);
 
 void sync_clipping(VKContext &context);
+void refresh_viewport_and_clipping(VKContext &context);
 void sync_stencil_func(VKContext &context, const bool is_back);
 void sync_depth_bias(VKContext &context);
 void sync_depth_data(VKContext &context);

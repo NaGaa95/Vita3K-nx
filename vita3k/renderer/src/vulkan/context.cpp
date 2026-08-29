@@ -185,6 +185,23 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
         rt->height *= 2;
     }
 
+    // Downscaled surfaces use half the target extent, viewport and clip coordinates.
+    const float previous_downscale = context.surface_downscale;
+    context.surface_downscale = 1.0f;
+    if (color_surface_fin != nullptr && context.record.color_surface.downscale
+        && color_surface_fin->width > 0 && color_surface_fin->height > 0) {
+        const uint32_t color_width = static_cast<uint32_t>(color_surface_fin->width * context.state.res_multiplier);
+        const uint32_t color_height = static_cast<uint32_t>(color_surface_fin->height * context.state.res_multiplier);
+        if (color_width > 0 && color_height > 0
+            && rt->base_width >= color_width * 2 && rt->base_height >= color_height * 2) {
+            context.surface_downscale = 0.5f;
+            rt->width /= 2;
+            rt->height /= 2;
+        }
+    }
+    if (context.surface_downscale != previous_downscale)
+        refresh_viewport_and_clipping(context);
+
     SceGxmDepthStencilSurface *ds_surface_fin = &context.record.depth_stencil_surface;
     // if the depth-stencil buffer is not backed by memory or we don't read nor write it to memory, use the transient attachment instead
     if ((!ds_surface_fin->depth_data && !ds_surface_fin->stencil_data)

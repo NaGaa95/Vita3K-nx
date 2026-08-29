@@ -306,6 +306,14 @@ struct VKContext : public renderer::Context {
     VKRenderTarget *render_target = nullptr;
     vk::Viewport viewport;
     vk::Rect2D scissor;
+
+    // Scale applied to the preserved guest viewport and region clip per scene.
+    float surface_downscale = 1.0f;
+    bool viewport_is_flat = true;
+    float viewport_x_offset = 0.0f;
+    float viewport_y_offset = 0.0f;
+    float viewport_x_scale = 0.0f;
+    float viewport_y_scale = 0.0f;
     SceGxmPrimitiveType last_primitive;
 
     vk::RenderPass current_render_pass;

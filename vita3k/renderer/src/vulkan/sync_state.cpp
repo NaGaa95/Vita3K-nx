@@ -30,7 +30,7 @@ void sync_clipping(VKContext &context) {
     if (!context.render_target)
         return;
 
-    const float res_multiplier = context.state.res_multiplier;
+    const float res_multiplier = context.state.res_multiplier * context.surface_downscale;
 
     const int scissor_x = context.record.region_clip_min.x;
     const int scissor_y = context.record.region_clip_min.y;
@@ -157,6 +157,7 @@ void sync_point_line_width(VKContext &context, const bool is_front) {
 }
 
 void sync_viewport_flat(VKContext &context) {
+    context.viewport_is_flat = true;
     context.viewport = vk::Viewport{
         .x = 0.0f,
         .y = 0.0f,
@@ -171,17 +172,16 @@ void sync_viewport_flat(VKContext &context) {
     context.render_cmd.setViewport(0, context.viewport);
 }
 
-void sync_viewport_real(VKContext &context, const float xOffset, const float yOffset, const float zOffset,
-    const float xScale, const float yScale, const float zScale) {
-    if (xScale < 0)
-        LOG_ERROR("Game is using a viewport with negative width!");
+static void apply_viewport_real(VKContext &context) {
+    const float xScale = context.viewport_x_scale;
+    const float yScale = context.viewport_y_scale;
 
     const float w = std::abs(2 * xScale);
     const float h = 2 * yScale;
-    const float x = xOffset - std::abs(xScale);
-    const float y = yOffset - yScale;
+    const float x = context.viewport_x_offset - std::abs(xScale);
+    const float y = context.viewport_y_offset - yScale;
 
-    const float res_multiplier = context.state.res_multiplier;
+    const float res_multiplier = context.state.res_multiplier * context.surface_downscale;
 
     // https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VkViewport.html
     // https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#vertexpostproc-viewport
@@ -200,6 +200,29 @@ void sync_viewport_real(VKContext &context, const float xOffset, const float yOf
     if (!context.is_recording)
         return;
     context.render_cmd.setViewport(0, context.viewport);
+}
+
+void sync_viewport_real(VKContext &context, const float xOffset, const float yOffset, const float zOffset,
+    const float xScale, const float yScale, const float zScale) {
+    if (xScale < 0)
+        LOG_ERROR("Game is using a viewport with negative width!");
+
+    context.viewport_is_flat = false;
+    context.viewport_x_offset = xOffset;
+    context.viewport_y_offset = yOffset;
+    context.viewport_x_scale = xScale;
+    context.viewport_y_scale = yScale;
+
+    apply_viewport_real(context);
+}
+
+// Unchanged guest viewport and clip values are not resent when the scene scale changes.
+void refresh_viewport_and_clipping(VKContext &context) {
+    if (context.viewport_is_flat)
+        sync_viewport_flat(context);
+    else
+        apply_viewport_real(context);
+    sync_clipping(context);
 }
 
 void sync_visibility_buffer(VKContext &context, Ptr<uint32_t> buffer, uint32_t stride) {
