@@ -125,7 +125,7 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
     const bool color_convertible = renderer::texture::convert_base_texture_format_to_base_color_format(base_format, format_target_of_texture);
     if (color_convertible && !texture_is_cube) {
         // try to retrieve it from the color surface cache
-        lookup_result = context.state.surface_cache.retrieve_color_surface_as_texture(texture, format_target_of_texture, &texture_viewport);
+        lookup_result = context.state.surface_cache.retrieve_color_surface_as_texture(texture, format_target_of_texture, &texture_viewport, !is_vertex);
     }
 
     bool is_depth_surface = false;
@@ -145,6 +145,11 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
             image.layout,
             image.format
         };
+    }
+
+    if (!is_vertex) {
+        context.curr_frag_ublock.set_cast_sampler_bit(index, lookup_result->is_typeless_cast, lookup_result->cast_phase_hi);
+        context.curr_frag_ublock.set_raw_cast_bit(index, lookup_result->is_raw_bits);
     }
 
     const vk::ImageLayout layout = vkutil::get_underlying_layout(lookup_result->layout);

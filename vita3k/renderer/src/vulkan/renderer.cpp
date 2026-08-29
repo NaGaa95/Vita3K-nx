@@ -765,6 +765,7 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
 
         // use these features (because they are used by the vita GPU) if they are available
         vk::PhysicalDeviceFeatures enabled_features{
+            .independentBlend = physical_device_features.independentBlend,
             .fillModeNonSolid = physical_device_features.fillModeNonSolid,
             .wideLines = physical_device_features.wideLines,
             .samplerAnisotropy = physical_device_features.samplerAnisotropy,
@@ -935,6 +936,10 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             support_shader_interlock = false;
         }
 
+        // An integer attachment preserves F16 NaN payloads lost during float conversion.
+        // Its blend state must be independent of the float attachment.
+        features.preserve_f16_nan_as_u16 = static_cast<bool>(physical_device_features.independentBlend);
+
         support_shader_interlock &= static_cast<bool>(physical_device_features.fragmentStoresAndAtomics);
         if (support_shader_interlock) {
             auto props = physical_device.getFeatures2KHR<vk::PhysicalDeviceFeatures2, vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT>();
@@ -1073,6 +1078,12 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         };
         cmd_buffer.clearColorImage(default_image.image, vk::ImageLayout::eTransferDstOptimal, white, vkutil::color_subresource_range);
         default_image.transition_to(cmd_buffer, vkutil::ImageLayout::StorageImage);
+
+        if (features.preserve_f16_nan_as_u16) {
+            default_raw_image = vkutil::Image(1, 1, vk::Format::eR16G16B16A16Uint);
+            default_raw_image.init_image(vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferDst);
+            default_raw_image.transition_to(cmd_buffer, vkutil::ImageLayout::StorageImage);
+        }
         submit_one_time_command(std::move(one_time_command));
 
         // create the default sampler
@@ -1264,6 +1275,7 @@ void VKState::cleanup() {
     buffer_trapping.trapped_buffers.clear();
 
     default_image.destroy();
+    default_raw_image.destroy();
     default_buffer.destroy();
 
     for (auto &pool : frame_descriptor_pools)
@@ -1472,6 +1484,7 @@ uint32_t VKState::get_features_mask() {
             bool use_memory_mapping : 1;
             bool use_rgb_attributes : 1;
             bool use_scaled_attributes : 1;
+            bool preserve_f16_nan_as_u16 : 1;
         };
         uint32_t value;
     } features_mask;
@@ -1483,6 +1496,7 @@ uint32_t VKState::get_features_mask() {
     features_mask.use_memory_mapping = features.enable_memory_mapping;
     features_mask.use_rgb_attributes = features.support_rgb_attributes;
     features_mask.use_scaled_attributes = pipeline_cache.support_scaled_vertex_attribute;
+    features_mask.preserve_f16_nan_as_u16 = features.preserve_f16_nan_as_u16;
 
     return features_mask.value;
 }

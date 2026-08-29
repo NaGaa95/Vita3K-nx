@@ -17,6 +17,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <shader/spirv_recompiler.h>
+#include <shader/uniform_block.h>
 #include <shader/usse_decoder_helpers.h>
 #include <shader/usse_disasm.h>
 #include <shader/usse_translator.h>
@@ -85,6 +86,104 @@ spv::Id shader::usse::USSETranslatorVisitor::do_fetch_texture(const spv::Id tex,
 
     assert(m_b.getTypeClass(m_b.getContainedTypeId(m_b.getTypeId(coord_id))) == spv::OpTypeFloat);
 
+    // Typeless casts use native half-texel offsets to select a word. Rescale small
+    // offsets around gl_FragCoord; zero offsets select this view's word, while
+    // larger offsets remain unchanged.
+    constexpr int cast_mask_width = 16;
+    if (dim == 2 && m_spirv_params.frag_coord_id != spv::NoResult
+        && m_spirv_params.render_info_id != spv::NoResult
+        && texture_index >= 0 && texture_index < cast_mask_width) {
+        spv::Id coord_xy = coord_id;
+        const bool has_extra_comps = m_b.getNumComponents(coord_id) > 2;
+        if (has_extra_comps)
+            coord_xy = m_b.createOp(spv::OpVectorShuffle, type_f32_v[2], { { true, coord_id }, { true, coord_id }, { false, 0 }, { false, 1 } });
+
+        const auto load_frag_uniform = [&](FragUniformFieldId field) {
+            const spv::Id ptr = utils::create_access_chain(m_b, spv::StorageClassUniform, m_spirv_params.render_info_id, { m_b.makeIntConstant(field) });
+            return m_b.createLoad(ptr, spv::NoPrecision);
+        };
+
+        const spv::Id mask_f = load_frag_uniform(FRAG_UNIFORM_cast_sampler_mask);
+        const spv::Id phase_f = load_frag_uniform(FRAG_UNIFORM_cast_phase_mask);
+        const spv::Id res_mult = load_frag_uniform(FRAG_UNIFORM_surface_res_multiplier);
+        const spv::Id inv_w = load_frag_uniform(FRAG_UNIFORM_inv_frag_width);
+        const spv::Id inv_h = load_frag_uniform(FRAG_UNIFORM_inv_frag_height);
+
+        const spv::Id type_u32 = m_b.makeUintType(32);
+        const spv::Id type_bool = m_b.makeBoolType();
+
+        spv::Id mask_u = m_b.createUnaryOp(spv::OpConvertFToU, type_u32, mask_f);
+        spv::Id bit = m_b.createBinOp(spv::OpShiftRightLogical, type_u32, mask_u, m_b.makeUintConstant(texture_index));
+        bit = m_b.createBinOp(spv::OpBitwiseAnd, type_u32, bit, m_b.makeUintConstant(1));
+        const spv::Id unit_is_cast = m_b.createBinOp(spv::OpINotEqual, type_bool, bit, m_b.makeUintConstant(0));
+        const spv::Id not_1x = m_b.createBinOp(spv::OpFUnordNotEqual, type_bool, res_mult, m_b.makeFloatConstant(1.0f));
+        const spv::Id active = m_b.createBinOp(spv::OpLogicalAnd, type_bool, unit_is_cast, not_1x);
+
+        // screen_uv = gl_FragCoord.xy * inv_size
+        const spv::Id frag_coord = m_b.createLoad(m_spirv_params.frag_coord_id, spv::NoPrecision);
+        spv::Id screen_uv = m_b.createOp(spv::OpVectorShuffle, type_f32_v[2], { { true, frag_coord }, { true, frag_coord }, { false, 0 }, { false, 1 } });
+        const spv::Id inv_size = m_b.createCompositeConstruct(type_f32_v[2], { inv_w, inv_h });
+        screen_uv = m_b.createBinOp(spv::OpFMul, type_f32_v[2], screen_uv, inv_size);
+
+        // adjusted = screen_uv + (coord - screen_uv) / res_multiplier
+        const spv::Id delta = m_b.createBinOp(spv::OpFSub, type_f32_v[2], coord_xy, screen_uv);
+        const spv::Id res_mult_v2 = m_b.createCompositeConstruct(type_f32_v[2], { res_mult, res_mult });
+        const spv::Id delta_scaled = m_b.createBinOp(spv::OpFDiv, type_f32_v[2], delta, res_mult_v2);
+        const spv::Id adjusted = m_b.createBinOp(spv::OpFAdd, type_f32_v[2], screen_uv, delta_scaled);
+
+        const spv::Id threshold = m_b.makeFloatConstant(0.005f);
+        const spv::Id eps = m_b.makeFloatConstant(5e-5f);
+        const spv::Id abs_delta = m_b.createBuiltinCall(type_f32_v[2], std_builtins, GLSLstd450FAbs, { delta });
+
+        const spv::Id coord_x = m_b.createBinOp(spv::OpVectorExtractDynamic, type_f32, coord_xy, m_b.makeIntConstant(0));
+        const spv::Id coord_y = m_b.createBinOp(spv::OpVectorExtractDynamic, type_f32, coord_xy, m_b.makeIntConstant(1));
+        const spv::Id adj_x = m_b.createBinOp(spv::OpVectorExtractDynamic, type_f32, adjusted, m_b.makeIntConstant(0));
+        const spv::Id adj_y = m_b.createBinOp(spv::OpVectorExtractDynamic, type_f32, adjusted, m_b.makeIntConstant(1));
+        const spv::Id adx = m_b.createBinOp(spv::OpVectorExtractDynamic, type_f32, abs_delta, m_b.makeIntConstant(0));
+        const spv::Id ady = m_b.createBinOp(spv::OpVectorExtractDynamic, type_f32, abs_delta, m_b.makeIntConstant(1));
+
+        // snapped_x = (2 * floor(u * W_cast / 2) + phase + 0.5) / W_cast
+        spv::Id phase_u = m_b.createUnaryOp(spv::OpConvertFToU, type_u32, phase_f);
+        spv::Id phase_bit = m_b.createBinOp(spv::OpShiftRightLogical, type_u32, phase_u, m_b.makeUintConstant(texture_index));
+        phase_bit = m_b.createBinOp(spv::OpBitwiseAnd, type_u32, phase_bit, m_b.makeUintConstant(1));
+        const spv::Id phase_flt = m_b.createUnaryOp(spv::OpConvertUToF, type_f32, phase_bit);
+        const spv::Id type_i32 = m_b.makeIntType(32);
+        const spv::Id type_i32_v2 = m_b.makeVectorType(type_i32, 2);
+        const spv::Id image_type = m_b.makeImageType(type_f32, spv::Dim2D, false, false, false, 1, spv::ImageFormatUnknown);
+        const spv::Id image = m_b.createUnaryOp(spv::OpImage, image_type, tex);
+        const spv::Id cast_size = m_b.createOp(spv::OpImageQuerySizeLod, type_i32_v2, { image, m_b.makeIntConstant(0) });
+        spv::Id cast_w = m_b.createBinOp(spv::OpVectorExtractDynamic, type_i32, cast_size, m_b.makeIntConstant(0));
+        cast_w = m_b.createUnaryOp(spv::OpConvertSToF, type_f32, cast_w);
+        spv::Id store_col = m_b.createBinOp(spv::OpFMul, type_f32, coord_x, cast_w);
+        store_col = m_b.createBinOp(spv::OpFMul, type_f32, store_col, m_b.makeFloatConstant(0.5f));
+        store_col = m_b.createBuiltinCall(type_f32, std_builtins, GLSLstd450Floor, { store_col });
+        spv::Id snapped_x = m_b.createBinOp(spv::OpFMul, type_f32, store_col, m_b.makeFloatConstant(2.0f));
+        snapped_x = m_b.createBinOp(spv::OpFAdd, type_f32, snapped_x, phase_flt);
+        snapped_x = m_b.createBinOp(spv::OpFAdd, type_f32, snapped_x, m_b.makeFloatConstant(0.5f));
+        snapped_x = m_b.createBinOp(spv::OpFDiv, type_f32, snapped_x, cast_w);
+
+        const spv::Id has_offset = m_b.createBinOp(spv::OpFOrdGreaterThan, type_bool, adx, eps);
+        const spv::Id reanchor_ok = m_b.createBinOp(spv::OpFOrdLessThanEqual, type_bool, adx, threshold);
+        const spv::Id x_offset_path = m_b.createTriOp(spv::OpSelect, type_f32, reanchor_ok, adj_x, coord_x);
+        const spv::Id x_active = m_b.createTriOp(spv::OpSelect, type_f32, has_offset, x_offset_path, snapped_x);
+        const spv::Id new_x = m_b.createTriOp(spv::OpSelect, type_f32, active, x_active, coord_x);
+
+        spv::Id y_ok = m_b.createBinOp(spv::OpFOrdLessThanEqual, type_bool, ady, threshold);
+        y_ok = m_b.createBinOp(spv::OpLogicalAnd, type_bool, y_ok, active);
+        const spv::Id new_y = m_b.createTriOp(spv::OpSelect, type_f32, y_ok, adj_y, coord_y);
+
+        const spv::Id new_xy = m_b.createCompositeConstruct(type_f32_v[2], { new_x, new_y });
+
+        if (has_extra_comps) {
+            if (m_b.getNumComponents(coord_id) == 3)
+                coord_id = m_b.createOp(spv::OpVectorShuffle, type_f32_v[3], { { true, new_xy }, { true, coord_id }, { false, 0 }, { false, 1 }, { false, 4 } });
+            else
+                coord_id = m_b.createOp(spv::OpVectorShuffle, type_f32_v[4], { { true, new_xy }, { true, coord_id }, { false, 0 }, { false, 1 }, { false, 4 }, { false, 5 } });
+        } else {
+            coord_id = new_xy;
+        }
+    }
+
     // the texture viewport is only useful for surfaces and they are never cubes
     // also for the time being ignore sampleProj ops
     if (m_features.use_texture_viewport && dim == 2) {
@@ -150,6 +249,53 @@ spv::Id shader::usse::USSETranslatorVisitor::do_fetch_texture(const spv::Id tex,
     }
 
     image_sample = m_b.createOp(op, type_f32_v[4], params);
+
+    if (m_spirv_params.frag_coord_id != spv::NoResult && m_spirv_params.render_info_id != spv::NoResult
+        && texture_index >= 0 && texture_index < SCE_GXM_MAX_TEXTURE_UNITS) {
+        const spv::Id u32 = m_b.makeUintType(32);
+        const spv::Id uvec4 = m_b.makeVectorType(u32, 4);
+        const spv::Id bool_type = m_b.makeBoolType();
+        const spv::Id mask_ptr = utils::create_access_chain(m_b, spv::StorageClassUniform, m_spirv_params.render_info_id, { m_b.makeIntConstant(FRAG_UNIFORM_raw_cast_mask) });
+        const spv::Id mask = m_b.createUnaryOp(spv::OpConvertFToU, u32, m_b.createLoad(mask_ptr, spv::NoPrecision));
+        const spv::Id bit = m_b.createBinOp(spv::OpBitwiseAnd, u32, mask, m_b.makeUintConstant(1u << texture_index));
+        const spv::Id is_raw = m_b.createBinOp(spv::OpINotEqual, bool_type, bit, m_b.makeUintConstant(0));
+        const spv::Id result = m_b.createVariable(spv::NoPrecision, spv::StorageClassFunction, type_f32_v[4], "raw_cast_result");
+        m_b.createStore(image_sample, result);
+        spv::Builder::If raw_branch(is_raw, spv::SelectionControlMaskNone, m_b);
+
+        const auto unpack_halves = [&](spv::Id sample) {
+            const spv::Id scaled = m_b.createBinOp(spv::OpVectorTimesScalar, type_f32_v[4], sample, m_b.makeFloatConstant(65535.0f));
+            const spv::Id rounded = m_b.createBuiltinCall(type_f32_v[4], std_builtins, GLSLstd450Round, { scaled });
+            return m_b.createUnaryOp(spv::OpConvertFToU, uvec4, rounded);
+        };
+        const auto combine = [&](spv::Id low, spv::Id high) {
+            const spv::Id shifted = m_b.createBinOp(spv::OpShiftLeftLogical, u32, high, m_b.makeUintConstant(16));
+            const spv::Id word = m_b.createBinOp(spv::OpBitwiseOr, u32, low, shifted);
+            return m_b.createUnaryOp(spv::OpBitcast, type_f32, word);
+        };
+
+        spv::Id rebuilt;
+        if (gather4_comp >= 0 && gather4_comp < 2) {
+            auto raw_params = params;
+            raw_params.back() = m_b.makeIntConstant(gather4_comp * 2);
+            const spv::Id low = unpack_halves(m_b.createOp(op, type_f32_v[4], raw_params));
+            raw_params.back() = m_b.makeIntConstant(gather4_comp * 2 + 1);
+            const spv::Id high = unpack_halves(m_b.createOp(op, type_f32_v[4], raw_params));
+            std::vector<spv::Id> words;
+            for (int i = 0; i < 4; i++)
+                words.push_back(combine(m_b.createCompositeExtract(low, u32, i), m_b.createCompositeExtract(high, u32, i)));
+            rebuilt = m_b.createCompositeConstruct(type_f32_v[4], words);
+        } else {
+            const spv::Id halves = unpack_halves(image_sample);
+            const spv::Id low = combine(m_b.createCompositeExtract(halves, u32, 0), m_b.createCompositeExtract(halves, u32, 1));
+            const spv::Id high = combine(m_b.createCompositeExtract(halves, u32, 2), m_b.createCompositeExtract(halves, u32, 3));
+            rebuilt = m_b.createCompositeConstruct(type_f32_v[4], { low, high, m_b.makeFloatConstant(0.0f), m_b.makeFloatConstant(1.0f) });
+        }
+
+        m_b.createStore(rebuilt, result);
+        raw_branch.makeEndIf();
+        image_sample = m_b.createLoad(result, spv::NoPrecision);
+    }
 
     if (get_data_type_size(dest_type) < 4 && dest_type != DataType::UINT16 && dest_type != DataType::INT16)
         m_b.setPrecision(image_sample, spv::DecorationRelaxedPrecision);

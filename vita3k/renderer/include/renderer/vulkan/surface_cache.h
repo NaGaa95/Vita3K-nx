@@ -62,12 +62,18 @@ struct Framebuffer {
     vkutil::Image *base_image;
     uint32_t width;
     uint32_t height;
+    vkutil::Image *raw_image = nullptr;
 };
 
 struct CastedTexture {
     vkutil::Image texture;
     // only used if an image to image copy is not possible
     vkutil::Buffer transition_buffer;
+    vkutil::Image raw_copy_image;
+    // R32_UINT output view for the reinterpret compute pass.
+    vk::ImageView reinterpret_view = nullptr;
+    // Opposite-gamma view sharing the same bytes.
+    vk::ImageView alt_gamma_view = nullptr;
     uint64_t scene_timestamp = 0;
     uint32_t cropped_x = 0;
     uint32_t cropped_y = 0;
@@ -93,9 +99,23 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
 
     // same image with a different view(swizzle) used for sampling
     vk::ImageView alternate_view = nullptr;
+    // linear view used when the color surface is accessed as a storage image
+    vk::ImageView storage_view = nullptr;
+    // R32G32_UINT input view for the reinterpret compute pass.
+    vk::ImageView reinterpret_store_view = nullptr;
 
     // only used when upscaling is enabled, to downscale the image first
     std::unique_ptr<vkutil::Image> blit_image;
+
+    // R16G16B16A16_UINT alias preserving F16 NaN payloads.
+    std::unique_ptr<vkutil::Image> raw_image;
+    // Blending makes the raw alias stale.
+    bool content_is_blended = false;
+    bool reinterpret_view_is_raw = false;
+    // The cleared alias is unreadable until a scene writes it.
+    bool raw_image_filled = false;
+    // The guest selects words by view offset rather than texture coordinates.
+    bool has_phase_view = false;
 
     // only used for 3-component rgb textures which can't be copied directly
     std::unique_ptr<vkutil::Buffer> copy_buffer;
@@ -150,12 +170,27 @@ struct TextureLookupResult {
     vk::ImageView view;
     vkutil::ImageLayout layout;
     vk::Format format;
+    bool is_typeless_cast = false;
+    bool cast_phase_hi = false;
+    bool is_raw_bits = false;
 };
 
 // result when trying to retrieve a surface from the surface cache
 struct SurfaceRetrieveResult {
     vk::ImageView view;
     vkutil::Image *base_image;
+    vkutil::Image *raw_image = nullptr;
+    vk::ImageView storage_view = nullptr;
+};
+
+struct ReinterpretPushConstants {
+    uint32_t out_width;
+    uint32_t out_height;
+    uint32_t scaled_store_w;
+    uint32_t scaled_store_h;
+    uint32_t ratio;
+    uint32_t half_index;
+    uint32_t interleave;
 };
 
 class VKSurfaceCache {
@@ -189,7 +224,21 @@ private:
     void destroy_framebuffers(vk::ImageView view);
 
     void destroy_surface(ColorSurfaceCacheInfo &info);
+    void create_raw_alias(ColorSurfaceCacheInfo &info);
     void destroy_surface(DepthStencilSurfaceCacheInfo &info);
+
+    // Regroup typeless casts at native resolution before upscaling.
+    vk::ShaderModule reinterpret_shader = nullptr;
+    vk::DescriptorSetLayout reinterpret_desc_layout = nullptr;
+    vk::PipelineLayout reinterpret_pipeline_layout = nullptr;
+    vk::Pipeline reinterpret_pipeline = nullptr;
+    vk::DescriptorPool reinterpret_desc_pool = nullptr;
+    std::vector<vk::DescriptorSet> reinterpret_desc_sets;
+    uint32_t reinterpret_desc_idx = 0;
+    vk::Sampler reinterpret_sampler = nullptr;
+
+    void ensure_reinterpret_pipeline();
+    std::optional<bool> raw_cast_supported;
 
 public:
     // when creating a mutable image, can we pass as an argument
@@ -205,13 +254,36 @@ public:
     void cleanup();
 
     SurfaceRetrieveResult retrieve_color_surface_for_framebuffer(MemState &mem, SceGxmColorSurface *color);
-    std::optional<TextureLookupResult> retrieve_color_surface_as_texture(const SceGxmTexture &texture, const SceGxmColorBaseFormat base_format, TextureViewport *texture_viewport);
+    std::optional<TextureLookupResult> retrieve_color_surface_as_texture(const SceGxmTexture &texture, const SceGxmColorBaseFormat base_format, TextureViewport *texture_viewport, bool allow_raw_bits = false);
 
     SurfaceRetrieveResult retrieve_depth_stencil_for_framebuffer(SceGxmDepthStencilSurface *depth_stencil, const uint32_t width, const uint32_t height);
+
+    bool color_surface_has_raw_alias(Address address) const {
+        const auto it = color_address_lookup.find(address);
+        return it != color_address_lookup.end() && it->second->raw_image != nullptr;
+    }
+
+    bool current_surface_raw_is_valid() const {
+        return last_written_surface && last_written_surface->raw_image
+            && last_written_surface->raw_image_filled && !last_written_surface->content_is_blended;
+    }
+
+    void mark_surface_written(Address address, bool raw_written) {
+        const auto it = color_address_lookup.find(address);
+        if (it != color_address_lookup.end() && it->second->raw_image && raw_written)
+            it->second->raw_image_filled = true;
+    }
+
+    void mark_current_surface_blended() {
+        if (last_written_surface)
+            last_written_surface->content_is_blended = true;
+    }
+
     std::optional<TextureLookupResult> retrieve_depth_stencil_as_texture(const SceGxmTexture &texture, TextureViewport *texture_viewport);
 
     Framebuffer &retrieve_framebuffer_handle(MemState &mem, SceGxmColorSurface *color, SceGxmDepthStencilSurface *depth_stencil,
-        vk::RenderPass standard_render_pass, vk::RenderPass interlock_render_pass, vk::ImageView &color_view, vk::ImageView &ds_view);
+        vk::RenderPass standard_render_pass, vk::RenderPass interlock_render_pass, vk::ImageView &color_view,
+        vk::ImageView &color_storage_view, vk::ImageView &ds_view);
 
     // Check if the address is one of a used surface
     // If it is the case, this function returns true, moves the callback

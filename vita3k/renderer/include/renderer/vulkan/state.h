@@ -125,6 +125,7 @@ struct VKState : public renderer::State {
     Queue<WaitThreadRequest> request_queue;
 
     vkutil::Image default_image;
+    vkutil::Image default_raw_image;
     vkutil::Buffer default_buffer;
 
     bool support_fsr = false;

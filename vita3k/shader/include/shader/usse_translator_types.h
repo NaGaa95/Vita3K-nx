@@ -108,6 +108,9 @@ struct SpirvShaderParameters {
 
     spv::Id render_info_id;
 
+    spv::Id frag_coord_id = 0;
+    spv::Id front_facing_id = 0;
+
     // When using shader interlock, specialization constant telling us if the texture is gamma corrected
     spv::Id is_srgb_constant;
 };

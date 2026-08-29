@@ -347,12 +347,20 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         && (context.state.features.support_shader_interlock || context.ignore_macroblock
             || !context.render_target->has_macroblock_sync)) {
         // update the render pass to load and store the depth and stencil
-        context.current_render_pass = context.state.pipeline_cache.retrieve_render_pass(context.current_color_format, true, true, !context.record.color_surface.data);
+        context.current_render_pass = context.state.pipeline_cache.retrieve_render_pass(context.current_color_format, true, true, !context.record.color_surface.data, false,
+            context.state.surface_cache.color_surface_has_raw_alias(context.record.color_surface.data.address()));
         context.is_first_scene_draw = false;
     }
 
     const SceGxmFragmentProgram &gxm_fragment_program = *context.record.fragment_program.get(mem);
     const SceGxmProgram &fragment_program_gxp = *gxm_fragment_program.program.get(mem);
+
+    if (context.state.features.preserve_f16_nan_as_u16) {
+        const VKFragmentProgram &vk_frag_program = *reinterpret_cast<VKFragmentProgram *>(gxm_fragment_program.renderer_data.get());
+        if (vk_frag_program.blending.blendEnable)
+            context.state.surface_cache.mark_current_surface_blended();
+    }
+
     if (context.state.features.direct_fragcolor && fragment_program_gxp.is_frag_color_used()) {
         // the fragment shader is using programmable blending with a subpass input
         vk::ImageMemoryBarrier barrier{
@@ -469,6 +477,11 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
 
     auto &frag_ublock = context.curr_frag_ublock.base_block;
     frag_ublock.writing_mask = context.record.writing_mask;
+    frag_ublock.use_raw_image = context.state.features.preserve_f16_nan_as_u16
+            && context.record.color_base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16
+            && context.state.surface_cache.current_surface_raw_is_valid()
+        ? 1.0f
+        : 0.0f;
     frag_ublock.res_multiplier = context.state.res_multiplier;
     const bool has_msaa = context.render_target->multisample_mode;
     const bool has_downscale = context.record.color_surface.downscale;
@@ -476,6 +489,14 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         frag_ublock.res_multiplier *= 2;
     else if (!has_msaa && has_downscale)
         frag_ublock.res_multiplier /= 2;
+
+    frag_ublock.cast_sampler_mask = static_cast<float>(context.curr_frag_ublock.cast_sampler_bits);
+    frag_ublock.cast_phase_mask = static_cast<float>(context.curr_frag_ublock.cast_phase_bits);
+    frag_ublock.raw_cast_mask = static_cast<float>(context.curr_frag_ublock.raw_cast_bits);
+    frag_ublock.inv_frag_width = 1.0f / static_cast<float>(context.render_target->width);
+    frag_ublock.inv_frag_height = 1.0f / static_cast<float>(context.render_target->height);
+    // Cast dimensions exclude the render target MSAA and downscale factors.
+    frag_ublock.surface_res_multiplier = context.state.res_multiplier;
 
     if (context.curr_frag_ublock.changed || memcmp(&context.prev_frag_ublock, &frag_ublock, sizeof(frag_ublock)) != 0) {
         // TODO: this intermediate step can be avoided
@@ -519,6 +540,10 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     bind_vertex_streams(context, mem, instance_count, max_index);
 
     context.render_cmd.drawIndexed(count, instance_count, 0, 0, 0);
+    if (count && instance_count) {
+        context.state.surface_cache.mark_surface_written(context.record.color_surface.data.address(),
+            context.state.pipeline_cache.render_pass_has_raw_attachment(context.curr_renderpass_info.renderPass));
+    }
 
     context.vertex_uniform_storage_allocated = false;
     context.fragment_uniform_storage_allocated = false;

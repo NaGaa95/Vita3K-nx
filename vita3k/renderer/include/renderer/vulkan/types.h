@@ -320,6 +320,8 @@ struct VKContext : public renderer::Context {
     uint32_t current_fb_height = 0;
     vk::Format current_color_format;
     vk::ImageView current_color_view;
+    vk::ImageView current_color_storage_view;
+    vk::ImageView current_color_raw_view;
     vk::ImageView current_ds_view;
 
     bool is_recording = false;

@@ -35,6 +35,14 @@ struct RenderFragUniformBlock {
     float writing_mask = 0.0f;
     float use_raw_image = 0.0f;
     float res_multiplier = 1.0f;
+    // Cast texture units and selected words, stored as float-valued bit masks.
+    float cast_sampler_mask = 0.0f;
+    float cast_phase_mask = 0.0f;
+    float inv_frag_width = 1.0f;
+    float inv_frag_height = 1.0f;
+    // Cast scale excludes the render target's MSAA and downscale adjustments.
+    float surface_res_multiplier = 1.0f;
+    float raw_cast_mask = 0.0f;
 };
 
 enum FragUniformFieldId : uint32_t {
@@ -42,7 +50,13 @@ enum FragUniformFieldId : uint32_t {
     FRAG_UNIFORM_front_disabled,
     FRAG_UNIFORM_writing_mask,
     FRAG_UNIFORM_use_raw_image,
-    FRAG_UNIFORM_res_multiplier
+    FRAG_UNIFORM_res_multiplier,
+    FRAG_UNIFORM_cast_sampler_mask,
+    FRAG_UNIFORM_cast_phase_mask,
+    FRAG_UNIFORM_inv_frag_width,
+    FRAG_UNIFORM_inv_frag_height,
+    FRAG_UNIFORM_surface_res_multiplier,
+    FRAG_UNIFORM_raw_cast_mask
 };
 
 template <typename T>
@@ -104,6 +118,30 @@ struct UniformBlockExtended {
 
     static uint32_t get_viewport_ratio_offset(uint16_t buffer_count, uint16_t texture_count) {
         return get_buffer_bounds_offset(buffer_count, texture_count) + buffer_count * sizeof(buffer_bounds[0]);
+    }
+
+    uint16_t cast_sampler_bits = 0;
+    uint16_t cast_phase_bits = 0;
+    uint16_t raw_cast_bits = 0;
+
+    void set_raw_cast_bit(int idx, bool is_raw) {
+        const uint16_t bit = static_cast<uint16_t>(1u << idx);
+        const uint16_t new_bits = is_raw ? static_cast<uint16_t>(raw_cast_bits | bit) : static_cast<uint16_t>(raw_cast_bits & ~bit);
+        if (new_bits != raw_cast_bits) {
+            changed = true;
+            raw_cast_bits = new_bits;
+        }
+    }
+
+    void set_cast_sampler_bit(int idx, bool is_cast, bool phase_hi) {
+        const uint16_t bit = static_cast<uint16_t>(1u << idx);
+        const uint16_t new_bits = is_cast ? static_cast<uint16_t>(cast_sampler_bits | bit) : static_cast<uint16_t>(cast_sampler_bits & ~bit);
+        const uint16_t new_phase = (is_cast && phase_hi) ? static_cast<uint16_t>(cast_phase_bits | bit) : static_cast<uint16_t>(cast_phase_bits & ~bit);
+        if (new_bits != cast_sampler_bits || new_phase != cast_phase_bits) {
+            changed = true;
+            cast_sampler_bits = new_bits;
+            cast_phase_bits = new_phase;
+        }
     }
 
     void set_viewport_offset(int idx, const std::pair<float, float> &offset) {

@@ -106,6 +106,7 @@ struct TranslationState {
     spv::Id color_attachment_raw_id = spv::NoResult;
     spv::Id mask_id = spv::NoResult;
     spv::Id frag_coord_id = spv::NoResult;
+    spv::Id front_facing_id = spv::NoResult;
     spv::Id render_info_id = spv::NoResult;
     std::vector<VarToReg> var_to_regs;
     std::vector<spv::Id> interfaces;
@@ -374,6 +375,40 @@ static spv::Id create_builtin_sampler_for_raw(spv::Builder &b, const FeatureStat
     return sampler;
 }
 
+static spv::Id srgb_encode_rgb(spv::Builder &b, utils::SpirvUtilFunctions &utils, spv::Id rgb) {
+    const spv::Id f32 = b.makeFloatType(32);
+    const spv::Id v3 = b.makeVectorType(f32, 3);
+    const spv::Id bv3 = b.makeVectorType(b.makeBoolType(), 3);
+    const spv::Id zero = utils::make_uniform_vector_from_type(b, v3, 0.0f);
+
+    const spv::Id lo = b.createBinOp(spv::OpVectorTimesScalar, v3, rgb, b.makeFloatConstant(12.92f));
+    const spv::Id pow_base = b.createBuiltinCall(v3, utils.std_builtins, GLSLstd450FMax, { rgb, zero });
+    spv::Id hi = b.createBuiltinCall(v3, utils.std_builtins, GLSLstd450Pow,
+        { pow_base, utils::make_uniform_vector_from_type(b, v3, 1.0f / 2.4f) });
+    hi = b.createBinOp(spv::OpVectorTimesScalar, v3, hi, b.makeFloatConstant(1.055f));
+    hi = b.createBinOp(spv::OpFSub, v3, hi, utils::make_uniform_vector_from_type(b, v3, 0.055f));
+    const spv::Id cond = b.createBinOp(spv::OpFOrdLessThanEqual, bv3, rgb,
+        utils::make_uniform_vector_from_type(b, v3, 0.0031308f));
+    return b.createTriOp(spv::OpSelect, v3, cond, lo, hi);
+}
+
+static spv::Id srgb_decode_rgb(spv::Builder &b, utils::SpirvUtilFunctions &utils, spv::Id rgb) {
+    const spv::Id f32 = b.makeFloatType(32);
+    const spv::Id v3 = b.makeVectorType(f32, 3);
+    const spv::Id bv3 = b.makeVectorType(b.makeBoolType(), 3);
+    const spv::Id zero = utils::make_uniform_vector_from_type(b, v3, 0.0f);
+
+    const spv::Id lo = b.createBinOp(spv::OpVectorTimesScalar, v3, rgb, b.makeFloatConstant(1.0f / 12.92f));
+    spv::Id pow_base = b.createBinOp(spv::OpFAdd, v3, rgb, utils::make_uniform_vector_from_type(b, v3, 0.055f));
+    pow_base = b.createBinOp(spv::OpVectorTimesScalar, v3, pow_base, b.makeFloatConstant(1.0f / 1.055f));
+    pow_base = b.createBuiltinCall(v3, utils.std_builtins, GLSLstd450FMax, { pow_base, zero });
+    const spv::Id hi = b.createBuiltinCall(v3, utils.std_builtins, GLSLstd450Pow,
+        { pow_base, utils::make_uniform_vector_from_type(b, v3, 2.4f) });
+    const spv::Id cond = b.createBinOp(spv::OpFOrdLessThanEqual, bv3, rgb,
+        utils::make_uniform_vector_from_type(b, v3, 0.04045f));
+    return b.createTriOp(spv::OpSelect, v3, cond, lo, hi);
+}
+
 static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &parameters, utils::SpirvUtilFunctions &utils, const FeatureState &features, TranslationState &translation_state, NonDependentTextureQueryCallInfos &tex_query_infos, SamplerMap &samplers,
     const SceGxmProgram &program) {
     static const std::unordered_map<std::uint32_t, std::pair<std::string, std::uint32_t>> name_map = {
@@ -414,6 +449,11 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
 
     translation_state.interfaces.push_back(current_coord);
     translation_state.frag_coord_id = current_coord;
+
+    spv::Id front_facing_var = b.createVariable(spv::NoPrecision, spv::StorageClassInput, b.makeBoolType(), "gl_FrontFacing");
+    b.addDecoration(front_facing_var, spv::DecorationBuiltIn, spv::BuiltInFrontFacing);
+    translation_state.interfaces.push_back(front_facing_var);
+    translation_state.front_facing_id = front_facing_var;
 
     // It may actually be total fragments input
     for (size_t i = 0; i < vertex_varyings_ptr->varyings_count; i++, descriptor++) {
@@ -791,11 +831,32 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
                 }
                 translation_state.color_attachment_raw_id = color_attachment_raw;
 
-                spv::Id load_normal_cond = b.createBinOp(spv::OpFOrdLessThan, b.makeBoolType(), utils::create_access_chain(b, spv::StorageClassPrivate, translation_state.render_info_id, { b.makeIntConstant(FRAG_UNIFORM_use_raw_image) }), b.makeFloatConstant(0.5f));
+                const spv::Id load_normal_ptr = utils::create_access_chain(b, spv::StorageClassUniform,
+                    translation_state.render_info_id, { b.makeIntConstant(FRAG_UNIFORM_use_raw_image) });
+                const spv::Id load_normal_cond = b.createBinOp(spv::OpFOrdLessThan, b.makeBoolType(),
+                    b.createLoad(load_normal_ptr, spv::NoPrecision), b.makeFloatConstant(0.5f));
                 spv::Builder::If cond_builder(load_normal_cond, spv::SelectionControlMaskNone, b);
 
                 source = b.createOp(spv::OpImageRead, v4, { b.createLoad(color_attachment, spv::NoPrecision), current_coord });
-                store_source_result();
+                if (translation_state.is_vulkan) {
+                    const spv::Id old_source = source;
+                    spv::Builder::If srgb_cond_builder(parameters.is_srgb_constant, spv::SelectionControlMaskNone, b);
+
+                    const spv::Id v3 = b.makeVectorType(f32, 3);
+                    spv::Id rgb = b.createOp(spv::OpVectorShuffle, v3,
+                        { { true, source }, { true, source }, { false, 0 }, { false, 1 }, { false, 2 } });
+                    rgb = srgb_decode_rgb(b, utils, rgb);
+                    source = b.createOp(spv::OpVectorShuffle, v4,
+                        { { true, rgb }, { true, source }, { false, 0 }, { false, 1 }, { false, 2 }, { false, 6 } });
+                    store_source_result();
+
+                    srgb_cond_builder.makeBeginElse();
+                    source = old_source;
+                    store_source_result();
+                    srgb_cond_builder.makeEndIf();
+                } else {
+                    store_source_result();
+                }
                 cond_builder.makeBeginElse();
                 color_attachment = color_attachment_raw;
                 source = b.createOp(spv::OpImageRead, uiv4, { b.createLoad(color_attachment, spv::NoPrecision), current_coord });
@@ -814,12 +875,9 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
                     // if (is_srgb)
                     spv::Builder::If cond_builder(parameters.is_srgb_constant, spv::SelectionControlMaskNone, b);
 
-                    // perform gamma correction:
-                    // source.xyz = pow(source.xyz, vec3(2.2));
                     const spv::Id v3 = b.makeVectorType(f32, 3);
                     spv::Id rgb = b.createOp(spv::OpVectorShuffle, v3, { { true, source }, { true, source }, { false, 0 }, { false, 1 }, { false, 2 } });
-                    const spv::Id gamma = utils::make_uniform_vector_from_type(b, v3, 2.2f);
-                    rgb = b.createBuiltinCall(v3, utils.std_builtins, GLSLstd450Pow, { rgb, gamma });
+                    rgb = srgb_decode_rgb(b, utils, rgb);
                     b.setPrecision(rgb, precision);
                     source = b.createOp(spv::OpVectorShuffle, v4, { { true, rgb }, { true, source }, { false, 0 }, { false, 1 }, { false, 2 }, { false, 6 } });
 
@@ -1080,7 +1138,7 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
     }
 
     if (program_type == SceGxmProgramType::Fragment) {
-        std::vector<spv::Id> uniform_composition = { f32, f32, f32, f32, f32 };
+        std::vector<spv::Id> uniform_composition = { f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32 };
         if (uniform_buffer_count > 0) {
             uniform_composition.push_back(buffer_addresses_type);
             uniform_composition.push_back(buffer_bounds_type);
@@ -1106,6 +1164,12 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
         ADD_FRAG_UNIFORM_MEMBER(writing_mask);
         ADD_FRAG_UNIFORM_MEMBER(use_raw_image);
         ADD_FRAG_UNIFORM_MEMBER(res_multiplier);
+        ADD_FRAG_UNIFORM_MEMBER(cast_sampler_mask);
+        ADD_FRAG_UNIFORM_MEMBER(cast_phase_mask);
+        ADD_FRAG_UNIFORM_MEMBER(inv_frag_width);
+        ADD_FRAG_UNIFORM_MEMBER(inv_frag_height);
+        ADD_FRAG_UNIFORM_MEMBER(surface_res_multiplier);
+        ADD_FRAG_UNIFORM_MEMBER(raw_cast_mask);
 
 #undef ADD_FRAG_UNIFORM_MEMBER
         // the resolution multiplier does not require a high precision
@@ -1460,8 +1524,11 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
         }
     }
 
-    if (translation_state.is_fragment)
+    if (translation_state.is_fragment) {
         create_fragment_inputs(b, spv_params, utils, features, translation_state, texture_queries, samplers, program);
+        spv_params.frag_coord_id = translation_state.frag_coord_id;
+        spv_params.front_facing_id = translation_state.front_facing_id;
+    }
 
     return spv_params;
 }
@@ -1535,14 +1602,11 @@ static spv::Function *make_frag_finalize_function(spv::Builder &b, const SpirvSh
             // if (is_srgb)
             spv::Builder::If cond_builder(parameters.is_srgb_constant, spv::SelectionControlMaskNone, b);
 
-            // perform inverse gamma correction:
-            // color.xyz = pow(color.xyz, vec3(1/2.2));
             const spv::Id f32 = b.makeFloatType(32);
             const spv::Id v4 = b.makeVectorType(f32, 4);
             const spv::Id v3 = b.makeVectorType(f32, 3);
             spv::Id rgb = b.createOp(spv::OpVectorShuffle, v3, { { true, color }, { true, color }, { false, 0 }, { false, 1 }, { false, 2 } });
-            const spv::Id gamma = utils::make_uniform_vector_from_type(b, v3, 1 / 2.2f);
-            rgb = b.createBuiltinCall(v3, utils.std_builtins, GLSLstd450Pow, { rgb, gamma });
+            rgb = srgb_encode_rgb(b, utils, rgb);
             color = b.createOp(spv::OpVectorShuffle, v4, { { true, rgb }, { true, color }, { false, 0 }, { false, 1 }, { false, 2 }, { false, 6 } });
 
             b.createNoResultOp(spv::OpImageWrite, { b.createLoad(translate_state.color_attachment_id, spv::NoPrecision), translated_id, color });
@@ -1822,11 +1886,15 @@ static spv::Function *make_frag_initialize_function(spv::Builder &b, Translation
     spv::Id booltype = b.makeBoolType();
     spv::Id zero = b.makeFloatConstant(0.0f);
 
-    spv::Id front_facing = b.createVariable(spv::NoPrecision, spv::StorageClassInput, booltype, "gl_FrontFacing");
+    // Reuse the input builtin to avoid a duplicate SPIR-V declaration.
+    spv::Id front_facing = translate_state.front_facing_id;
+    if (front_facing == spv::NoResult) {
+        front_facing = b.createVariable(spv::NoPrecision, spv::StorageClassInput, booltype, "gl_FrontFacing");
+        b.addDecoration(front_facing, spv::DecorationBuiltIn, spv::BuiltInFrontFacing);
+        translate_state.interfaces.push_back(front_facing);
+    }
     spv::Id front_disabled = utils::create_access_chain(b, spv::StorageClassUniform, translate_state.render_info_id, { b.makeIntConstant(FRAG_UNIFORM_front_disabled) });
     spv::Id back_disabled = utils::create_access_chain(b, spv::StorageClassUniform, translate_state.render_info_id, { b.makeIntConstant(FRAG_UNIFORM_back_disabled) });
-    b.addDecoration(front_facing, spv::DecorationBuiltIn, spv::BuiltInFrontFacing);
-    translate_state.interfaces.push_back(front_facing);
 
     front_facing = b.createLoad(front_facing, spv::NoPrecision);
 

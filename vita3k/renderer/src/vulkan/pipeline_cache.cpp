@@ -144,25 +144,34 @@ void PipelineCache::init(bool support_rasterized_order_access) {
     {
         // layout for the mask, color attachment as input, being an input attachment or a storage image
         // depending on whether or not we are using shader interlock
-        std::array<vk::DescriptorSetLayoutBinding, 2> layout_binding;
+        std::array<vk::DescriptorSetLayoutBinding, 3> layout_binding;
         const vk::DescriptorType intput_image_descriptor = state.features.support_shader_interlock
             ? vk::DescriptorType::eStorageImage
             : vk::DescriptorType::eInputAttachment;
-        layout_binding[0] = vk::DescriptorSetLayoutBinding{
+        uint32_t binding_count = 0;
+        layout_binding[binding_count++] = vk::DescriptorSetLayoutBinding{
             .binding = 0,
             .descriptorType = intput_image_descriptor,
             .descriptorCount = 1,
             .stageFlags = vk::ShaderStageFlagBits::eFragment
         };
-        layout_binding[1] = vk::DescriptorSetLayoutBinding{
-            .binding = 1,
-            .descriptorType = vk::DescriptorType::eStorageImage,
-            .descriptorCount = 1,
-            .stageFlags = vk::ShaderStageFlagBits::eFragment
-        };
+        if (state.features.use_mask_bit)
+            layout_binding[binding_count++] = vk::DescriptorSetLayoutBinding{
+                .binding = 1,
+                .descriptorType = vk::DescriptorType::eStorageImage,
+                .descriptorCount = 1,
+                .stageFlags = vk::ShaderStageFlagBits::eFragment
+            };
+        if (state.features.preserve_f16_nan_as_u16)
+            layout_binding[binding_count++] = vk::DescriptorSetLayoutBinding{
+                .binding = 2,
+                .descriptorType = vk::DescriptorType::eStorageImage,
+                .descriptorCount = 1,
+                .stageFlags = vk::ShaderStageFlagBits::eFragment
+            };
 
         vk::DescriptorSetLayoutCreateInfo descriptor_info{
-            .bindingCount = state.features.use_mask_bit ? 2U : 1U,
+            .bindingCount = binding_count,
             .pBindings = layout_binding.data()
         };
         attachments_layout = state.device.createDescriptorSetLayout(descriptor_info);
@@ -441,6 +450,14 @@ void PipelineCache::cleanup() {
                 render_passes[i][j][k].clear();
             }
 
+    for (auto &load : render_passes_with_raw)
+        for (auto &store : load) {
+            for (auto &[format, pass] : store)
+                state.device.destroy(pass);
+            store.clear();
+        }
+    raw_attachment_passes.clear();
+
     for (auto &[fmt, pass] : shader_interlock_pass)
         state.device.destroy(pass);
     shader_interlock_pass.clear();
@@ -580,8 +597,14 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
     return shader_stage_info;
 }
 
-vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force_load, bool force_store, bool is_color_transient, bool no_color) {
-    auto &render_passes_map = no_color ? shader_interlock_pass : render_passes[is_color_transient][force_load][force_store];
+vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force_load, bool force_store, bool is_color_transient, bool no_color, bool has_raw_attachment) {
+    const bool with_raw = has_raw_attachment && !no_color && !is_color_transient
+        && state.features.preserve_f16_nan_as_u16 && format == vk::Format::eR16G16B16A16Sfloat;
+
+    auto &render_passes_map = no_color
+        ? shader_interlock_pass
+        : (with_raw ? render_passes_with_raw[force_load][force_store]
+                    : render_passes[is_color_transient][force_load][force_store]);
 
     auto it = render_passes_map.find(format);
 
@@ -590,12 +613,12 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force
 
     // create a new render pass for this format
 
-    vk::AttachmentReference color_ref{
-        .attachment = 0,
-        .layout = vk::ImageLayout::eGeneral
+    vk::AttachmentReference color_refs[2] = {
+        { .attachment = 0, .layout = vk::ImageLayout::eGeneral },
+        { .attachment = 1, .layout = vk::ImageLayout::eGeneral }
     };
     vk::AttachmentReference ds_ref{
-        .attachment = no_color ? 0U : 1U,
+        .attachment = no_color ? 0U : (with_raw ? 2U : 1U),
         .layout = vk::ImageLayout::eDepthStencilAttachmentOptimal
     };
     vk::SubpassDescription subpass{
@@ -607,8 +630,11 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force
         if (support_coherent_framebuffer_fetch)
             subpass.flags = vk::SubpassDescriptionFlagBits::eRasterizationOrderAttachmentColorAccessEXT;
 
-        subpass.setColorAttachments(color_ref);
-        subpass.setInputAttachments(color_ref);
+        subpass.colorAttachmentCount = with_raw ? 2 : 1;
+        subpass.pColorAttachments = color_refs;
+        // Framebuffer fetch reads only the float attachment.
+        subpass.inputAttachmentCount = 1;
+        subpass.pInputAttachments = color_refs;
     }
 
     vk::AttachmentDescription color_attachment{
@@ -617,6 +643,15 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force
         .loadOp = is_color_transient ? vk::AttachmentLoadOp::eDontCare : vk::AttachmentLoadOp::eLoad,
         .storeOp = is_color_transient ? vk::AttachmentStoreOp::eDontCare : vk::AttachmentStoreOp::eStore,
         .initialLayout = is_color_transient ? vk::ImageLayout::eUndefined : vk::ImageLayout::eGeneral,
+        .finalLayout = vk::ImageLayout::eGeneral
+    };
+
+    const vk::AttachmentDescription raw_attachment{
+        .format = vk::Format::eR16G16B16A16Uint,
+        .samples = vk::SampleCountFlagBits::e1,
+        .loadOp = vk::AttachmentLoadOp::eLoad,
+        .storeOp = vk::AttachmentStoreOp::eStore,
+        .initialLayout = vk::ImageLayout::eGeneral,
         .finalLayout = vk::ImageLayout::eGeneral
     };
 
@@ -691,19 +726,22 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force
     };
 
     vk::RenderPassCreateInfo pass_info{};
-    vk::AttachmentDescription attachments[] = { color_attachment, ds_attachment };
+    vk::AttachmentDescription attachments[] = { color_attachment, with_raw ? raw_attachment : ds_attachment, ds_attachment };
     pass_info.setAttachments(attachments);
+    pass_info.attachmentCount = with_raw ? 3 : 2;
     pass_info.setSubpasses(subpass);
     pass_info.setDependencies(dependencies);
     if (no_color) {
         // only add the ds attachment
-        pass_info.pAttachments = &attachments[1];
+        pass_info.pAttachments = &attachments[2];
         pass_info.attachmentCount = 1;
         // no need for the self-dependency
         pass_info.setDependencyCount(2);
     }
 
     render_passes_map[format] = state.device.createRenderPass(pass_info);
+    if (with_raw)
+        raw_attachment_passes.insert(static_cast<VkRenderPass>(render_passes_map[format]));
 
     return render_passes_map[format];
 }
@@ -914,17 +952,24 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         color_blending.flags = vk::PipelineColorBlendStateCreateFlagBits::eRasterizationOrderAttachmentAccessEXT;
 
     const bool frag_has_no_output = static_cast<bool>(gxm_fragment_shader->program_flags & SCE_GXM_PROGRAM_FLAG_OUTPUT_UNDEFINED);
+    std::array<vk::PipelineColorBlendAttachmentState, 2> blend_attachments;
+    blend_attachments[1] = vk::PipelineColorBlendAttachmentState{
+        .blendEnable = VK_FALSE,
+        .colorWriteMask = vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG | vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA
+    };
     if (is_fragment_disabled || frag_has_no_output || use_shader_interlock) {
         // The write mask must be empty as the lack of a fragment shader results in undefined values
-        static const vk::PipelineColorBlendAttachmentState blending = {
+        blend_attachments[0] = vk::PipelineColorBlendAttachmentState{
             .blendEnable = VK_FALSE,
             .colorWriteMask = vk::ColorComponentFlags()
         };
-        color_blending.setAttachments(blending);
+        blend_attachments[1].colorWriteMask = vk::ColorComponentFlags();
     } else {
-        const vk::PipelineColorBlendAttachmentState &blending = fragment_program.blending;
-        color_blending.setAttachments(blending);
+        blend_attachments[0] = fragment_program.blending;
     }
+    const bool with_raw_attachment = render_pass_has_raw_attachment(render_pass);
+    color_blending.attachmentCount = with_raw_attachment ? 2 : 1;
+    color_blending.pAttachments = blend_attachments.data();
 
     vk::PipelineLayout pipeline_layout = pipeline_layouts[vertex_program.texture_count][fragment_program.texture_count];
 
@@ -985,6 +1030,10 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     const VKFragmentProgram &fragment_program = *reinterpret_cast<VKFragmentProgram *>(
         fragment_program_gxm.renderer_data.get());
     key ^= fragment_program.blending_hash;
+
+    // Passes with different attachment counts require different pipelines.
+    if (render_pass_has_raw_attachment(context.current_render_pass))
+        key ^= 0x9E3779B97F4A7C15ull;
 
     // add the hash of the attribute and stream layout
     SceGxmVertexProgram &vertex_program_gxm = *record.vertex_program.get(mem);
