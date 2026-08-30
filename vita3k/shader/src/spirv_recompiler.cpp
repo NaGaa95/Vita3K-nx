@@ -1819,7 +1819,8 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
                 spv::Id z_ref = utils::create_access_chain(b, spv::StorageClassOutput, out_var, { b.makeIntConstant(2) });
                 spv::Id w_ref = utils::create_access_chain(b, spv::StorageClassOutput, out_var, { b.makeIntConstant(3) });
 
-                b.createStore(b.createLoad(w_ref, spv::NoPrecision), z_ref);
+                if (!translation_state.is_vulkan)
+                    b.createStore(b.createLoad(w_ref, spv::NoPrecision), z_ref);
 
                 cond_builder.makeBeginElse();
 
