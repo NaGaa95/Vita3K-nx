@@ -736,27 +736,32 @@ bool makeNacpIcon(const std::string &src, std::vector<u8> &out)
 {
     SDL_Surface *img = IMG_Load(src.c_str());
     if (!img) return false;
-    // Copy the colour channels instead of compositing them: a Vita icon whose
-    // background is stored fully transparent blends to the cleared destination
-    // and yields an all-black shortcut.
-    SDL_SetSurfaceBlendMode(img, SDL_BLENDMODE_NONE);
-    SDL_Surface *rgb = SDL_CreateRGBSurfaceWithFormat(0, 256, 256, 24, SDL_PIXELFORMAT_RGB24);
-    if (!rgb) { SDL_FreeSurface(img); return false; }
-    SDL_FillRect(rgb, nullptr, 0);
-    SDL_Rect d{0, 0, 256, 256};
-    SDL_BlitScaled(img, nullptr, rgb, &d);
+
+    // SDL cannot scale and convert from 32-bit to 24-bit in the same blit.
+    SDL_Surface *src32 = SDL_ConvertSurfaceFormat(img, SDL_PIXELFORMAT_RGBA32, 0);
     SDL_FreeSurface(img);
+    if (!src32) return false;
+
+    SDL_Surface *rgba = SDL_CreateRGBSurfaceWithFormat(0, 256, 256, 32, SDL_PIXELFORMAT_RGBA32);
+    if (!rgba) { SDL_FreeSurface(src32); return false; }
+    // Composite transparent icons onto the HOME menu's black background.
+    SDL_FillRect(rgba, nullptr, SDL_MapRGBA(rgba->format, 0, 0, 0, 255));
+    SDL_SetSurfaceBlendMode(src32, SDL_BLENDMODE_BLEND);
+    SDL_Rect d{0, 0, 256, 256};
+    const bool blitted = SDL_BlitScaled(src32, nullptr, rgba, &d) == 0;
+    SDL_FreeSurface(src32);
+    if (!blitted) { SDL_FreeSurface(rgba); return false; }
 
     tjhandle tj = tjInitCompress();
-    if (!tj) { SDL_FreeSurface(rgb); return false; }
+    if (!tj) { SDL_FreeSurface(rgba); return false; }
     unsigned char *jpg = nullptr; unsigned long jpgSize = 0;
-    int rc = tjCompress2(tj, (unsigned char *)rgb->pixels, 256, rgb->pitch, 256, TJPF_RGB,
+    int rc = tjCompress2(tj, (unsigned char *)rgba->pixels, 256, rgba->pitch, 256, TJPF_RGBA,
                          &jpg, &jpgSize, TJSAMP_420, 90, 0);
     bool ok = (rc == 0) && jpgSize > 0 && jpgSize < 0x20000;
     if (ok) { out.assign(jpg, jpg + jpgSize); }
     if (jpg) tjFree(jpg);
     tjDestroy(tj);
-    SDL_FreeSurface(rgb);
+    SDL_FreeSurface(rgba);
     return ok;
 }
 
