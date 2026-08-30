@@ -22,6 +22,7 @@
 #include <renderer/vulkan/state.h>
 
 #include <gxm/functions.h>
+#include <mem/functions.h>
 #include <renderer/functions.h>
 
 #include <util/log.h>
@@ -31,6 +32,25 @@
 #include <algorithm>
 
 namespace renderer::vulkan {
+
+#ifdef __SWITCH__
+static void copy_readback_to_guest(const MemState &mem, Address address, const uint8_t *source,
+    uint32_t size, const renderer::texture::ReadbackRows &rows) {
+    const uint32_t row_count = rows.count ? rows.count : 1;
+    const uint32_t row_stride = rows.count ? rows.stride : size;
+    const uint32_t row_bytes = rows.count ? rows.row_bytes : size;
+    for (uint32_t row = 0; row < row_count; ++row) {
+        const uint32_t row_offset = row * row_stride;
+        uint32_t copied = 0;
+        while (copied < row_bytes) {
+            const Address destination = address + row_offset + copied;
+            const uint32_t bytes = std::min<uint32_t>(row_bytes - copied, KiB(4) - destination % KiB(4));
+            memcpy(Ptr<uint8_t>(destination).get(mem), source + row_offset + copied, bytes);
+            copied += bytes;
+        }
+    }
+}
+#endif
 
 void VKContext::wait_thread_function(const MemState &mem) {
     switch_pin_to_hardware_priority("Vulkan wait thread", 45);
@@ -112,20 +132,35 @@ void VKContext::wait_thread_function(const MemState &mem) {
                        },
                        [&](BufferSyncRequest &request) {
                            wait_for_fences();
-                           auto mem_it = state.mapped_memories.lower_bound(request.location);
-                           if (mem_it == state.mapped_memories.end() || mem_it->first + mem_it->second.size < request.location + request.size) {
-                               LOG_ERROR("Buffer Sync request for {}-{} is not fully mapped", log_hex(request.location), log_hex(request.location + request.size));
+                           const auto span = request.rows.count ? request.rows.span_size() : std::optional<uint32_t>(request.size);
+                           if (!span || *span != request.size || !is_valid_addr_range_size(mem, request.location, request.size)) {
+                               LOG_ERROR("Invalid surface readback range");
                                return;
                            }
-                           vkutil::Buffer &mapped_buffer = std::get<vkutil::Buffer>(mem_it->second.buffer_impl);
-                           const uint32_t buffer_offset = mem_it->second.buffer_offset + request.location - mem_it->first;
-                           // Double Buffer uses cached, non-coherent NVK memory
-                           // on Switch. Make completed GPU writes visible before
-                           // the CPU copies a surface/visibility result back.
-                           mapped_buffer.invalidate(buffer_offset, request.size);
-                           uint8_t *src = reinterpret_cast<uint8_t *>(mapped_buffer.mapped_data);
-                           src += buffer_offset;
-                           memcpy(Ptr<void>(request.location).get(mem), src, request.size);
+                           auto mem_it = state.mapped_memories.lower_bound(request.location);
+                           if (mem_it == state.mapped_memories.end()
+                               || !renderer::texture::readback_range_fits(mem_it->first, mem_it->second.size, request.location, request.size)) {
+                               LOG_ERROR("Surface readback range is not fully mapped");
+                               return;
+                           }
+                           auto *mapped_buffer = std::get_if<vkutil::Buffer>(&mem_it->second.buffer_impl);
+                           const uint64_t buffer_offset = uint64_t(mem_it->second.buffer_offset) + request.location - mem_it->first;
+                           if (!mapped_buffer || !mapped_buffer->mapped_data
+                               || !renderer::texture::readback_range_fits(0, mapped_buffer->size, buffer_offset, request.size)) {
+                               LOG_ERROR("Surface readback exceeds its host buffer");
+                               return;
+                           }
+                           mapped_buffer->invalidate(buffer_offset, request.size);
+                           const auto *src = static_cast<const uint8_t *>(mapped_buffer->mapped_data) + buffer_offset;
+#ifdef __SWITCH__
+                           copy_readback_to_guest(mem, request.location, src, request.size, request.rows);
+#else
+                           auto *dst = Ptr<uint8_t>(request.location).get(mem);
+                           if (request.rows.count)
+                               renderer::texture::copy_readback_rows({ dst, request.size }, { src, request.size }, request.rows);
+                           else
+                               memcpy(dst, src, request.size);
+#endif
                        },
                        [&](PostSurfaceSyncRequest &request) {
                            wait_for_fences();
@@ -582,8 +617,15 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
             }
 
             // we must sync the two buffers
-            if (surface_info && surface_info->need_buffer_sync)
-                state.request_queue.push(BufferSyncRequest{ surface_info->data.address(), static_cast<uint32_t>(surface_info->total_bytes) });
+            if (surface_info && surface_info->need_buffer_sync) {
+                const renderer::texture::ReadbackRows rows{
+                    surface_info->stride_bytes,
+                    uint32_t(surface_info->original_width) * (gxm::bits_per_pixel(surface_info->format) / 8),
+                    surface_info->original_height
+                };
+                if (const auto size = rows.span_size())
+                    state.request_queue.push(BufferSyncRequest{ surface_info->data.address(), *size, rows });
+            }
         }
 
         if (surface_info && surface_info->need_post_surface_sync) {

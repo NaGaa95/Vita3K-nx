@@ -17,6 +17,8 @@
 
 #include <renderer/vulkan/surface_cache.h>
 #include <renderer/texture/packed.h>
+#include <renderer/texture/readback.h>
+#include <mem/functions.h>
 
 #include <gxm/functions.h>
 #include <renderer/vulkan/gxm_to_vulkan.h>
@@ -124,7 +126,7 @@ static uint32_t r4g4b4a4_shift(vk::ComponentSwizzle component) {
     }
 }
 
-static void pack_rgba8_to_r4g4b4a4(uint8_t *dst, const uint8_t *src, uint32_t pixel_stride, uint32_t height, const vk::ComponentMapping &swizzle) {
+static void pack_rgba8_to_r4g4b4a4(uint8_t *dst, const uint8_t *src, uint32_t pixel_stride, uint32_t width, uint32_t height, const vk::ComponentMapping &swizzle) {
     const uint32_t shift_r = r4g4b4a4_shift(swizzle.r);
     const uint32_t shift_g = r4g4b4a4_shift(swizzle.g);
     const uint32_t shift_b = r4g4b4a4_shift(swizzle.b);
@@ -134,7 +136,7 @@ static void pack_rgba8_to_r4g4b4a4(uint8_t *dst, const uint8_t *src, uint32_t pi
         uint16_t *dst_row = reinterpret_cast<uint16_t *>(dst + y * pixel_stride * sizeof(uint16_t));
         const uint8_t *src_row = src + y * pixel_stride * 4;
 
-        for (uint32_t x = 0; x < pixel_stride; x++) {
+        for (uint32_t x = 0; x < width; x++) {
             const uint32_t r = unorm8_to_unorm4(src_row[x * 4 + 0]);
             const uint32_t g = unorm8_to_unorm4(src_row[x * 4 + 1]);
             const uint32_t b = unorm8_to_unorm4(src_row[x * 4 + 2]);
@@ -1727,7 +1729,16 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
     if (last_written_surface == nullptr || !*last_written_surface->need_surface_sync)
         return nullptr;
 
+    const uint32_t guest_bpp = gxm::bits_per_pixel(last_written_surface->format) / 8;
+    const renderer::texture::ReadbackRows rows{ last_written_surface->stride_bytes,
+        uint32_t(last_written_surface->original_width) * guest_bpp, last_written_surface->original_height };
+    const auto readback_size = rows.span_size();
     VKContext *context = reinterpret_cast<VKContext *>(state.context);
+    if (!guest_bpp || last_written_surface->stride_bytes % guest_bpp || !readback_size
+        || !is_valid_addr_range_size(context->mem, last_written_surface->data.address(), *readback_size)) {
+        LOG_ERROR("Invalid color surface readback dimensions");
+        return nullptr;
+    }
     vk::CommandBuffer cmd_buffer = context->render_cmd;
 
     bool sync_from_raw = typeless_read_from_raw(*last_written_surface);
@@ -1786,7 +1797,7 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
 
     vk::Buffer buffer;
     uint32_t offset;
-    const uint32_t pixel_stride = (last_written_surface->stride_bytes * 8) / gxm::bits_per_pixel(last_written_surface->format);
+    const uint32_t pixel_stride = last_written_surface->stride_bytes / guest_bpp;
     if (format_need_additional_memory(last_written_surface->format)
         || surface_is_repacked_u4u4u4u4(*last_written_surface)
         || surface_is_repacked_float(*last_written_surface)) {
@@ -1808,6 +1819,12 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
         last_written_surface->need_buffer_sync = false;
         last_written_surface->need_post_surface_sync = true;
     } else {
+        const auto mapping = state.mapped_memories.lower_bound(last_written_surface->data.address());
+        if (mapping == state.mapped_memories.end()
+            || !renderer::texture::readback_range_fits(mapping->first, mapping->second.size, last_written_surface->data.address(), *readback_size)) {
+            LOG_ERROR("Color surface readback is not fully mapped");
+            return nullptr;
+        }
         last_written_surface->need_buffer_sync = true;
         last_written_surface->need_post_surface_sync = !is_swizzle_identity;
         std::tie(buffer, offset) = state.get_matching_mapping(last_written_surface->data);
@@ -1889,7 +1906,6 @@ void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, ColorSurface
         return;
 
     const uint32_t pixel_stride = (surface->stride_bytes * 8) / gxm::bits_per_pixel(surface->format);
-    const uint32_t nb_pixels = pixel_stride * surface->original_height;
     uint8_t *pixels = surface->data.cast<uint8_t>().get(mem);
 
     if (surface_is_repacked_float(*surface)) {
@@ -1900,7 +1916,7 @@ void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, ColorSurface
 
     if (surface_is_repacked_u4u4u4u4(*surface)) {
         surface->copy_buffer->invalidate(0, VK_WHOLE_SIZE);
-        pack_rgba8_to_r4g4b4a4(pixels, static_cast<const uint8_t *>(surface->copy_buffer->mapped_data), pixel_stride, surface->original_height, surface->swizzle);
+        pack_rgba8_to_r4g4b4a4(pixels, static_cast<const uint8_t *>(surface->copy_buffer->mapped_data), pixel_stride, surface->original_width, surface->original_height, surface->swizzle);
         return;
     }
 
@@ -1921,16 +1937,19 @@ void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, ColorSurface
         return;
     }
 
-    switch (vk::componentBits(surface->texture.format, 0)) {
-    case 8:
-        swizzle_text_T<uint8_t>(pixels, nb_pixels, surface);
-        break;
-    case 16:
-        swizzle_text_T<uint16_t>(reinterpret_cast<uint16_t *>(pixels), nb_pixels, surface);
-        break;
-    case 32:
-        swizzle_text_T<uint32_t>(reinterpret_cast<uint32_t *>(pixels), nb_pixels, surface);
-        break;
+    for (uint32_t row = 0; row < surface->original_height; ++row) {
+        auto *row_pixels = pixels + size_t(row) * surface->stride_bytes;
+        switch (vk::componentBits(surface->texture.format, 0)) {
+        case 8:
+            swizzle_text_T<uint8_t>(row_pixels, surface->original_width, surface);
+            break;
+        case 16:
+            swizzle_text_T<uint16_t>(reinterpret_cast<uint16_t *>(row_pixels), surface->original_width, surface);
+            break;
+        case 32:
+            swizzle_text_T<uint32_t>(reinterpret_cast<uint32_t *>(row_pixels), surface->original_width, surface);
+            break;
+        }
     }
 }
 

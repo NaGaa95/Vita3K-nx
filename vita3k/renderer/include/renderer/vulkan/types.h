@@ -18,6 +18,7 @@
 #pragma once
 
 #include <renderer/texture_cache.h>
+#include <renderer/texture/readback.h>
 #include <renderer/types.h>
 #include <shader/uniform_block.h>
 #include <vkutil/objects.h>
@@ -233,6 +234,7 @@ struct CallbackRequest {
 struct BufferSyncRequest {
     Address location;
     uint32_t size;
+    renderer::texture::ReadbackRows rows;
 };
 
 // A parallel thread is handling these request and telling other waiting threads
