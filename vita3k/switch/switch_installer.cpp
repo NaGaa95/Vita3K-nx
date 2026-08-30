@@ -1217,6 +1217,10 @@ void run_switch_installer(EmuEnvState &emuenv) {
     // reserved for the OS on homebrew. mask 0b0111 = cores 0,1,2; a running thread
     // can only occupy one core at a time, but this lets the scheduler pick the
     // least-loaded application core instead of pinning to the system core.
+    // Restore affinity before any in-process return to the launcher.
+    s32 prev_preferred_core = 0;
+    u64 prev_affinity_mask = 0;
+    const bool have_prev_mask = R_SUCCEEDED(svcGetThreadCoreMask(&prev_preferred_core, &prev_affinity_mask, CUR_THREAD_HANDLE));
     const Result core_rc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, 0b0111u);
     if (R_FAILED(core_rc))
         LOG_WARN("Installer: could not restrict to cores 0/1/2 (rc=0x{:X}); using default affinity.", core_rc);
@@ -1258,4 +1262,6 @@ void run_switch_installer(EmuEnvState &emuenv) {
     // Restore the default clocks so the returning launcher / next game is not left
     // in a throttled-GPU boost state.
     appletSetCpuBoostMode(ApmCpuBoostMode_Normal);
+    if (have_prev_mask)
+        svcSetThreadCoreMask(CUR_THREAD_HANDLE, prev_preferred_core, prev_affinity_mask);
 }

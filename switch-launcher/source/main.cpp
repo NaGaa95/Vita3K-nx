@@ -6836,6 +6836,11 @@ int main(int argc, char **argv){
   SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY,"linear");
   if(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMECONTROLLER|SDL_INIT_AUDIO)!=0){ return startupFailure("SDL initialization failed."); }
   g_sdlReady=true;
+  // Opening audio before applet focus can stall audren and hang SDL_CloseAudioDevice.
+  for(int i=0;i<200&&appletGetFocusState()!=AppletFocusState_InFocus;i++){
+    if(!appletMainLoop())break;
+    svcSleepThread(10000000ULL);
+  }
   uiAudioInit();
   if(TTF_Init()!=0) return startupFailure("Font initialization failed.");
   g_ttfReady=true;

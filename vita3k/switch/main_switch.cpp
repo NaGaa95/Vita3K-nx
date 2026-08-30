@@ -1939,20 +1939,47 @@ int main(int argc, char *argv[]) {
     if (!install_mode)
         session.app_session_controller = std::make_unique<app::AppSessionController>(*session.emuenv);
     LOG_INFO("Vita3K Switch session initialised.");
+    LOG_INFO("[boot] install_mode={} return='{}' nextload_available={} argc={}",
+        install_mode, return_path, envHasNextLoad(), argc);
 
     // Install mode: process sdmc:/switch/vita3k/install/ then exit (used by the
     // launcher, which chainloads "Vita3K.nro --install --return <launcher.nro>").
     if (install_mode) {
         run_switch_installer(*session.emuenv);
 
+        // Destroy the session before shutting down libnx services.
+        session.app_session_controller.reset();
+        session.emuenv.reset();
+
         // Defensive: install mode reserves no guest memory, but if any path ever
         // did, free it before the chainload so hbloader gets a clean address space.
         switch_release_guest_region();
+        switch_restore_loader_heap();
 
-        // If the launcher passed "--return <path>", queue that .nro with hbloader so
-        // control returns to the launcher once we exit (instead of dropping back to
-        // the HOME menu / hbmenu).
-        if (!return_path.empty()) {
+        // Restart the application to prevent the next NRO from reusing the installer's process.
+        bool application_relaunch_queued = false;
+        if (current_forwarder_targets(return_path)
+            && write_frontend_request(SwitchFrontendAction::ReturnToLauncher, std::string())) {
+            if (auto logger = spdlog::default_logger())
+                logger->flush();
+
+            // A successful restart does not return.
+            const Result restart_rc = appletRestartProgram(nullptr, 0);
+            LOG_WARN("Installer done; RestartProgram returned {}, trying RequestLaunchApplication", log_hex(restart_rc));
+
+            const Result request_rc = appletRequestLaunchApplication(0, nullptr);
+            if (R_SUCCEEDED(request_rc) && !return_path.empty() && envHasNextLoad()) {
+                envSetNextLoad(return_path.c_str(), HBLOADER_EXIT_SENTINEL);
+                application_relaunch_queued = true;
+                LOG_INFO("Installer done; queued a clean application relaunch");
+            } else {
+                std::remove(SWITCH_FRONTEND_REQUEST_PATH);
+                LOG_ERROR("Installer done; clean relaunch unavailable (rc={}), falling back to the in-process chainload",
+                    log_hex(request_rc));
+            }
+        }
+
+        if (!application_relaunch_queued && !return_path.empty()) {
             if (envHasNextLoad()) {
                 LOG_INFO("Installer done; returning to launcher: {}", return_path);
                 envSetNextLoad(return_path.c_str(), return_path.c_str());
@@ -1960,6 +1987,9 @@ int main(int argc, char *argv[]) {
                 LOG_WARN("--return given but envHasNextLoad() is false; cannot chainload {}", return_path);
             }
         }
+
+        if (auto logger = spdlog::default_logger())
+            logger->flush();
 
         socketExit();
         romfsExit();
