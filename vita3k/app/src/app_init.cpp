@@ -488,6 +488,9 @@ bool init(EmuEnvState &state, Config &cfg, const Root &root_paths, bool paths_on
 void shutdown_app_runtime(EmuEnvState &state) {
     state.audio.stop_all_ports();
 
+    if (state.renderer)
+        state.renderer->command_buffer_queue.abort();
+
     gxm::shutdown(state);
 
     state.net.abort_all();

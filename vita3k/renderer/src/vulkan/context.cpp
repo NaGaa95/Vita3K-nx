@@ -641,6 +641,21 @@ void VKContext::check_for_macroblock_change(bool is_draw) {
 }
 
 void new_frame(VKContext &context) {
+    const auto abort_requested = [&]() {
+        if (!context.state.render_abort.load(std::memory_order_relaxed)
+            && !context.state.request_queue.is_aborted()
+            && !context.state.device_lost.load(std::memory_order_acquire))
+            return false;
+        {
+            const std::lock_guard<std::mutex> lock(context.state.command_finish_one_mutex);
+            context.state.render_abort.store(true, std::memory_order_relaxed);
+        }
+        context.state.command_finish_one.notify_all();
+        return true;
+    };
+    if (abort_requested())
+        return;
+
     if (context.state.features.enable_memory_mapping) {
         FrameDoneRequest request = { context.frame_timestamp };
         context.state.request_queue.push(request);
@@ -665,23 +680,31 @@ void new_frame(VKContext &context) {
 
             // the wait is done by the wait thread
             std::unique_lock<std::mutex> lock(context.new_frame_mutex);
-            context.new_frame_condv.wait(lock, [&]() {
-                return context.last_frame_waited >= previous_frame_timestamp;
-            });
+            while (!abort_requested() && context.last_frame_waited < previous_frame_timestamp)
+                context.new_frame_condv.wait_for(lock, std::chrono::milliseconds(100));
         } else {
-            auto result = device.waitForFences(frame.rendered_fences, VK_TRUE, std::numeric_limits<uint64_t>::max());
-            if (result != vk::Result::eSuccess) {
+            while (!abort_requested()) {
+                const auto result = device.waitForFences(frame.rendered_fences, VK_TRUE, 100'000'000ULL);
+                if (result == vk::Result::eSuccess)
+                    break;
+                if (result == vk::Result::eTimeout)
+                    continue;
                 LOG_ERROR("Could not wait for fences.");
-                assert(false);
-                return;
+                context.state.device_lost.store(true, std::memory_order_release);
             }
         }
+
+        // Shutdown may acknowledge a frame without completing its GPU work.
+        if (abort_requested())
+            return;
 
         // reset the fences in both case (the wait thread does not do that as they can still be used)
         device.resetFences(frame.rendered_fences);
         frame.rendered_fences.clear();
     }
 
+    if (abort_requested())
+        return;
     device.resetCommandPool(frame.prerender_pool);
     device.resetCommandPool(frame.render_pool);
 
