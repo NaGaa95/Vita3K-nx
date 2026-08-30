@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <renderer/vulkan/surface_cache.h>
+#include <renderer/texture/packed.h>
 
 #include <gxm/functions.h>
 #include <renderer/vulkan/gxm_to_vulkan.h>
@@ -31,11 +32,6 @@
 
 extern "C" {
 #include <libswscale/swscale.h>
-}
-
-static bool format_support_surface_sync(SceGxmColorBaseFormat format) {
-    // we use rgba16 to emulate this format, don't even try to convert it back for now
-    return format != SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10;
 }
 
 static bool format_support_swizzle(SceGxmColorBaseFormat format) {
@@ -63,6 +59,34 @@ static bool surface_is_repacked_u4u4u4u4(const ColorSurfaceCacheInfo &surface) {
     return surface.format == SCE_GXM_COLOR_BASE_FORMAT_U4U4U4U4
         && (surface.texture.format == vk::Format::eR8G8B8A8Unorm
             || surface.texture.format == vk::Format::eR8G8B8A8Srgb);
+}
+
+static bool surface_is_repacked_float(const ColorSurfaceCacheInfo &surface) {
+    return surface.texture.format == vk::Format::eR16G16B16A16Sfloat
+        && (surface.format == SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10
+            || surface.format == SCE_GXM_COLOR_BASE_FORMAT_SE5M9M9M9);
+}
+
+static void pack_float_surface(uint8_t *dst, const uint8_t *src, const ColorSurfaceCacheInfo &surface) {
+    using renderer::texture::PackedColorOrder;
+    PackedColorOrder order = PackedColorOrder::ABGR;
+    switch (surface.swizzle.r) {
+    case vk::ComponentSwizzle::eB: order = PackedColorOrder::ARGB; break;
+    case vk::ComponentSwizzle::eA: order = PackedColorOrder::RGBA; break;
+    case vk::ComponentSwizzle::eG: order = PackedColorOrder::BGRA; break;
+    default: break;
+    }
+    const uint32_t pixel_stride = surface.stride_bytes / sizeof(uint32_t);
+    for (uint32_t y = 0; y < surface.original_height; ++y) {
+        for (uint32_t x = 0; x < surface.original_width; ++x) {
+            std::array<uint16_t, 4> rgba;
+            memcpy(rgba.data(), src + (size_t(y) * pixel_stride + x) * sizeof(rgba), sizeof(rgba));
+            const uint32_t packed = surface.format == SCE_GXM_COLOR_BASE_FORMAT_SE5M9M9M9
+                ? renderer::texture::pack_se5m9m9m9(rgba, surface.swizzle.r == vk::ComponentSwizzle::eB)
+                : renderer::texture::pack_u2f10f10f10(rgba, order);
+            memcpy(dst + size_t(y) * surface.stride_bytes + x * sizeof(packed), &packed, sizeof(packed));
+        }
+    }
 }
 
 static uint8_t unorm8_to_unorm4(uint8_t value) {
@@ -122,8 +146,7 @@ static void pack_rgba8_to_r4g4b4a4(uint8_t *dst, const uint8_t *src, uint32_t pi
 }
 
 static void protect_surface(MemState &mem, ColorSurfaceCacheInfo &info) {
-    const bool trap_reads = (info.tiling == SurfaceTiling::Linear
-        && format_support_surface_sync(info.format));
+    const bool trap_reads = info.tiling == SurfaceTiling::Linear;
 
     uint32_t addr_start = align(info.data.address(), KiB(4));
     uint32_t addr_end = align_down(info.data.address() + info.total_bytes, KiB(4));
@@ -1765,7 +1788,8 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
     uint32_t offset;
     const uint32_t pixel_stride = (last_written_surface->stride_bytes * 8) / gxm::bits_per_pixel(last_written_surface->format);
     if (format_need_additional_memory(last_written_surface->format)
-        || surface_is_repacked_u4u4u4u4(*last_written_surface)) {
+        || surface_is_repacked_u4u4u4u4(*last_written_surface)
+        || surface_is_repacked_float(*last_written_surface)) {
         if (!last_written_surface->copy_buffer)
             last_written_surface->copy_buffer = std::make_unique<vkutil::Buffer>();
 
@@ -1867,6 +1891,12 @@ void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, ColorSurface
     const uint32_t pixel_stride = (surface->stride_bytes * 8) / gxm::bits_per_pixel(surface->format);
     const uint32_t nb_pixels = pixel_stride * surface->original_height;
     uint8_t *pixels = surface->data.cast<uint8_t>().get(mem);
+
+    if (surface_is_repacked_float(*surface)) {
+        surface->copy_buffer->invalidate(0, VK_WHOLE_SIZE);
+        pack_float_surface(pixels, static_cast<const uint8_t *>(surface->copy_buffer->mapped_data), *surface);
+        return;
+    }
 
     if (surface_is_repacked_u4u4u4u4(*surface)) {
         surface->copy_buffer->invalidate(0, VK_WHOLE_SIZE);
