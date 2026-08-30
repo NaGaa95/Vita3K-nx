@@ -1216,6 +1216,7 @@ SceUID condvar_create(SceUID *uid_out, KernelState &kernel, const char *export_n
     }
 
     const CondvarPtr condvar = std::make_shared<Condvar>();
+    condvar->uid = uid;
     condvar->attr = attr;
     condvar->associated_mutex = std::move(assoc_mutex);
     strncpy(condvar->name, name, KERNELOBJECT_MAX_NAME_LENGTH);
@@ -1294,6 +1295,8 @@ int condvar_signal(KernelState &kernel, const char *export_name, SceUID thread_i
 
     if (target_type == Condvar::SignalTarget::Type::Specific) {
         ThreadStatePtr waiting_thread = lock_and_find(signal_target.thread_id, kernel.threads, kernel.mutex);
+        if (!waiting_thread)
+            return RET_ERROR(SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID);
         // Search for specified waiting thread
         auto waiting_thread_iter = waiting_threads->find(waiting_thread);
         if (waiting_thread_iter != waiting_threads->end()) {
