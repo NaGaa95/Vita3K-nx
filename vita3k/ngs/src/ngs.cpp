@@ -19,6 +19,7 @@
 #include <kernel/state.h>
 
 #include <ngs/modules/atrac9.h>
+#include <ngs/modules/mixer.h>
 #include <ngs/state.h>
 #include <ngs/system.h>
 #include <util/lock_and_find.h>
@@ -162,12 +163,19 @@ void Voice::init(Rack *mama) {
     for (uint32_t i = 0; i < MAX_OUTPUT_PORT; i++)
         patches[i].resize(mama->patches_per_output);
 
-    inputs.init(rack->system->granularity, 1);
+    const auto input_count = std::count_if(mama->modules.begin(), mama->modules.end(), [](const auto &module) {
+        return module && module->module_id() == InputMixerModule::input_mixer_module_id;
+    });
+    inputs.init(rack->system->granularity, std::max<uint16_t>(1, static_cast<uint16_t>(input_count)));
     voice_mutex = std::make_unique<std::mutex>();
 }
 
 Ptr<Patch> Voice::patch(const MemState &mem, const int32_t index, int32_t subindex, int32_t dest_index, Ptr<Voice> source, Ptr<Voice> dest) {
     const std::lock_guard<std::mutex> guard(*voice_mutex);
+
+    Voice *destination = dest.get(mem);
+    if (!destination || !destination->inputs.get_input_buffer_queue(dest_index))
+        return {};
 
     if (index >= MAX_OUTPUT_PORT) {
         // We don't have enough port for you!

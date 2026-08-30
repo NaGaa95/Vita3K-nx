@@ -34,8 +34,10 @@ namespace ngs {
 
 class InputMixerModule : public Module {
 public:
+    static constexpr uint32_t input_mixer_module_id = 0x5CE0;
+    static uint32_t input_index_of(const ModuleData &data);
     bool process(KernelState &kern, const MemState &mem, const SceUID thread_id, ModuleData &data, std::unique_lock<std::recursive_mutex> &scheduler_lock, std::unique_lock<std::mutex> &voice_lock) override;
-    uint32_t module_id() const override { return 0x5CE0; }
+    uint32_t module_id() const override { return input_mixer_module_id; }
 
     static constexpr uint32_t get_max_parameter_size() {
         return 0;
