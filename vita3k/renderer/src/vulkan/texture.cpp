@@ -136,7 +136,9 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
 
     if (lookup_result.has_value()) {
         // get the sampler now
-        context.state.texture_cache.cache_and_bind_sampler(texture, is_depth_surface);
+        const bool force_nearest = lookup_result->is_raw_bits
+            || !context.state.texture_cache.format_supports_linear_filter(lookup_result->format);
+        context.state.texture_cache.cache_and_bind_sampler(texture, force_nearest);
     } else {
         context.state.texture_cache.cache_and_bind_texture(texture, mem);
         auto &image = context.state.texture_cache.current_texture->texture;
@@ -621,6 +623,22 @@ bool VKTextureCache::format_supports_sampled_image(vk::Format format) {
     return supported;
 }
 
+bool VKTextureCache::format_supports_linear_filter(vk::Format format) {
+    const uint32_t key = static_cast<uint32_t>(format);
+    const auto it = linear_filter_support_cache.find(key);
+    if (it != linear_filter_support_cache.end())
+        return it->second;
+
+    const auto properties = state.physical_device.getFormatProperties(format);
+    const bool supported = bool(properties.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImageFilterLinear);
+    linear_filter_support_cache.emplace(key, supported);
+    return supported;
+}
+
+bool VKTextureCache::texture_supports_linear_filter() {
+    return format_supports_linear_filter(current_texture->texture.format);
+}
+
 void VKTextureCache::configure_sampler(size_t index, const SceGxmTexture &texture, bool no_linear) {
     vk::Sampler &sampler = samplers[index];
     if (sampler) {
@@ -646,7 +664,7 @@ void VKTextureCache::configure_sampler(size_t index, const SceGxmTexture &textur
     vk::SamplerCreateInfo sampler_info{
         .magFilter = texture::translate_filter(mag_filter),
         .minFilter = texture::translate_filter(min_filter),
-        .mipmapMode = texture.mip_filter ? vk::SamplerMipmapMode::eLinear : vk::SamplerMipmapMode::eNearest,
+        .mipmapMode = texture.mip_filter && !no_linear ? vk::SamplerMipmapMode::eLinear : vk::SamplerMipmapMode::eNearest,
         .addressModeU = texture::translate_address_mode(uaddr),
         .addressModeV = texture::translate_address_mode(vaddr),
         .addressModeW = vk::SamplerAddressMode::eRepeat,
@@ -659,7 +677,7 @@ void VKTextureCache::configure_sampler(size_t index, const SceGxmTexture &textur
     };
 
     // when using nearest filter, disable anisotropy as the pixels can contain data other than color
-    sampler_info.anisotropyEnable = (anisotropic_filtering > 1) && (sampler_info.magFilter != vk::Filter::eNearest || sampler_info.minFilter != vk::Filter::eNearest);
+    sampler_info.anisotropyEnable = !no_linear && (anisotropic_filtering > 1) && (sampler_info.magFilter != vk::Filter::eNearest || sampler_info.minFilter != vk::Filter::eNearest);
 
     sampler = state.device.createSampler(sampler_info);
 }
