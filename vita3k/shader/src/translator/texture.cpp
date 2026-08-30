@@ -381,7 +381,7 @@ bool USSETranslatorVisitor::smp(
             return true;
         }
 
-        if (sb_mode != 0 || lod_mode != 2) {
+        if (sb_mode != 0) {
             LOG_ERROR("Unhandled load using texture buffer with sb mode {} and lod mode {}", sb_mode, lod_mode);
             return true;
         }
@@ -391,11 +391,10 @@ bool USSETranslatorVisitor::smp(
         texture_index = load(inst.opr.src1, 0b1);
     }
 
-    // if this is a texture buffer load, just attribute the first available sampler to it
-    const SamplerInfo &sampler = is_texture_buffer_load ? m_spirv_params.samplers.begin()->second : m_spirv_params.samplers.at(inst.opr.src1.num);
+    const SamplerInfo *sampler = is_texture_buffer_load ? nullptr : &m_spirv_params.samplers.at(inst.opr.src1.num);
 
     constexpr DataType tb_dest_fmt[] = {
-        DataType::F32,
+        DataType::UNK,
         DataType::UNK,
         DataType::F16,
         DataType::F32
@@ -409,8 +408,8 @@ bool USSETranslatorVisitor::smp(
     inst.opr.dest.num = dest_n;
     inst.opr.dest.type = tb_dest_fmt[fconv_type];
 
-    if (inst.opr.dest.type == DataType::UNK)
-        inst.opr.dest.type = sampler.component_type;
+    if (inst.opr.dest.type == DataType::UNK && sampler)
+        inst.opr.dest.type = sampler->component_type;
 
     // Base 0, turn it to base 1
     dim += 1;
@@ -457,7 +456,7 @@ bool USSETranslatorVisitor::smp(
         dim = 2;
     }
 
-    spv::Id image_sampler = m_b.createLoad(sampler.id, spv::NoPrecision);
+    spv::Id image_sampler = sampler ? m_b.createLoad(sampler->id, spv::NoPrecision) : spv::NoResult;
 
     if (sb_mode == 2) {
         if (lod_mode != 0)
@@ -522,35 +521,33 @@ bool USSETranslatorVisitor::smp(
         }
 
         if (is_texture_buffer_load) {
-            // maybe put this in a function instead
-
-            // do a big switch with all the different textures:
-            // switch(texture_idx) {
-            // case 0:
-            //   dest = texture(texture0, pos);
-            //   break;
-            // case 1:
-            //   dest = texture(texture1, pos);
-            //   break;
-            // ....
-
             std::vector<const SamplerInfo *> samplers;
             std::vector<int> sampler_indices;
             std::vector<int> index_to_segment;
             constexpr int sa_count = 32 * 4;
-            // if dim is 2, do not look for cubes and if dim is 3, only look for cubes
-            const bool request_cube = dim == 3;
             for (auto &smp : m_spirv_params.samplers) {
                 if (smp.first < sa_count)
                     continue;
 
-                if (request_cube != smp.second.is_cube)
+                if (dim == 2 && smp.second.is_cube)
                     continue;
 
                 samplers.push_back(&smp.second);
                 index_to_segment.push_back(sampler_indices.size());
                 sampler_indices.push_back(smp.first - sa_count);
             }
+
+            if (samplers.empty()) {
+                LOG_ERROR("Texture buffer load with dim {} has no compatible sampler", dim);
+                return true;
+            }
+
+            const auto xy = [&](spv::Id value) {
+                return m_b.createOp(spv::OpVectorShuffle, type_f32_v[2], { { true, value }, { true, value }, { false, 0 }, { false, 1 } });
+            };
+            const spv::Id coords_2d = dim == 3 ? xy(coords) : coords;
+            const spv::Id dx_2d = dim == 3 && lod_mode == 3 ? xy(extra1) : extra1;
+            const spv::Id dy_2d = dim == 3 && lod_mode == 3 ? xy(extra2) : extra2;
 
             std::vector<spv::Block *> segment_blocks;
             m_b.makeSwitch(texture_index, spv::SelectionControlMaskNone, samplers.size(), sampler_indices, index_to_segment, -1, segment_blocks);
@@ -561,7 +558,10 @@ bool USSETranslatorVisitor::smp(
                 if (tb_dest_fmt[fconv_type] == DataType::UNK)
                     inst.opr.dest.type = smp->component_type;
 
-                spv::Id result = do_fetch_texture(m_b.createLoad(smp->id, spv::NoPrecision), smp->index, dim, { coords, static_cast<int>(DataType::F32) }, inst.opr.dest.type, lod_mode, extra1);
+                const int sampler_dim = smp->is_cube ? 3 : 2;
+                spv::Id result = do_fetch_texture(m_b.createLoad(smp->id, spv::NoPrecision), smp->index, sampler_dim,
+                    { smp->is_cube ? coords : coords_2d, static_cast<int>(DataType::F32) }, inst.opr.dest.type, lod_mode,
+                    smp->is_cube ? extra1 : dx_2d, smp->is_cube ? extra2 : dy_2d);
                 const Imm4 dest_mask = (1U << smp->component_count) - 1;
                 store(inst.opr.dest, result, dest_mask);
 
@@ -569,24 +569,24 @@ bool USSETranslatorVisitor::smp(
             }
             m_b.endSwitch(segment_blocks);
         } else if (sb_mode == 0) {
-            spv::Id result = do_fetch_texture(image_sampler, sampler.index, dim, { coords, static_cast<int>(DataType::F32) }, inst.opr.dest.type, lod_mode, extra1, extra2);
-            const Imm4 dest_mask = (1U << sampler.component_count) - 1;
+            spv::Id result = do_fetch_texture(image_sampler, sampler->index, dim, { coords, static_cast<int>(DataType::F32) }, inst.opr.dest.type, lod_mode, extra1, extra2);
+            const Imm4 dest_mask = (1U << sampler->component_count) - 1;
             store(inst.opr.dest, result, dest_mask);
         } else {
             // sb_mode = 1 or 3 : gather 4 (+ uv if sb_mode = 3)
             // first gather all components
             std::vector<spv::Id> g4_comps;
-            g4_comps.reserve(sampler.component_count);
-            for (int comp = 0; comp < sampler.component_count; comp++) {
-                g4_comps.push_back(do_fetch_texture(image_sampler, sampler.index, dim, { coords, static_cast<int>(DataType::F32) }, inst.opr.dest.type, lod_mode, extra1, extra2, comp));
+            g4_comps.reserve(sampler->component_count);
+            for (int comp = 0; comp < sampler->component_count; comp++) {
+                g4_comps.push_back(do_fetch_texture(image_sampler, sampler->index, dim, { coords, static_cast<int>(DataType::F32) }, inst.opr.dest.type, lod_mode, extra1, extra2, comp));
             }
 
-            if (sampler.component_count == 1) {
+            if (sampler->component_count == 1) {
                 // easy, no need to do all this reordering
                 store(inst.opr.dest, g4_comps[0], 0b1111);
                 inst.opr.dest.num += get_data_type_size(inst.opr.dest.type);
             } else {
-                if (sampler.component_count == 3)
+                if (sampler->component_count == 3)
                     LOG_ERROR("Sampler is not supposed to have 3 components");
 
                 // we have the values in the following layout x1 x2 ... y1 y2 ...
@@ -595,7 +595,7 @@ bool USSETranslatorVisitor::smp(
 
                 std::vector<spv::Id> comps_alone;
                 for (int pixel = 0; pixel < 4; pixel++) {
-                    for (int comp = 0; comp < sampler.component_count; comp++) {
+                    for (int comp = 0; comp < sampler->component_count; comp++) {
                         comps_alone.push_back(m_b.createBinOp(spv::OpVectorExtractDynamic, comp_type, g4_comps[comp], m_b.makeIntConstant(pixel)));
                     }
                 }
