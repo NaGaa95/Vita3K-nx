@@ -4716,6 +4716,9 @@ EXPORT(int, sceGxmShaderPatcherForceUnregisterProgram, SceGxmShaderPatcher *shad
     }
 
     SceGxmRegisteredProgram *rp = programId.get(emuenv.mem);
+    renderer::finish(*emuenv.renderer, nullptr);
+    if (emuenv.renderer->render_abort)
+        return 0;
 
     // look for existing programs and free them
     if (rp->program.get(emuenv.mem)->is_vertex()) {
@@ -4834,6 +4837,10 @@ EXPORT(int, sceGxmShaderPatcherReleaseFragmentProgram, SceGxmShaderPatcher *shad
     SceGxmFragmentProgram *const fp = fragmentProgram.get(emuenv.mem);
     --fp->reference_count;
     if (fp->reference_count == 0) {
+        renderer::finish(*emuenv.renderer, nullptr);
+        if (emuenv.renderer->render_abort)
+            return 0;
+
         while (fp->compile_threads_on.load(std::memory_order_acquire) > 0)
             std::this_thread::yield();
 
@@ -4857,6 +4864,10 @@ EXPORT(int, sceGxmShaderPatcherReleaseVertexProgram, SceGxmShaderPatcher *shader
     SceGxmVertexProgram *const vp = vertexProgram.get(emuenv.mem);
     --vp->reference_count;
     if (vp->reference_count == 0) {
+        renderer::finish(*emuenv.renderer, nullptr);
+        if (emuenv.renderer->render_abort)
+            return 0;
+
         while (vp->compile_threads_on.load(std::memory_order_acquire) > 0)
             std::this_thread::yield();
 
