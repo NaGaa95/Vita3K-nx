@@ -283,7 +283,12 @@ EXPORT(int, sceAppUtilSaveDataDataSave, SceAppUtilSaveDataFileSlot *slot, SceApp
         *requiredSizeKiB = 0;
 
     for (unsigned int i = 0; i < fileNum; i++) {
-        const auto file_path = construct_savedata0_path(files[i].dataPath.get(emuenv.mem));
+        const char *const data_path = files[i].dataPath.get(emuenv.mem);
+        if (!data_path) {
+            LOG_WARN("sceAppUtilSaveDataDataSave: entry {} of {} has no path", i, fileNum);
+            continue;
+        }
+        const auto file_path = construct_savedata0_path(data_path);
         switch (files[i].mode) {
         case SCE_APPUTIL_SAVEDATA_DATA_SAVE_MODE_DIRECTORY:
             create_dir(emuenv.io, file_path.c_str(), 0777, emuenv.vita_fs_path, export_name);
@@ -291,19 +296,33 @@ EXPORT(int, sceAppUtilSaveDataDataSave, SceAppUtilSaveDataFileSlot *slot, SceApp
         case SCE_APPUTIL_SAVEDATA_DATA_SAVE_MODE_FILE_TRUNCATE:
             if (files[i].buf) {
                 fd = open_file(emuenv.io, file_path.c_str(), SCE_O_WRONLY | SCE_O_CREAT, emuenv.vita_fs_path, export_name);
+                if (fd < 0) {
+                    LOG_WARN("sceAppUtilSaveDataDataSave: could not open '{}' for write ({})", file_path, log_hex(fd));
+                    break;
+                }
                 seek_file(fd, static_cast<int>(files[i].offset), SCE_SEEK_SET, emuenv.io, export_name);
                 write_file(fd, files[i].buf.get(emuenv.mem), files[i].bufSize, emuenv.io, export_name);
                 close_file(emuenv.io, fd, export_name);
             }
             fd = open_file(emuenv.io, file_path.c_str(), SCE_O_WRONLY | SCE_O_APPEND | SCE_O_TRUNC, emuenv.vita_fs_path, export_name);
+            if (fd < 0) {
+                LOG_WARN("sceAppUtilSaveDataDataSave: could not reopen '{}' to truncate ({})", file_path, log_hex(fd));
+                break;
+            }
             truncate_file(fd, files[i].bufSize + files[i].offset, emuenv.io, export_name);
             close_file(emuenv.io, fd, export_name);
             break;
         case SCE_APPUTIL_SAVEDATA_DATA_SAVE_MODE_FILE:
         default:
             fd = open_file(emuenv.io, file_path.c_str(), SCE_O_WRONLY | SCE_O_CREAT, emuenv.vita_fs_path, export_name);
-            seek_file(fd, static_cast<int>(files[i].offset), SCE_SEEK_SET, emuenv.io, export_name);
-            write_file(fd, files[i].buf.get(emuenv.mem), files[i].bufSize, emuenv.io, export_name);
+            if (fd < 0) {
+                LOG_WARN("sceAppUtilSaveDataDataSave: could not open '{}' for write ({})", file_path, log_hex(fd));
+                break;
+            }
+            if (files[i].buf) {
+                seek_file(fd, static_cast<int>(files[i].offset), SCE_SEEK_SET, emuenv.io, export_name);
+                write_file(fd, files[i].buf.get(emuenv.mem), files[i].bufSize, emuenv.io, export_name);
+            }
             close_file(emuenv.io, fd, export_name);
             break;
         }
