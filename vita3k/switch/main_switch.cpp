@@ -723,17 +723,17 @@ struct SwitchSixAxis {
             return;
         }
 
-        // Match SDL's standardized Switch-controller axes before using
-        // Vita3K's existing gamepad motion conversion. libnx acceleration is in
-        // g while SDL expects m/s^2; libnx angular velocity is revolutions/sec
-        // while SDL expects radians/sec.
+        // Convert libnx axes (right, down, into screen) to SDL axes (right, up, out).
+        // Handheld input also cancels Vita3K's gamepad rotation to match the console.
+        // Convert acceleration from g to m/s^2 and angular velocity from rev/s to rad/s.
+        const bool handheld = handle_index == 0;
         const auto send = [&](int type, const HidVector &source, float scale) {
             SDL_GamepadSensorEvent event{};
             event.type = SDL_EVENT_GAMEPAD_SENSOR_UPDATE;
             event.sensor_timestamp = SDL_GetTicksNS();
-            event.data[0] = -source.y * scale;
-            event.data[1] = source.z * scale;
-            event.data[2] = -source.x * scale;
+            event.data[0] = source.x * scale;
+            event.data[1] = (handheld ? -source.z : -source.y) * scale;
+            event.data[2] = (handheld ? source.y : -source.z) * scale;
             if (right_joycon) {
                 event.data[0] = -event.data[0];
                 event.data[1] = -event.data[1];
