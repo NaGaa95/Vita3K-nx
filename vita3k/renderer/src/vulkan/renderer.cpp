@@ -1477,28 +1477,16 @@ std::vector<uint32_t> VKState::dump_frame(DisplayState &display, uint32_t &width
 }
 
 uint32_t VKState::get_features_mask() {
-    union {
-        struct {
-            bool use_shader_interlock : 1;
-            bool use_texture_viewport : 1;
-            bool use_memory_mapping : 1;
-            bool use_rgb_attributes : 1;
-            bool use_scaled_attributes : 1;
-            bool preserve_f16_nan_as_u16 : 1;
-        };
-        uint32_t value;
-    } features_mask;
-    static_assert(sizeof(features_mask) == sizeof(uint32_t));
-
-    features_mask.value = 0;
-    features_mask.use_shader_interlock = features.support_shader_interlock;
-    features_mask.use_texture_viewport = features.use_texture_viewport;
-    features_mask.use_memory_mapping = features.enable_memory_mapping;
-    features_mask.use_rgb_attributes = features.support_rgb_attributes;
-    features_mask.use_scaled_attributes = pipeline_cache.support_scaled_vertex_attribute;
-    features_mask.preserve_f16_nan_as_u16 = features.preserve_f16_nan_as_u16;
-
-    return features_mask.value;
+    return (uint32_t(features.support_shader_interlock) << 0)
+        | (uint32_t(features.use_texture_viewport) << 1)
+        | (uint32_t(features.enable_memory_mapping) << 2)
+        | (uint32_t(features.support_rgb_attributes) << 3)
+        | (uint32_t(pipeline_cache.support_scaled_vertex_attribute) << 4)
+        | (uint32_t(features.preserve_f16_nan_as_u16) << 5)
+        | (uint32_t(features.use_mask_bit) << 6)
+        | (uint32_t(features.direct_fragcolor) << 7)
+        | (uint32_t(features.support_texture_barrier) << 8)
+        | (uint32_t(features.support_unknown_format) << 9);
 }
 
 int VKState::get_supported_filters() {
