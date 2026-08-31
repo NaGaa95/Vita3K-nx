@@ -1231,6 +1231,12 @@ static void makeGlyphs(){
   g_gLeft=makeGlyph("<",false); g_gRight=makeGlyph(">",false);
   g_gL=makeGlyph("L",true); g_gR=makeGlyph("R",true);
 }
+static PlSharedFontType requestedUiFontType(){
+  const std::string_view language=LauncherLocalization::CurrentLanguage();
+  if(language=="zh-Hans") return PlSharedFontType_ChineseSimplified;
+  if(language=="zh-Hant") return PlSharedFontType_ChineseTraditional;
+  return PlSharedFontType_Standard;
+}
 
 // --- control hints: centred row of {glyph,label}; each item's tap rect is recorded for touch.
 enum FootAct { FA_NONE, FA_LAUNCH, FA_SORT, FA_OPTIONS, FA_SETTINGS, FA_FILTER, FA_PAGEL, FA_PAGER, FA_QUIT };
@@ -6863,7 +6869,8 @@ int main(int argc, char **argv){
   if(R_FAILED(plInitialize(PlServiceType_User))) return startupFailure("System font service initialization failed.");
   g_plReady=true;
   PlFontData fd{};
-  if(R_FAILED(plGetSharedFontByType(&fd,PlSharedFontType_Standard))||!fd.address||!fd.size||fd.size>INT_MAX)
+  LauncherLocalization::SetLanguage(storeGet(g_global,"Wrapper/Language","system"));
+  if(R_FAILED(plGetSharedFontByType(&fd,requestedUiFontType()))||!fd.address||!fd.size||fd.size>INT_MAX)
     return startupFailure("Could not load the system font.");
   int sc=SH>=1080?1:0;
   auto openFont=[&](int size)->TTF_Font* {
