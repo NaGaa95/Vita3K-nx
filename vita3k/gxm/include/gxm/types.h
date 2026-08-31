@@ -1218,6 +1218,10 @@ struct SceGxmTexture {
         return static_cast<SceGxmTextureType>(type << 29);
     }
 
+    uint32_t true_lod_min() const {
+        return (lod_min0 << 2) | lod_min1;
+    }
+
     uint32_t true_mip_count() const {
         if (texture_type() == SCE_GXM_TEXTURE_LINEAR_STRIDED)
             return 1;
