@@ -33,7 +33,14 @@
 #include <gxm/functions.h>
 #include <util/log.h>
 
+#include <algorithm>
+#include <cmath>
+
 namespace renderer {
+
+void State::set_fsr_sharpness(float sharpness) {
+    fsr_sharpness.store(std::isfinite(sharpness) ? std::clamp(sharpness, 0.0f, 2.0f) : 0.2f, std::memory_order_relaxed);
+}
 
 void State::update_overlays() {
     if (!overlay_manager)

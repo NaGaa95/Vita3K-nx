@@ -46,6 +46,7 @@ void copy_global_to_current(Config::CurrentConfig &current, const Config &cfg) {
     current.resolution_multiplier = cfg.resolution_multiplier;
     current.disable_surface_sync = cfg.disable_surface_sync;
     current.screen_filter = cfg.screen_filter;
+    current.fsr_sharpness = cfg.fsr_sharpness;
     current.memory_mapping = cfg.memory_mapping;
     current.v_sync = cfg.v_sync;
     current.anisotropic_filtering = cfg.anisotropic_filtering;
@@ -95,6 +96,7 @@ void copy_current_to_global(Config &cfg, const Config::CurrentConfig &current) {
     cfg.resolution_multiplier = current.resolution_multiplier;
     cfg.disable_surface_sync = current.disable_surface_sync;
     cfg.screen_filter = current.screen_filter;
+    cfg.fsr_sharpness = current.fsr_sharpness;
     cfg.memory_mapping = current.memory_mapping;
     cfg.v_sync = current.v_sync;
     cfg.anisotropic_filtering = current.anisotropic_filtering;
@@ -206,6 +208,7 @@ bool load_custom_config(Config::CurrentConfig &out, const fs::path &config_path,
         out.resolution_multiplier = gpu.attribute("resolution-multiplier").as_float();
         out.disable_surface_sync = gpu.attribute("disable-surface-sync").as_bool();
         out.screen_filter = gpu.attribute("screen-filter").as_string();
+        out.fsr_sharpness = gpu.attribute("fsr-sharpness").as_float(out.fsr_sharpness);
         out.memory_mapping = gpu.attribute("memory-mapping").as_string();
         out.v_sync = gpu.attribute("v-sync").as_bool();
         out.anisotropic_filtering = gpu.attribute("anisotropic-filtering").as_int();
@@ -298,6 +301,7 @@ bool save_custom_config(const Config::CurrentConfig &cc, const fs::path &config_
     gpu_child.append_attribute("resolution-multiplier") = cc.resolution_multiplier;
     gpu_child.append_attribute("disable-surface-sync") = cc.disable_surface_sync;
     gpu_child.append_attribute("screen-filter") = cc.screen_filter.c_str();
+    gpu_child.append_attribute("fsr-sharpness") = cc.fsr_sharpness;
     gpu_child.append_attribute("memory-mapping") = cc.memory_mapping.c_str();
     gpu_child.append_attribute("v-sync") = cc.v_sync;
     gpu_child.append_attribute("anisotropic-filtering") = cc.anisotropic_filtering;

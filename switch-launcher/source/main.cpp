@@ -318,6 +318,12 @@ static const Choice C_backend[]  = { {"Vulkan (NVK)","Vulkan"}, {"OpenGL (NVC0)"
 static const Choice C_resmult[]  = { {"0.5x","0.5"}, {"1.0x","1.0"}, {"1.5x","1.5"}, {"2.0x","2.0"}, {"3.0x","3.0"} };
 static const Choice C_modules[]  = { {"Automatic","0"}, {"Auto + manual","1"}, {"Manual","2"} }; // matches ModulesMode enum
 static const Choice C_filter[]   = { {"Nearest","Nearest"}, {"Bilinear","Bilinear"}, {"Bicubic","Bicubic"}, {"FXAA","FXAA"}, {"FSR","FSR"} }; // Vulkan superset; GL exposes Bilinear/FXAA below
+static const Choice C_fsrSharpness[] = {
+  {"0.0","0.0"}, {"0.1","0.1"}, {"0.2","0.2"}, {"0.3","0.3"}, {"0.4","0.4"},
+  {"0.5","0.5"}, {"0.6","0.6"}, {"0.7","0.7"}, {"0.8","0.8"}, {"0.9","0.9"},
+  {"1.0","1.0"}, {"1.1","1.1"}, {"1.2","1.2"}, {"1.3","1.3"}, {"1.4","1.4"},
+  {"1.5","1.5"}, {"1.6","1.6"}, {"1.7","1.7"}, {"1.8","1.8"}, {"1.9","1.9"}, {"2.0","2.0"},
+};
 static const Choice C_aniso[]    = { {"Off","1"}, {"2x","2"}, {"4x","4"}, {"8x","8"}, {"16x","16"} };
 // GPU memory mapping (config key values from renderer.cpp). Double Buffer is the
 // only usable method here: NVK/Tegra has no cached+coherent memory type, so Page
@@ -385,6 +391,7 @@ static const Opt S_graphics[] = {
   O_CHOICE("Memory mapping",          "memory-mapping",             C_memmap,  "double-buffer"),
   O_CHOICE("High accuracy",           "high-accuracy",              C_bool,    "false"),
   O_CHOICE("Screen filter",           "screen-filter",              C_filter,  "Bilinear"),
+  O_CHOICE("FSR sharpness",           "fsr-sharpness",              C_fsrSharpness, "0.2"),
   O_CHOICE("Stretch to screen",       "stretch_the_display_area",   C_bool,    "false"),
   O_CHOICE("VSync",                   "v-sync",                     C_bool,    "true"),
   O_CHOICE("Anisotropic filtering",   "anisotropic-filtering",      C_aniso,   "1"),
@@ -2164,11 +2171,13 @@ static int choiceIdx(const Opt &o) {
 static bool isVulkanOnlyOption(const Opt &o) {
   if (!o.key) return false;
   return !strcmp(o.key,"memory-mapping") || !strcmp(o.key,"high-accuracy") ||
-         !strcmp(o.key,"async-pipeline-compilation") ||
+         !strcmp(o.key,"async-pipeline-compilation") || !strcmp(o.key,"fsr-sharpness") ||
          !strncmp(o.key,"switch-lsfg-",12);
 }
 // a gated option is inactive (greyed, non-adjustable) while its parent is off
 static bool optEnabled(const Opt &o) {
+  if(o.key && !strcmp(o.key,"fsr-sharpness") &&
+     strcmp(iniGet("screen-filter","Bilinear"),"FSR")) return false;
   if(o.type!=OT_STATUS && isVulkanOnlyOption(o) &&
      strcmp(iniGet("backend-renderer","Vulkan"),"Vulkan")) return false;
   if(o.type!=OT_STATUS && o.key && !strncmp(o.key,"switch-lsfg-",12) &&
@@ -2250,6 +2259,7 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"memory-mapping","Compatibility","Selects how Vita GPU memory is mirrored for Vulkan. Double buffer is the Switch default and the only mapped mode this GPU handles well. Disabled turns mapping off entirely, which some games need."},
   {"high-accuracy","Compatibility","Uses more accurate GPU behavior for games that render incorrectly, at a possible performance cost."},
   {"screen-filter","Graphics","Chooses the final image scaling filter. Nearest is sharp, Bilinear is inexpensive, and advanced filters cost more GPU time."},
+  {"fsr-sharpness","Graphics","Adjusts FSR sharpening: 0.0 is strongest, 2.0 is softer. The default is 0.2. Requires Vulkan and the FSR screen filter."},
   {"stretch_the_display_area","Graphics","Fills the whole screen instead of preserving the Vita 16:9.4 aspect. The image is distorted, and touch coordinates follow the stretched area."},
   {"v-sync","Graphics","Synchronizes presentation to the display refresh to avoid visible tearing. On drivers that expose only FIFO presentation this remains enabled by the driver."},
   {"anisotropic-filtering","Graphics","Improves texture clarity at oblique angles. Higher levels use additional GPU bandwidth."},

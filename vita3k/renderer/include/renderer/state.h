@@ -120,6 +120,7 @@ struct State {
 
     std::atomic<bool> async_flip_requested{ false };
     std::atomic<int> pending_vsync{ -1 };
+    std::atomic<float> fsr_sharpness{ 0.2f };
 
     std::unique_ptr<std::thread> render_thread;
     std::atomic<bool> render_abort{ false };
@@ -183,6 +184,7 @@ struct State {
     // return a bitmask with the Filter enum values of the supported enum filters
     virtual int get_supported_filters() = 0;
     virtual void set_screen_filter(const std::string_view &filter) = 0;
+    void set_fsr_sharpness(float sharpness);
     virtual int get_max_anisotropic_filtering() = 0;
     virtual void set_anisotropic_filtering(int anisotropic_filtering) = 0;
     virtual int get_max_2d_texture_width() = 0;

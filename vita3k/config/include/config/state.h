@@ -78,6 +78,7 @@ struct Config {
         float resolution_multiplier = 1.0f;
         bool disable_surface_sync = false;
         std::string screen_filter = "Bilinear";
+        float fsr_sharpness = 0.2f;
         std::string memory_mapping = "double-buffer";
         bool v_sync = true;
         int anisotropic_filtering = 1;
