@@ -23,6 +23,7 @@
 #include <renderer/vulkan/state.h>
 
 #include <gxm/types.h>
+#include <gxm/functions.h>
 
 #include <vkutil/vkutil.h>
 
@@ -257,6 +258,29 @@ void destroy(VKState &state, std::unique_ptr<RenderTarget> &rt) {
 
 bool create(std::unique_ptr<VertexProgram> &vp, VKState &state, const SceGxmProgram &program) {
     vp = std::make_unique<VertexProgram>();
+    const auto outputs = gxp::get_vertex_outputs(program);
+    constexpr SceGxmVertexProgramOutputs locations[] = {
+        SCE_GXM_VERTEX_PROGRAM_OUTPUT_POSITION,
+        SCE_GXM_VERTEX_PROGRAM_OUTPUT_COLOR0,
+        SCE_GXM_VERTEX_PROGRAM_OUTPUT_COLOR1,
+        SCE_GXM_VERTEX_PROGRAM_OUTPUT_FOG,
+        SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD0,
+        SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD1,
+        SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD2,
+        SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD3,
+        SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD4,
+        SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD5,
+        SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD6,
+        SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD7,
+        SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD8,
+        SCE_GXM_VERTEX_PROGRAM_OUTPUT_TEXCOORD9,
+        SCE_GXM_VERTEX_PROGRAM_OUTPUT_PSIZE
+    };
+    vp->varying_location_mask = 0;
+    for (uint32_t location = 0; location < std::size(locations); ++location)
+        if (outputs & locations[location])
+            vp->varying_location_mask |= 1U << location;
+
 
     if (program.program_flags & SCE_GXM_PROGRAM_FLAG_BUFFER_STORE)
         state.has_shader_store = true;

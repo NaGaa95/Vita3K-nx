@@ -43,6 +43,7 @@ struct RenderFragUniformBlock {
     // Cast scale excludes the render target's MSAA and downscale adjustments.
     float surface_res_multiplier = 1.0f;
     float raw_cast_mask = 0.0f;
+    float iterator_written_mask = 16777215.0f;
 };
 
 enum FragUniformFieldId : uint32_t {
@@ -56,7 +57,8 @@ enum FragUniformFieldId : uint32_t {
     FRAG_UNIFORM_inv_frag_width,
     FRAG_UNIFORM_inv_frag_height,
     FRAG_UNIFORM_surface_res_multiplier,
-    FRAG_UNIFORM_raw_cast_mask
+    FRAG_UNIFORM_raw_cast_mask,
+    FRAG_UNIFORM_iterator_written_mask
 };
 
 template <typename T>

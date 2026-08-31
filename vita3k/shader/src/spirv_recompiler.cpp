@@ -97,6 +97,7 @@ struct VarToReg {
     uint32_t size;
     DataType dtype;
     bool convert_to_float; // is the the an integer that has to be seen as a float?
+    int32_t location = -1;
 };
 
 struct TranslationState {
@@ -528,7 +529,8 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
                     pa_offset,
                     pa_iter_size,
                     pa_dtype,
-                    false });
+                    false,
+                    input_id == 0xD000 ? -1 : static_cast<int32_t>(pa_loc) });
             LOG_DEBUG("Iterator: pa{} = ({}{}) {}", pa_offset, pa_type, num_comp, pa_name);
 
             bool do_coord = false;
@@ -1155,7 +1157,7 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
     }
 
     if (program_type == SceGxmProgramType::Fragment) {
-        std::vector<spv::Id> uniform_composition = { f32, f32, f32, f32, f32, f32, f32, f32, f32, f32, f32 };
+        std::vector<spv::Id> uniform_composition(FRAG_UNIFORM_iterator_written_mask + 1, f32);
         if (uniform_buffer_count > 0) {
             uniform_composition.push_back(buffer_addresses_type);
             uniform_composition.push_back(buffer_bounds_type);
@@ -1187,6 +1189,7 @@ static SpirvShaderParameters create_parameters(spv::Builder &b, const SceGxmProg
         ADD_FRAG_UNIFORM_MEMBER(inv_frag_height);
         ADD_FRAG_UNIFORM_MEMBER(surface_res_multiplier);
         ADD_FRAG_UNIFORM_MEMBER(raw_cast_mask);
+        ADD_FRAG_UNIFORM_MEMBER(iterator_written_mask);
 
 #undef ADD_FRAG_UNIFORM_MEMBER
         // the resolution multiplier does not require a high precision
@@ -2051,9 +2054,26 @@ static SpirvCode convert_gxp_to_spirv_impl(const SceGxmProgram &program, const s
             end_hook_func = make_vert_finalize_function(b, parameters, program, utils, features, translation_state);
         }
 
+        spv::Id iterator_mask = spv::NoResult;
+        if (program.is_fragment() && translation_state.render_info_id != spv::NoResult) {
+            const spv::Id mask_ptr = utils::create_access_chain(b, spv::StorageClassUniform, translation_state.render_info_id, { b.makeIntConstant(FRAG_UNIFORM_iterator_written_mask) });
+            iterator_mask = b.createUnaryOp(spv::OpConvertFToU, b.makeUintType(32), b.createLoad(mask_ptr, spv::NoPrecision));
+        }
         for (auto &var_to_reg : translation_state.var_to_regs) {
+            spv::Id source = var_to_reg.var;
+            if (iterator_mask != spv::NoResult && var_to_reg.location >= 0 && var_to_reg.location < 24) {
+                const spv::Id u32 = b.makeUintType(32);
+                const spv::Id v4 = b.makeVectorType(b.makeFloatType(32), 4);
+                const spv::Id bool_type = b.makeBoolType();
+                const spv::Id bit = b.createBinOp(spv::OpBitwiseAnd, u32, iterator_mask, b.makeUintConstant(1u << var_to_reg.location));
+                const spv::Id written = b.createBinOp(spv::OpINotEqual, bool_type, bit, b.makeUintConstant(0));
+                const spv::Id written_v4 = b.createCompositeConstruct(b.makeVectorType(bool_type, 4), { written, written, written, written });
+                const spv::Id zero = b.makeFloatConstant(0.0f);
+                const spv::Id fallback = b.makeCompositeConstant(v4, { zero, zero, zero, b.makeFloatConstant(1.0f) });
+                source = b.createTriOp(spv::OpSelect, v4, written_v4, b.createLoad(var_to_reg.var, spv::NoPrecision), fallback);
+            }
             create_input_variable(b, parameters, utils, features, translation_state, "", var_to_reg.pa ? RegisterBank::PRIMATTR : RegisterBank::SECATTR,
-                var_to_reg.offset, spv::NoResult, var_to_reg.size, var_to_reg.var, var_to_reg.dtype, var_to_reg.convert_to_float);
+                var_to_reg.offset, spv::NoResult, var_to_reg.size, source, var_to_reg.dtype, var_to_reg.convert_to_float);
         }
 
         // Initialize vertex output to 0

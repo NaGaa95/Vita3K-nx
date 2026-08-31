@@ -477,6 +477,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
 
     auto &frag_ublock = context.curr_frag_ublock.base_block;
     frag_ublock.writing_mask = context.record.writing_mask;
+    frag_ublock.iterator_written_mask = static_cast<float>(vert_render_data->varying_location_mask);
     frag_ublock.use_raw_image = context.state.features.preserve_f16_nan_as_u16
             && context.record.color_base_format == SCE_GXM_COLOR_BASE_FORMAT_F16F16F16F16
             && context.state.surface_cache.current_surface_raw_is_valid()

@@ -219,6 +219,7 @@ struct FragmentProgram : ShaderProgram {
 
 struct VertexProgram : ShaderProgram {
     shader::usse::AttributeInformationMap attribute_infos;
+    uint32_t varying_location_mask = 0x00ffffff;
 };
 
 struct ShadersHash {
