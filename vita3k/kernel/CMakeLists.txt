@@ -8,11 +8,13 @@ set(SOURCE_LIST
 	include/kernel/object_store.h
 	include/kernel/debugger.h
 	include/kernel/load_self.h
+	include/kernel/pthread_compat.h
 	include/kernel/callback.h
 	src/kernel.cpp
 	src/thread.cpp
 	src/debugger.cpp
 	src/load_self.cpp
+	src/pthread_compat.cpp
 	src/sync_primitives.cpp
 	src/relocation.cpp
 	src/callback.cpp

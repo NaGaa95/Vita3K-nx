@@ -17,6 +17,7 @@
 
 #include <cpu/functions.h>
 #include <kernel/load_self.h>
+#include <kernel/pthread_compat.h>
 #include <kernel/relocation.h>
 #include <kernel/state.h>
 #include <kernel/types.h>
@@ -787,6 +788,24 @@ SceUID load_self(KernelState &kernel, MemState &mem, const void *self, const std
     if (!load_imports(*module_info, module_info_segment_address, segment_reloc_info, kernel, mem)) {
         return -1;
     }
+
+    std::vector<Address> signal_imports;
+    {
+        const std::lock_guard lock(kernel.export_nids_mutex);
+        const auto [begin, end] = kernel.func_binding_infos.equal_range(0xE6B761D1); // sceKernelSignalSema
+        for (auto it = begin; it != end; ++it)
+            signal_imports.push_back(it->second);
+    }
+    constexpr uint32_t ELF_PF_X = 1;
+    for (const auto &[index, segment] : segment_reloc_info) {
+        if ((segments[index].p_flags & ELF_PF_X) && segments[index].p_filesz <= segment.size) {
+            const auto fixed = fix_pthread_semaphore_post({ Ptr<uint8_t>(segment.addr).get(mem), segments[index].p_filesz }, segment.addr, signal_imports);
+            if (fixed) {
+                kernel.invalidate_jit_cache(segment.addr, segments[index].p_filesz);
+            }
+        }
+    }
+
     const SceUID uid = kernel.get_next_uid();
     sceKernelModuleInfo->modid = uid;
     {
