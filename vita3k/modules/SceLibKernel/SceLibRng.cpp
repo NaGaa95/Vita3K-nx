@@ -17,9 +17,16 @@
 
 #include <module/module.h>
 
-#include <algorithm>
 #include <kernel/types.h>
+
+#ifdef __SWITCH__
+extern "C" {
+#include <switch/kernel/random.h>
+}
+#else
+#include <algorithm>
 #include <random>
+#endif
 
 #define SCE_RNG_ERROR_INVALID_ARGUMENT 0x810C0000
 
@@ -32,6 +39,11 @@ EXPORT(int, sceKernelGetRandomNumber, uint64_t *output, unsigned int size) {
         return RET_ERROR(SCE_RNG_ERROR_INVALID_ARGUMENT);
     }
 
+#ifdef __SWITCH__
+    if (size > 0) {
+        randomGet(output, size);
+    }
+#else
     thread_local std::random_device dev;
     thread_local std::mt19937_64 mt(dev());
     thread_local auto rng = [&]() { return mt(); };
@@ -48,5 +60,6 @@ EXPORT(int, sceKernelGetRandomNumber, uint64_t *output, unsigned int size) {
     uint64_t value = rng();
     char *ptr = reinterpret_cast<char *>(&value);
     std::copy_n(ptr, remain, reinterpret_cast<char *>(&output[repeat]));
+#endif
     return SCE_KERNEL_OK;
 }
