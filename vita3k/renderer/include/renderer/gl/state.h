@@ -42,6 +42,7 @@ struct GLState : public renderer::State {
     OverlayRenderer overlay_renderer;
 
     bool context_is_current = false;
+    bool use_spirv = false;
 
     bool init() override;
     void cleanup() override;

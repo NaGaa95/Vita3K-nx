@@ -401,6 +401,7 @@ static const Opt S_graphics[] = {
   O_CHOICE("Async pipeline compile",  "async-pipeline-compilation", C_bool,    "true"),
   O_CHOICE("Show compiling shaders",  "show-compile-shaders",       C_bool,    "true"),
   O_CHOICE("Shader cache",            "shader-cache",               C_bool,    "true"),
+  O_CHOICE("Direct SPIR-V",           "spirv-shader",               C_bool,    "false"),
   O_CHOICE("Import textures",         "import-textures",            C_bool,    "false"),
   O_CHOICE("Export textures",         "export-textures",            C_bool,    "false"),
   O_CHOICE("Export as PNG",           "export-as-png",              C_bool,    "true"),
@@ -506,6 +507,10 @@ static std::vector<KV> buildEffectiveSettings(const std::string &gameKey) {
     const auto filter = std::find_if(out.begin(), out.end(), [](const KV &e){ return e.k == "screen-filter"; });
     if (filter != out.end() && filter->v != "Bilinear" && filter->v != "FXAA")
       filter->v = "Bilinear";
+  }
+  if (backend == out.end() || backend->v != "Zink") {
+    const auto spirv = std::find_if(out.begin(), out.end(), [](const KV &e){ return e.k == "spirv-shader"; });
+    if (spirv != out.end()) spirv->v = "false";
   }
   return out;
 }
@@ -2179,6 +2184,8 @@ static bool isVulkanOnlyOption(const Opt &o) {
 static bool optEnabled(const Opt &o) {
   if(o.key && !strcmp(o.key,"fsr-sharpness") &&
      strcmp(iniGet("screen-filter","Bilinear"),"FSR")) return false;
+  if(o.key && !strcmp(o.key,"spirv-shader") &&
+     strcmp(iniGet("backend-renderer","Vulkan"),"Zink")) return false;
   if(o.type!=OT_STATUS && isVulkanOnlyOption(o) &&
      strcmp(iniGet("backend-renderer","Vulkan"),"Vulkan")) return false;
   if(o.type!=OT_STATUS && o.key && !strncmp(o.key,"switch-lsfg-",12) &&
@@ -2187,6 +2194,10 @@ static bool optEnabled(const Opt &o) {
 }
 static void optValue(const Opt &o, char *out, int n) {
   out[0]=0;
+  if(o.key && !strcmp(o.key,"spirv-shader") &&
+     strcmp(iniGet("backend-renderer","Vulkan"),"Zink")) {
+    snprintf(out,n,"%s",LauncherLocalization::Translate("Zink only").data()); return;
+  }
   if(isVulkanOnlyOption(o) &&
      strcmp(iniGet("backend-renderer","Vulkan"),"Vulkan")) {
     snprintf(out,n,"%s",LauncherLocalization::Translate("Vulkan only").data()); return;
@@ -2270,6 +2281,7 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"async-pipeline-compilation","Performance","Compiles Vulkan pipelines asynchronously to reduce stalls. Newly encountered effects can appear briefly after compilation."},
   {"show-compile-shaders","Interface","Shows Vita3K's shader compilation indicator while new graphics pipelines are prepared."},
   {"shader-cache","Performance","Reuses compiled shaders between sessions to reduce later stutter. Clearing a broken cache is available from the game menu."},
+  {"spirv-shader","Graphics","Uses SPIR-V directly on Zink, with GLSL fallback if unsupported. Native NVC0 disables this extension pending testing."},
   {"import-textures","Modding","Loads replacement textures from Vita3K's texture import directory."},
   {"export-textures","Modding","Dumps textures used by the game for replacement or inspection. This increases SD-card I/O."},
   {"export-as-png","Modding","Writes exported textures as PNG rather than their raw format. PNG is convenient but slower to encode."},

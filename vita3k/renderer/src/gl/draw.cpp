@@ -75,7 +75,7 @@ void draw(GLState &renderer, GLContext &context, const FeatureState &features, S
     // If it's different, we need to switch. Else just stick to it.
     if (context.record.vertex_program.get(mem)->renderer_data->hash != context.last_draw_vertex_program_hash || context.record.fragment_program.get(mem)->renderer_data->hash != context.last_draw_fragment_program_hash) {
         // Need to recompile!
-        SharedGLObject program = gl::compile_program(renderer, context, context.record, features, mem, config.shader_cache, config.spirv_shader, gxm_fragment_program.is_maskupdate);
+        SharedGLObject program = gl::compile_program(renderer, context, context.record, features, mem, config.shader_cache, renderer.use_spirv, gxm_fragment_program.is_maskupdate);
 
         LOG_ERROR_IF(!program, "Fail to get program!");
 
@@ -205,7 +205,7 @@ void draw(GLState &renderer, GLContext &context, const FeatureState &features, S
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, context.index_stream_ring_buffer.handle());
 
     if (fragment_program_gxp.is_native_color()) {
-        if (features.should_use_shader_interlock() && !config.spirv_shader) {
+        if (features.should_use_shader_interlock() && !renderer.use_spirv) {
             glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
         } else if (features.should_use_texture_barrier()) {
             // Needs texture barrier

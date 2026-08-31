@@ -154,19 +154,20 @@ static SharedGLObject compile_program(ProgramCache &program_cache, const SharedG
 }
 
 static SharedGLObject compile_shader(const fs::path &shader_cache_path, const std::string &shader_version, const std::string &hash_hex,
-    const char *type_str, const GLenum type, ShaderCache &cache, const Sha256Hash &hash) {
-    // Set Shader version with hash
-
-    // Load Shader
-    const auto shader_name = shader_cache_path / fmt::format("{}-{}.{}", shader_version, hash_hex, type_str);
-    const std::string shader = pre_load_shader_glsl(shader_name);
-    if (shader.empty()) {
-        LOG_WARN("{} shader is empty or not found:\n{}", type_str, hash_hex);
-        return SharedGLObject();
+    const char *type_str, const GLenum type, ShaderCache &cache, const Sha256Hash &hash, bool spirv) {
+    const auto shader_name = shader_cache_path / fmt::format("{}-{}.{}", shader_version, hash_hex, spirv ? "spv" : type_str);
+    SharedGLObject obj;
+    if (spirv) {
+        const auto shader = pre_load_shader_spirv(shader_name);
+        if (shader.empty())
+            return {};
+        obj = compile_spirv(type, shader);
+    } else {
+        const auto shader = pre_load_shader_glsl(shader_name);
+        if (shader.empty())
+            return {};
+        obj = compile_glsl(type, shader);
     }
-
-    // Compile Shader
-    SharedGLObject obj = compile_glsl(type, shader);
     if (!obj) {
         LOG_CRITICAL("Error in compile {} shader:\n{}", type_str, hash_hex);
         return SharedGLObject();
@@ -190,26 +191,26 @@ static std::vector<ShadersHash>::iterator get_shaders_hash_index(std::vector<Sha
 void pre_compile_program(GLState &renderer, const ShadersHash &hash) {
     const auto frag_hash_hex = convert_hash_to_hex(hash.frag);
     const auto vert_hash_hex = convert_hash_to_hex(hash.vert);
-    const fs::path frag_name = renderer.shaders_path / fmt::format("{}-{}.frag", renderer.shader_version, frag_hash_hex);
-    const fs::path vert_name = renderer.shaders_path / fmt::format("{}-{}.vert", renderer.shader_version, vert_hash_hex);
+    const std::string shader_version = renderer.shader_version + (renderer.use_spirv ? "spv" : "");
+    const fs::path frag_name = renderer.shaders_path / fmt::format("{}-{}.{}", shader_version, frag_hash_hex, renderer.use_spirv ? "spv" : "frag");
+    const fs::path vert_name = renderer.shaders_path / fmt::format("{}-{}.{}", shader_version, vert_hash_hex, renderer.use_spirv ? "spv" : "vert");
     boost::system::error_code ec;
     const bool frag_exists = fs::is_regular_file(frag_name, ec) && !ec;
     ec.clear();
     const bool vert_exists = fs::is_regular_file(vert_name, ec) && !ec;
 
-    // Shader hashes are shared by every OpenGL backend, but generated GLSL is
-    // not. Only precompile a pair that exists in this driver's namespace.
+    // Only precompile shaders from the active driver and shader format.
     if (frag_exists && vert_exists) {
         // Compile Fragment Shader
-        const SharedGLObject frag_shader = compile_shader(renderer.shaders_path, renderer.shader_version,
-            frag_hash_hex, "frag", GL_FRAGMENT_SHADER, renderer.fragment_shader_cache, hash.frag);
+        const SharedGLObject frag_shader = compile_shader(renderer.shaders_path, shader_version,
+            frag_hash_hex, "frag", GL_FRAGMENT_SHADER, renderer.fragment_shader_cache, hash.frag, renderer.use_spirv);
         if (!frag_shader) {
             return;
         }
 
         // Compile Vertex Shader
-        const SharedGLObject vert_shader = compile_shader(renderer.shaders_path, renderer.shader_version,
-            vert_hash_hex, "vert", GL_VERTEX_SHADER, renderer.vertex_shader_cache, hash.vert);
+        const SharedGLObject vert_shader = compile_shader(renderer.shaders_path, shader_version,
+            vert_hash_hex, "vert", GL_VERTEX_SHADER, renderer.vertex_shader_cache, hash.vert, renderer.use_spirv);
         if (!vert_shader) {
             return;
         }

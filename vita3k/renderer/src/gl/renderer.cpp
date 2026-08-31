@@ -274,6 +274,8 @@ bool create(std::unique_ptr<State> &state, const Config &config) {
         }
     }
 
+    gl_state.features.spirv_shader = gl_state.features.spirv_shader && glad_glShaderBinary && glad_glSpecializeShaderARB;
+
     // This GLAD build loads these functions only as 4.4/4.5 core entry points,
     // while Nouveau exposes them as extensions on its 4.3 context.
     if (support_buffer_storage && !glad_glBufferStorage)
@@ -339,6 +341,7 @@ bool GLState::init() {
 }
 
 void GLState::late_init(const Config &cfg, const std::string_view game_id, MemState &mem) {
+    use_spirv = features.spirv_shader && cfg.current_config.spirv_shader;
     shader_debug_dump = cfg.current_config.shader_debug_dump;
 #ifdef __SWITCH__
     // Same reason as the Vulkan backend: protect_inner is a no-op on Horizon, so
