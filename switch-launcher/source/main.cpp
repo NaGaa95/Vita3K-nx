@@ -383,6 +383,7 @@ static const Opt S_emulation[] = {
   O_MULTIG("Manual module list", "lle-modules",  "", "modules-mode", "0"),
   O_CHOICE("CPU optimisations", "cpu-opt",       C_bool,    "true"),
   O_STATUS("Allowed CPU cores", "cpu-cores"),
+  O_RANGE("File loading delay (ms)", "file-loading-delay", 0, 30, 1, "0"),
 };
 // GPU / Graphics (-> config.yml). All three renderers live in one unified NRO.
 static const Opt S_graphics[] = {
@@ -2251,6 +2252,7 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"lle-modules","Compatibility","Chooses which decrypted firmware modules are loaded natively instead of being emulated. It needs Modules mode set to something other than Automatic, and installed firmware. Picking nothing in Manual mode loads no modules at all, which is usually worse than Automatic."},
   {"cpu-opt","Performance","Enables Vita3K CPU optimisations. Disable only when diagnosing a title-specific CPU emulation problem."},
   {"cpu-cores","Performance","How many of the console's four CPU cores this session may use. Four is correct: the emulator keeps vblank, audio and rendering on the fourth core so all three others stay free for the emulated Vita. Three means the launcher was started without a shortcut, and that work has to share the game's cores. Create a shortcut from the installer to get the fourth."},
+  {"file-loading-delay","Compatibility","Adds a delay to file reads for games that depend on storage timing. 0 ms disables it."},
   {"switch-lsfg-enabled","Frame generation","Prepares Vulkan LSFG 2x support for this game. Open the in-game quick menu with L + R + Plus to turn generated frames on or off. It does not increase emulation speed."},
   {"switch-lsfg-flow-scale","Frame generation quality","Sets the optical-flow resolution. Quarter is recommended on Switch; Half can improve motion detail but costs more GPU time and memory."},
   {"switch-lsfg-performance","Frame generation performance","Uses LSFG's lighter performance-oriented path. Disable it only when image quality matters more than GPU headroom."},
