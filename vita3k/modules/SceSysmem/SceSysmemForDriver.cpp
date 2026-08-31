@@ -110,7 +110,8 @@ EXPORT(SceUID, ksceKernelAllocMemBlock, const char *name, SceKernelMemBlockType 
         }
     }
 
-    alignment = std::max(alignment, size & -size);
+    const SceSize size_alignment = std::min<SceSize>(size & -size, KiB(32));
+    alignment = std::max(alignment, size_alignment);
 
     const auto state = emuenv.kernel.obj_store.get<SysmemState>();
     const auto guard = std::lock_guard<std::mutex>(state->mutex);

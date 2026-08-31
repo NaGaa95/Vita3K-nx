@@ -745,31 +745,55 @@ static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_c
 Address alloc_aligned(MemState &state, uint32_t size, const char *name, unsigned int alignment, Address start_addr) {
     if (alignment == 0)
         return alloc(state, size, name, start_addr);
+
+    const uint64_t requested_page_count = (static_cast<uint64_t>(size) + STANDARD_PAGE_SIZE - 1) / STANDARD_PAGE_SIZE;
+    const uint64_t alignment_page_count = std::max<uint64_t>(1,
+        (static_cast<uint64_t>(alignment) + STANDARD_PAGE_SIZE - 1) / STANDARD_PAGE_SIZE);
+    if (requested_page_count == 0 || requested_page_count + alignment_page_count - 1 > UINT32_MAX)
+        return 0;
+
     const std::lock_guard<std::mutex> lock(state.generation_mutex);
-    size += alignment;
-    const uint32_t page_count = align(size, STANDARD_PAGE_SIZE) / STANDARD_PAGE_SIZE;
+    const uint32_t page_count = static_cast<uint32_t>(requested_page_count + alignment_page_count - 1);
     const Address addr = alloc_inner(state, start_addr / STANDARD_PAGE_SIZE, page_count, name, false);
+    if (!addr)
+        return 0;
+
     const Address align_addr = align(addr, alignment);
     const uint32_t page_num = addr / STANDARD_PAGE_SIZE;
     const uint32_t align_page_num = align_addr / STANDARD_PAGE_SIZE;
+    const uint32_t remnant_front = align_page_num - page_num;
+    const uint32_t remnant_back = page_count - remnant_front - static_cast<uint32_t>(requested_page_count);
 
-    if (page_num != align_page_num) {
-        AllocMemPage &page = state.alloc_table[page_num];
-        AllocMemPage &align_page = state.alloc_table[align_page_num];
-        const uint32_t remnant_front = align_page_num - page_num;
 #ifdef __SWITCH__
+    if (remnant_back && !switch_decommit_range(state,
+            (static_cast<uint64_t>(align_page_num) + requested_page_count) * STANDARD_PAGE_SIZE,
+            static_cast<uint64_t>(remnant_back) * STANDARD_PAGE_SIZE)) {
+        LOG_ERROR("Could not release page-table suffix for aligned allocation '{}'", name);
+        return 0;
+    }
+    if (remnant_front) {
         if (!switch_decommit_range(state, static_cast<uint64_t>(page_num) * STANDARD_PAGE_SIZE,
                 static_cast<uint64_t>(remnant_front) * STANDARD_PAGE_SIZE)) {
-            // Keep the original oversized allocation tracked rather than make
-            // a still-mapped prefix available to an unrelated allocation.
             LOG_ERROR("Could not release page-table prefix for aligned allocation '{}'", name);
             return 0;
         }
+    }
 #endif
+
+    if (remnant_front) {
         state.allocator.free(page_num, remnant_front);
-        page.allocated = 0;
-        align_page.allocated = 1;
-        align_page.size = page.size - remnant_front;
+        state.alloc_table[page_num].allocated = 0;
+    }
+    if (remnant_back)
+        state.allocator.free(align_page_num + static_cast<uint32_t>(requested_page_count), remnant_back);
+
+    AllocMemPage &align_page = state.alloc_table[align_page_num];
+    align_page.allocated = 1;
+    align_page.size = static_cast<uint32_t>(requested_page_count);
+
+    if (PAGE_NAME_TRACKING && remnant_front) {
+        state.page_name_map.erase(page_num);
+        state.page_name_map.emplace(align_page_num, name);
     }
 
     return align_addr;
