@@ -62,7 +62,7 @@ static int SDLCALL thread_function(void *data) {
     assert(data != nullptr);
     const ThreadParams params = *static_cast<const ThreadParams *>(data);
     SDL_SignalSemaphore(params.host_may_destroy_params);
-    const ThreadStatePtr thread = params.kernel->get_thread(params.thid);
+    ThreadStatePtr thread = params.kernel->get_thread(params.thid);
 
     // Keep guest CPU threads off the OS-reserved core 3. A game spawns a dozen or more
     // of these and they can spin (guest spinlocks); on core 3 that starves Horizon's
@@ -88,6 +88,7 @@ static int SDLCALL thread_function(void *data) {
         std::lock_guard<std::mutex> lock(params.kernel->mutex);
         params.kernel->threads.erase(thread->id);
         params.kernel->corenum_allocator.free_corenum(get_processor_id(*thread->cpu));
+        thread.reset();
         params.kernel->thread_deleted_cond.notify_all();
     }
 
