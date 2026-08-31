@@ -31,7 +31,7 @@ const ModuleEntry ENTRIES[] = {
   { "SceShaccCg", "Runtime shader compiler some titles load at boot",
     "AnimMouse/SceShaccCg", "libshacccg.suprx", "main", EXTERNAL_DIR, nullptr },
   { "kubridge", "Kernel bridge the homebrew ports link against",
-    "TheOfficialFloW/kubridge", "kubridge.skprx", nullptr, TAI_DIR, "*KERNEL" },
+    "bythos14/kubridge", "kubridge.skprx", nullptr, TAI_DIR, "*KERNEL" },
   { "FdFix", "File-descriptor fixes those ports also expect",
     "TheOfficialFloW/FdFix", "FdFix.skprx", nullptr, TAI_DIR, "*KERNEL" },
 };
