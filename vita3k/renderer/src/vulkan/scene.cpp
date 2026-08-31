@@ -326,7 +326,22 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
         }
     }
 
-    context.render_cmd.bindVertexBuffers(0, max_stream_idx, context.vertex_stream_buffers, context.vertex_stream_offsets);
+    if (!context.state.pipeline_cache.needs_attribute_bindings(vertex_program)) {
+        context.render_cmd.bindVertexBuffers(0, max_stream_idx, context.vertex_stream_buffers, context.vertex_stream_offsets);
+        return;
+    }
+
+    static thread_local std::vector<vk::Buffer> buffers;
+    static thread_local std::vector<vk::DeviceSize> offsets;
+    buffers.clear();
+    offsets.clear();
+    for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
+        if (!vkvert->attribute_infos.contains(attribute.regIndex))
+            continue;
+        buffers.push_back(context.vertex_stream_buffers[attribute.streamIndex]);
+        offsets.push_back(context.vertex_stream_offsets[attribute.streamIndex] + attribute.offset);
+    }
+    context.render_cmd.bindVertexBuffers(0, buffers, offsets);
 }
 
 void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format,

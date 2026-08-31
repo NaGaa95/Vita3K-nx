@@ -137,6 +137,8 @@ public:
     }
     vk::Pipeline retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem);
 
+    bool needs_attribute_bindings(const SceGxmVertexProgram &vertex_program) const;
+
     vk::ShaderModule precompile_shader(const Sha256Hash &hash, bool search_first = true);
 
     void set_async_compilation(bool enable);

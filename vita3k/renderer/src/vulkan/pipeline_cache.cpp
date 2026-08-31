@@ -747,6 +747,22 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool force
     return render_passes_map[format];
 }
 
+bool PipelineCache::needs_attribute_bindings(const SceGxmVertexProgram &vertex_program) const {
+    const auto &infos = vertex_program.renderer_data->attribute_infos;
+    const uint32_t max_offset = state.physical_device_properties.limits.maxVertexInputAttributeOffset;
+    for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
+        const auto it = infos.find(attribute.regIndex);
+        if (it == infos.end())
+            continue;
+
+        const auto &info = it->second;
+        const uint32_t array_offset = info.regformat && info.component_count > 4 ? ((info.component_count - 1) / 4) * 16 : 0;
+        if (attribute.offset + array_offset > max_offset)
+            return true;
+    }
+    return false;
+}
+
 vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(const SceGxmVertexProgram &vertex_program, MemState &mem) {
     // pointer to these objects are returned (so it needs to be static)
     // and each thread needs one (hence the thread_local)
@@ -754,6 +770,21 @@ vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(con
     static thread_local std::vector<vk::VertexInputAttributeDescription> attr_descr;
     binding_descr.clear();
     attr_descr.clear();
+
+    const bool attribute_bindings = needs_attribute_bindings(vertex_program);
+    const auto add_binding = [&](uint32_t binding, uint32_t stream_index) {
+        const SceGxmVertexStream &stream = vertex_program.streams[stream_index];
+        const bool is_instanced = gxm::is_stream_instancing(static_cast<SceGxmIndexSource>(stream.indexSource));
+#ifdef __APPLE__
+        const uint32_t stride = align(stream.stride, 4);
+#else
+        const uint32_t stride = stream.stride;
+#endif
+        binding_descr.push_back(vk::VertexInputBindingDescription{
+            .binding = binding,
+            .stride = stride,
+            .inputRate = is_instanced ? vk::VertexInputRate::eInstance : vk::VertexInputRate::eVertex });
+    };
 
     // Vertex attributes.
     VertexProgram *vkvert = vertex_program.renderer_data.get();
@@ -828,32 +859,26 @@ vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(con
             }
         }
 
+        uint32_t binding = attribute.streamIndex;
+        if (attribute_bindings) {
+            binding = static_cast<uint32_t>(binding_descr.size());
+            add_binding(binding, attribute.streamIndex);
+        }
+
         for (uint32_t i = 0; i < array_size; i++) {
             attr_descr.push_back(vk::VertexInputAttributeDescription{
                 .location = info.location + i,
-                .binding = attribute.streamIndex,
+                .binding = binding,
                 .format = format,
-                .offset = attribute.offset + i * array_element_size });
+                .offset = (attribute_bindings ? 0 : attribute.offset) + i * array_element_size });
         }
     }
 
-    for (unsigned int stream_index = 0; stream_index < SCE_GXM_MAX_VERTEX_STREAMS; stream_index++) {
-        if (!(used_streams & (1 << stream_index)))
-            continue;
-
-        const SceGxmVertexStream &stream = vertex_program.streams[stream_index];
-
-        const bool is_instanced = gxm::is_stream_instancing(static_cast<SceGxmIndexSource>(stream.indexSource));
-
-#ifdef __APPLE__
-        const uint32_t stride = align(stream.stride, 4);
-#else
-        const uint32_t stride = stream.stride;
-#endif
-        binding_descr.push_back(vk::VertexInputBindingDescription{
-            .binding = stream_index,
-            .stride = stride,
-            .inputRate = is_instanced ? vk::VertexInputRate::eInstance : vk::VertexInputRate::eVertex });
+    if (!attribute_bindings) {
+        for (unsigned int stream_index = 0; stream_index < SCE_GXM_MAX_VERTEX_STREAMS; stream_index++) {
+            if (used_streams & (1 << stream_index))
+                add_binding(stream_index, stream_index);
+        }
     }
 
     vk::PipelineVertexInputStateCreateInfo vertex_input{};
