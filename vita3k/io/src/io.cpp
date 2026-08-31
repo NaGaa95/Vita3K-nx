@@ -642,6 +642,9 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
     memset(statp, '\0', sizeof(SceIoStat));
 
     fs::path file_path = "";
+#ifdef __SWITCH__
+    FILE *host_file = nullptr;
+#endif
     if (fd == invalid_fd) {
         auto device = device::get_device(file);
         auto device_for_icase = device;
@@ -678,12 +681,24 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
             }
         }
         LOG_TRACE_IF(log_file_op && log_file_stat, "{}: Statting file: {} ({})", export_name, file, device::construct_normalized_path(device, translated_path));
+#ifdef __SWITCH__
+        // Horizon may refuse to stat a file that is held open.
+        for (auto &[open_fd, open_file] : io.std_files) {
+            if (open_file.get_system_location() == file_path) {
+                host_file = open_file.get_file_pointer();
+                break;
+            }
+        }
+#endif
     } else { // We have previously opened and defined the location
         const auto fd_file = io.std_files.find(fd);
         if (fd_file == io.std_files.end())
             return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
 
         file_path = fd_file->second.get_system_location();
+#ifdef __SWITCH__
+        host_file = fd_file->second.get_file_pointer();
+#endif
         LOG_TRACE_IF(log_file_op && log_file_stat, "{}: Statting fd: {}", export_name, log_hex(fd));
 
         statp->st_attr = fd_file->second.get_file_mode();
@@ -700,7 +715,10 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
 #elif defined(__SWITCH__)
     // newlib has no stat64; struct stat is already 64-bit with _FILE_OFFSET_BITS=64.
     struct stat sb;
-    if (stat(file_path.generic_path().string().c_str(), &sb) < 0)
+    const int result = host_file
+        ? fstat(fileno(host_file), &sb)
+        : stat(file_path.generic_path().string().c_str(), &sb);
+    if (result < 0)
         return IO_ERROR_UNK();
 #else
     struct stat64 sb;
@@ -728,12 +746,19 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
     // report regular files as readable but not executable
     statp->st_mode = SCE_S_IRUSR | SCE_S_IRGRP | SCE_S_IROTH;
 
-    if (fs::is_regular_file(file_path)) {
-        statp->st_size = fs::file_size(file_path);
+#ifdef _WIN32
+    const bool stat_is_file = (sb.st_mode & _S_IFMT) == _S_IFREG;
+    const bool stat_is_dir = (sb.st_mode & _S_IFMT) == _S_IFDIR;
+#else
+    const bool stat_is_file = S_ISREG(sb.st_mode);
+    const bool stat_is_dir = S_ISDIR(sb.st_mode);
+#endif
+    if (stat_is_file) {
+        statp->st_size = sb.st_size;
         statp->st_attr = SCE_SO_IFREG;
         statp->st_mode |= SCE_S_IFREG;
     }
-    if (fs::is_directory(file_path)) {
+    if (stat_is_dir) {
         statp->st_attr = SCE_SO_IFDIR;
         statp->st_mode |= SCE_S_IFDIR | SCE_S_IXUSR | SCE_S_IXGRP | SCE_S_IXOTH;
     }
