@@ -40,6 +40,7 @@
 #include <util/warning.h>
 #include <vkutil/vkutil.h>
 
+#include <mem/functions.h>
 #include <overlay/display_manager.h>
 
 #include <algorithm>
@@ -58,6 +59,11 @@
 // owns the GLSL type singleton. Native Vita3K does not have that owner.
 extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName);
 #include <xxhash.h>
+// libnx cache maintenance, declared directly to keep <switch.h> macros out.
+extern "C" {
+void armDCacheClean(void *addr, size_t size);
+void armDCacheFlush(void *addr, size_t size);
+}
 #endif
 
 #ifdef __ANDROID__
@@ -882,11 +888,8 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             mapping_method = MappingMethod::DoubleBuffer;
             supported_mapping_methods_mask |= (1 << static_cast<int>(MappingMethod::DoubleBuffer));
 #ifndef __SWITCH__
-            // PageTable requires HOST_COHERENT memory, and on NVK/Tegra the only
-            // coherent type is CPU-uncached (svcSetMemoryAttribute(MemAttr_IsUncached)).
-            // add_external_mapping would then point the guest page table - which
-            // dynarmic reads inline - at uncached memory, so every guest access to a
-            // mapped region bypasses the cache. It cannot win here.
+            // PageTable requires HOST_COHERENT, the one type NVK never
+            // cache-maintains on Tegra; External Host covers Switch instead.
             supported_mapping_methods_mask |= (1 << static_cast<int>(MappingMethod::PageTable));
 #endif
 
@@ -1506,6 +1509,22 @@ void VKState::set_screen_filter(const std::string_view &filter) {
     renderer::send_single_command(*this, nullptr, renderer::CommandOpcode::SetScreenFilter, false, new std::string(filter));
 }
 
+#ifdef __SWITCH__
+// A mapping spanning several pool runs (not one contiguous host range) must not be imported.
+static bool switch_range_alias_is_flat(const MemState &mem, Address addr, uint32_t size) {
+    const uint8_t *const base = Ptr<uint8_t>(addr).get(mem);
+    if (!base)
+        return false;
+    // 64-bit so a mapping ending at the 4 GiB boundary does not wrap.
+    const uint64_t end = static_cast<uint64_t>(addr) + size;
+    for (uint64_t page = align(static_cast<uint64_t>(addr) + 1, KiB(4)); page < end; page += KiB(4)) {
+        if (Ptr<uint8_t>(static_cast<Address>(page)).get(mem) != base + (page - addr))
+            return false;
+    }
+    return true;
+}
+#endif
+
 bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
     assert(features.enable_memory_mapping);
     // the address should be 4K aligned
@@ -1655,6 +1674,20 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
 
     case MappingMethod::ExernalHost: {
         void *host_address = address.get(mem);
+#ifdef __SWITCH__
+        // The import pins these exact pages; anything not flat committed
+        // guest memory gets the Double Buffer treatment instead.
+        if (switch_external_mapping_broken
+            || !is_valid_addr_range_size(mem, address.address(), size)
+            || !switch_range_alias_is_flat(mem, address.address(), size)) {
+            LOG_WARN("Mapping at {} ({} KiB) is not flat committed guest memory; double-buffering it",
+                log_hex(address.address()), size / 1024);
+            goto switch_double_buffer_fallback;
+        }
+        vk::DeviceMemory switch_import_memory{};
+        vk::Buffer switch_import_buffer{};
+        try {
+#endif
         auto host_mem_props = device.getMemoryHostPointerPropertiesEXT(vk::ExternalMemoryHandleTypeFlagBits::eHostAllocationEXT, host_address);
         assert(host_mem_props.memoryTypeBits != 0);
 
@@ -1678,6 +1711,11 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
         if (mapped_memory_type == -1)
             // then only coherent (lower performance)
             find_mem_type_with_flag(vk::MemoryPropertyFlagBits::eHostCoherent);
+#ifdef __SWITCH__
+        // NVK reports imported host memory as cached/non-coherent.
+        if (mapped_memory_type == -1)
+            find_mem_type_with_flag(vk::MemoryPropertyFlagBits::eHostCached);
+#endif
 
         if (mapped_memory_type == -1) {
             LOG_CRITICAL_ONCE("No coherent memory available for memory mapping, this may be caused by an old driver!");
@@ -1695,6 +1733,9 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
                 .flags = vk::MemoryAllocateFlagBits::eDeviceAddress }
         };
         const vk::DeviceMemory device_memory = device.allocateMemory(alloc_info.get());
+#ifdef __SWITCH__
+        switch_import_memory = device_memory;
+#endif
 
         vk::StructureChain<vk::BufferCreateInfo, vk::ExternalMemoryBufferCreateInfoKHR> buffer_info{
             vk::BufferCreateInfo{
@@ -1705,6 +1746,9 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
                 .handleTypes = vk::ExternalMemoryHandleTypeFlagBits::eHostAllocationEXT }
         };
         const vk::Buffer mapped_buffer = device.createBuffer(buffer_info.get());
+#ifdef __SWITCH__
+        switch_import_buffer = mapped_buffer;
+#endif
         device.bindBufferMemory(mapped_buffer, device_memory, 0);
 
         vk::BufferDeviceAddressInfoKHR address_info{
@@ -1712,17 +1756,40 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
         };
         const uint64_t buffer_address = device.getBufferAddress(address_info);
 
-        mapped_memories[address.address()] = { address.address(), ExternalBuffer{ device_memory, nullptr }, mapped_buffer, size, buffer_address };
+        mapped_memories[address.address()] = { address.address(), ExternalBuffer{ device_memory, host_address }, mapped_buffer, size, buffer_address };
+#ifdef __SWITCH__
+        static std::atomic_flag logged_import;
+        if (!logged_import.test_and_set()) {
+            LOG_INFO("External Host import active: guest={} size={} KiB memory_type={}; explicit CPU cache maintenance enabled",
+                log_hex(address.address()), size / 1024, mapped_memory_type);
+            if (auto logger = spdlog::default_logger())
+                logger->flush();
+        }
+        } catch (const vk::SystemError &err) {
+            if (switch_import_buffer)
+                device.destroyBuffer(switch_import_buffer);
+            if (switch_import_memory)
+                device.freeMemory(switch_import_memory);
+            // One refusal is proof enough; stop attempting imports.
+            switch_external_mapping_broken = true;
+            LOG_WARN("Host import of the mapping at {} failed ({}); double-buffering guest mappings from now on",
+                log_hex(address.address()), err.what());
+            goto switch_double_buffer_fallback;
+        }
+#endif
         break;
     }
 
+#ifdef __SWITCH__
+    switch_double_buffer_fallback:
+#endif
     case MappingMethod::DoubleBuffer: {
         vkutil::Buffer buffer(size + KiB(4));
 #ifdef __SWITCH__
-        // NVK exposes cached/non-coherent and uncached/coherent mappings as two
-        // separate Tegra memory types. Double Buffer has explicit upload and
-        // readback points, so use the faster cached type and synchronize those
-        // points with vkFlush/InvalidateMappedMemoryRanges.
+        // NVK's two Tegra memory types are cached/non-coherent and
+        // coherent-but-never-maintained. Double Buffer has explicit upload and
+        // readback points, so use the cached type and synchronize those points
+        // with vkFlush/InvalidateMappedMemoryRanges.
         constexpr vma::AllocationCreateInfo double_buffer_alloc = {
             .flags = vma::AllocationCreateFlagBits::eMapped | vma::AllocationCreateFlagBits::eHostAccessSequentialWrite,
             .usage = vma::MemoryUsage::eAutoPreferHost,
@@ -1741,7 +1808,7 @@ bool VKState::map_memory(MemState &mem, Ptr<void> address, uint32_t size) {
 
 #ifdef __SWITCH__
         LOG_WARN_ONCE("Switch Double Buffer selected {} host memory; explicit cache synchronization is active",
-            buffer.is_host_coherent() ? "coherent/uncached" : "cached/non-coherent");
+            buffer.is_host_coherent() ? "coherent/unmaintained" : "cached/non-coherent");
 #endif
 
         vk::BufferDeviceAddressInfoKHR address_info{
@@ -1782,8 +1849,15 @@ void VKState::unmap_memory(MemState &mem, Ptr<void> address) {
 
     switch (mapping_method) {
     case MappingMethod::ExernalHost:
-        device.destroyBuffer(ite->second.buffer);
-        device.freeMemory(std::get<ExternalBuffer>(ite->second.buffer_impl).memory);
+        if (auto *ext = std::get_if<ExternalBuffer>(&ite->second.buffer_impl)) {
+            device.destroyBuffer(ite->second.buffer);
+            device.freeMemory(ext->memory);
+        }
+#ifdef __SWITCH__
+        else
+            // A fallback mapping only has trapping state to clear here.
+            buffer_trapping.remove_range(address.address(), address.address() + ite->second.size);
+#endif
         break;
 
     case MappingMethod::DoubleBuffer:
@@ -2090,10 +2164,25 @@ TrappedBuffer *BufferTrapping::access_buffer(Address addr, uint32_t size, MemSta
     }
 
     MappedMemory &mapping = mem_it->second;
-    // External allocations have no host buffer to double-buffer against.
+    // Imported mappings alias guest memory: nothing to copy, only the CPU
+    // cache to clean, or to flush where shader stores may write the range.
+    if (std::holds_alternative<ExternalBuffer>(mapping.buffer_impl)) {
+        uint8_t *const host = Ptr<uint8_t>(addr).get(mem);
+        if (host) {
+            if (always_trap)
+                armDCacheFlush(host, size);
+            else
+                armDCacheClean(host, size);
+        }
+        temp_buffer.size = size;
+        temp_buffer.mapped_location = host;
+        // Force the index path to recompute its max element every draw.
+        temp_buffer.extra = ~0U;
+        return &temp_buffer;
+    }
     vkutil::Buffer *const gpu_buffer_ptr = std::get_if<vkutil::Buffer>(&mapping.buffer_impl);
     if (!gpu_buffer_ptr) {
-        LOG_ERROR_ONCE("Buffer at address {} is in an externally mapped region", log_hex(addr));
+        LOG_ERROR_ONCE("Buffer at address {} is in a mapping with no host pointer", log_hex(addr));
         return &temp_buffer;
     }
     vkutil::Buffer &gpu_buffer = *gpu_buffer_ptr;

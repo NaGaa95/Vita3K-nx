@@ -26,6 +26,9 @@
 #include <renderer/functions.h>
 
 #include <util/log.h>
+#ifdef __SWITCH__
+extern "C" void armDCacheFlush(void *addr, size_t size);
+#endif
 #include <util/overloaded.h>
 #include <util/switch_thread.h>
 
@@ -143,6 +146,14 @@ void VKContext::wait_thread_function(const MemState &mem) {
                                LOG_ERROR("Surface readback range is not fully mapped");
                                return;
                            }
+#ifdef __SWITCH__
+                           if (std::holds_alternative<ExternalBuffer>(mem_it->second.buffer_impl)) {
+                               // The GPU wrote guest memory directly; drop
+                               // the stale CPU cache lines.
+                               armDCacheFlush(Ptr<void>(request.location).get(mem), request.size);
+                               return;
+                           }
+#endif
                            auto *mapped_buffer = std::get_if<vkutil::Buffer>(&mem_it->second.buffer_impl);
                            const uint64_t buffer_offset = uint64_t(mem_it->second.buffer_offset) + request.location - mem_it->first;
                            if (!mapped_buffer || !mapped_buffer->mapped_data
@@ -572,6 +583,32 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
     if (state.features.enable_memory_mapping && !state.disable_surface_sync && submit)
         surface_info = state.surface_cache.perform_surface_sync();
 
+#ifdef __SWITCH__
+    // Flush before submit: a dirty CPU line could overwrite these GPU writes.
+    const auto flush_external_write_dst = [this](Address addr, uint32_t size) {
+        auto mem_it = state.mapped_memories.lower_bound(addr);
+        if (mem_it == state.mapped_memories.end()
+            || static_cast<uint64_t>(mem_it->first) + mem_it->second.size < static_cast<uint64_t>(addr) + size)
+            return;
+        auto *const ext = std::get_if<ExternalBuffer>(&mem_it->second.buffer_impl);
+        if (ext && ext->extra)
+            armDCacheFlush(static_cast<uint8_t *>(ext->extra) + (addr - mem_it->first), size);
+    };
+    if (state.need_cpu_buffer_sync() && current_visibility_buffer) {
+        for (auto &range : occlusion_ranges)
+            flush_external_write_dst(current_visibility_buffer->address + range.offset * 4, range.size * 4);
+    }
+    if (surface_info && surface_info->need_buffer_sync) {
+        const renderer::texture::ReadbackRows rows{
+            surface_info->stride_bytes,
+            uint32_t(surface_info->original_width) * (gxm::bits_per_pixel(surface_info->format) / 8),
+            surface_info->original_height
+        };
+        if (const auto size = rows.span_size())
+            flush_external_write_dst(surface_info->data.address(), *size);
+    }
+#endif
+
     prerender_cmd.end();
     render_cmd.end();
 
@@ -612,7 +649,7 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
         // send it to the wait queue
         state.request_queue.push(FenceWaitRequest{ fence });
 
-        if (state.mapping_method == MappingMethod::DoubleBuffer) {
+        if (state.need_cpu_buffer_sync()) {
             // sync all the visibility buffers
             for (auto &range : occlusion_ranges) {
                 state.request_queue.push(BufferSyncRequest{ current_visibility_buffer->address + range.offset * 4, range.size * 4 });

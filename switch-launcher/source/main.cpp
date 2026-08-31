@@ -325,12 +325,8 @@ static const Choice C_fsrSharpness[] = {
   {"1.5","1.5"}, {"1.6","1.6"}, {"1.7","1.7"}, {"1.8","1.8"}, {"1.9","1.9"}, {"2.0","2.0"},
 };
 static const Choice C_aniso[]    = { {"Off","1"}, {"2x","2"}, {"4x","4"}, {"8x","8"}, {"16x","16"} };
-// GPU memory mapping (config key values from renderer.cpp). Double Buffer is the
-// only usable method here: NVK/Tegra has no cached+coherent memory type, so Page
-// Table lands on uncached memory that the guest then reads through, and
-// VK_EXT_external_memory_host is not implemented at all. Do not offer a setting
-// that would only fall back to another mode at runtime.
-static const Choice C_memmap[]   = { {"Double buffer","double-buffer"}, {"Disabled","disabled"} };
+// GPU memory mapping (config key values from renderer.cpp); unmappable ranges silently fall back from External host to Double buffer.
+static const Choice C_memmap[]   = { {"External host","external-host"}, {"Double buffer","double-buffer"}, {"Disabled","disabled"} };
 static const Choice C_analog[]   = { {"0.5x","0.5"}, {"1.0x","1.0"}, {"1.5x","1.5"}, {"2.0x","2.0"} };
 static const Choice C_reartouch[]= { {"Off","off"}, {"ZL + touchscreen","zl"}, {"ZR + touchscreen","zr"}, {"Front and rear together","both"} };
 static const Choice C_vitaface[]= { {"Cross","cross"}, {"Circle","circle"}, {"Triangle","triangle"}, {"Square","square"} };
@@ -389,7 +385,7 @@ static const Opt S_emulation[] = {
 static const Opt S_graphics[] = {
   O_CHOICE("Renderer",                "backend-renderer",            C_backend, "Vulkan"),
   O_CHOICE("Resolution scale",        "resolution-multiplier",      C_resmult, "1.0"),
-  O_CHOICE("Memory mapping",          "memory-mapping",             C_memmap,  "double-buffer"),
+  O_CHOICE("Memory mapping",          "memory-mapping",             C_memmap,  "external-host"),
   O_CHOICE("High accuracy",           "high-accuracy",              C_bool,    "false"),
   O_CHOICE("Screen filter",           "screen-filter",              C_filter,  "Bilinear"),
   O_CHOICE("FSR sharpness",           "fsr-sharpness",              C_fsrSharpness, "0.2"),
@@ -2269,7 +2265,7 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"switch-lsfg-performance","Frame generation performance","Uses LSFG's lighter performance-oriented path. Disable it only when image quality matters more than GPU headroom."},
   {"backend-renderer","Display backend","Chooses the Switch renderer. Vulkan (NVK) is recommended and supports LSFG. OpenGL uses native NVC0, while Zink runs OpenGL on NVK as an additional compatibility path."},
   {"resolution-multiplier","Graphics","Scales the Vita render resolution. Higher values sharpen the image but increase GPU and memory cost."},
-  {"memory-mapping","Compatibility","Selects how Vita GPU memory is mirrored for Vulkan. Double buffer is the Switch default and the only mapped mode this GPU handles well. Disabled turns mapping off entirely, which some games need."},
+  {"memory-mapping","Compatibility","Selects how Vulkan sees Vita GPU memory. External host maps the Vita's own memory straight to the GPU (fastest, default). Double buffer keeps a checked copy instead. Disabled turns mapping off entirely, which some games need."},
   {"high-accuracy","Compatibility","Uses more accurate GPU behavior for games that render incorrectly, at a possible performance cost."},
   {"screen-filter","Graphics","Chooses the final image scaling filter. Nearest is sharp, Bilinear is inexpensive, and advanced filters cost more GPU time."},
   {"fsr-sharpness","Graphics","Adjusts FSR sharpening: 0.0 is strongest, 2.0 is softer. The default is 0.2. Requires Vulkan and the FSR screen filter."},

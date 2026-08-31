@@ -186,10 +186,10 @@ static constexpr vma::AllocationCreateInfo vma_mapped_alloc = {
 };
 
 // For staging paths that already flush explicitly when the memory is not
-// coherent. On Tegra the only HOST_COHERENT type is CPU-uncached, so
-// preferring it there trades every CPU access for a slow uncached one;
-// cached memory plus the existing flush is far faster. Callers that never
-// flush must keep vma_mapped_alloc.
+// coherent. On Tegra the HOST_COHERENT type is the one Mesa never
+// cache-maintains, so a caller relying on implicit visibility would read or
+// publish stale data; cached memory plus the existing flush is the correct
+// pairing. Callers that never flush must keep vma_mapped_alloc.
 static constexpr vma::AllocationCreateInfo vma_mapped_alloc_cached = {
     .flags = vma::AllocationCreateFlagBits::eHostAccessSequentialWrite | vma::AllocationCreateFlagBits::eMapped,
     .usage = vma::MemoryUsage::eAuto,

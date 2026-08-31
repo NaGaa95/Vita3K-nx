@@ -35,7 +35,7 @@ void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *
 
     const uint32_t data_size_upload = std::min<uint32_t>(size, program->uniform_buffer_sizes.at(block_num) * 4);
     if (context.state.features.enable_memory_mapping) {
-        if (context.state.mapping_method == MappingMethod::DoubleBuffer) {
+        if (context.state.need_cpu_buffer_sync()) {
             // we must always cover everything as some small part of the buffer may get changed only
             context.state.buffer_trapping.access_buffer(data.address(), data_size_upload, mem, false, true);
         }
@@ -269,7 +269,7 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
     }
     max_stream_idx++;
 
-    if (context.state.mapping_method == MappingMethod::DoubleBuffer) {
+    if (context.state.need_cpu_buffer_sync()) {
         for (int i = 0; i < max_stream_idx; i++)
             state.vertex_streams[i].size = 0;
 
@@ -516,7 +516,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
     uint32_t max_index = 0;
     if (use_memory_mapping) {
         auto [buffer, offset] = context.state.get_matching_mapping(indices);
-        if (context.state.mapping_method == MappingMethod::DoubleBuffer) {
+        if (context.state.need_cpu_buffer_sync()) {
             TrappedBuffer *trapped_buffer = context.state.buffer_trapping.access_buffer(indices.address(), count * index_size, mem);
             if (trapped_buffer->extra == ~0) {
                 // store the max element in extra

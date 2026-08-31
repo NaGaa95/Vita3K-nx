@@ -50,6 +50,21 @@ struct Viewport {
 };
 
 struct VKState : public renderer::State {
+#ifdef __SWITCH__
+    // A refused host import turns the method off for the session.
+    bool switch_external_mapping_broken = false;
+#endif
+
+    // Buffer accesses need CPU-side work: Double Buffer re-uploads them,
+    // Switch External Host maintains the CPU cache.
+    bool need_cpu_buffer_sync() const {
+        return mapping_method == MappingMethod::DoubleBuffer
+#ifdef __SWITCH__
+            || mapping_method == MappingMethod::ExernalHost
+#endif
+            ;
+    }
+
     struct OneTimeCommand {
         vk::CommandBuffer buffer;
         std::unique_lock<std::mutex> command_pool_lock;
