@@ -29,6 +29,7 @@
 #include <cstring>
 #include <memory>
 #include <sstream>
+#include <utility>
 
 #ifdef __SWITCH__
 // Not <switch.h>: it declares Mutex/Semaphore types that collide with the
@@ -203,13 +204,11 @@ void ThreadState::exit_delete(bool exit) {
 void ThreadState::run_loop() {
     bool guest_returned = false;
 
-    // Set thread-local CPU state so signal handlers can access it.
-    // The guard clears it on any exit so a recycled host thread never sees
-    // a stale CPUState pointer.
-    set_current_cpu_state(cpu.get());
     struct CpuStateGuard {
-        ~CpuStateGuard() { set_current_cpu_state(nullptr); }
+        CPUState *previous = get_current_cpu_state();
+        ~CpuStateGuard() { set_current_cpu_state(previous); }
     } cpu_state_guard;
+    set_current_cpu_state(cpu.get());
 
     std::unique_lock<std::mutex> lock(mutex);
     ++call_level;
@@ -225,6 +224,9 @@ void ThreadState::run_loop() {
 
         const ThreadStatus old_status = status.load(std::memory_order_acquire);
         const uint32_t old_returned_value = returned_value;
+        // Let the handler run and wait before completing the pending exit.
+        const bool old_exit_requested = std::exchange(exit_requested, false);
+        const bool old_delete_requested = delete_requested.exchange(false, std::memory_order_acq_rel);
         status.store(ThreadStatus::run, std::memory_order_release);
 
         lock.unlock();
@@ -233,6 +235,9 @@ void ThreadState::run_loop() {
             LOG_WARN("Thread end event handler returned {}", log_hex(ret));
         lock.lock();
 
+        exit_requested |= old_exit_requested;
+        if (old_delete_requested)
+            delete_requested.store(true, std::memory_order_release);
         status.store(old_status, std::memory_order_release);
         returned_value = old_returned_value;
     };
