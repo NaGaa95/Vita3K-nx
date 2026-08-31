@@ -42,7 +42,7 @@ bool create(std::unique_ptr<FragmentProgram> &fp, State &state, const SceGxmProg
 bool create(std::unique_ptr<VertexProgram> &vp, State &state, const SceGxmProgram &program, GXPPtrMap &gxp_ptr_map, const std::vector<SceGxmVertexAttribute> &attributes);
 void create(SceGxmSyncObject *sync, State &state);
 void destroy(SceGxmSyncObject *sync, State &state, const std::function<void()> &dealloc);
-void finish(State &state, Context *context);
+void finish(State &state, Context *context, bool wait_for_gpu = false);
 
 enum class SyncWaitResult {
     Ready,

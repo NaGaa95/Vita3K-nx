@@ -2740,7 +2740,7 @@ EXPORT(int, sceGxmFinish, SceGxmContext *context) {
         return RET_ERROR(SCE_GXM_ERROR_INVALID_THREAD);
 
     // Wait on this context's rendering finish code.
-    renderer::finish(*emuenv.renderer, context->renderer.get());
+    renderer::finish(*emuenv.renderer, context->renderer.get(), true);
 
     return 0;
 }
@@ -5709,7 +5709,7 @@ EXPORT(int, sceGxmTransferFill, uint32_t fillColor, SceGxmTransferFormat destFor
 EXPORT(int, sceGxmTransferFinish) {
     TRACY_FUNC(sceGxmTransferFinish);
     // same as sceGxmFinish
-    renderer::finish(*emuenv.renderer, nullptr);
+    renderer::finish(*emuenv.renderer, nullptr, true);
 
     return 0;
 }

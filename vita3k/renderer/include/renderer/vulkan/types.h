@@ -227,6 +227,7 @@ struct CallbackRequest {
     // use a pointer so the size is similar to other elements of WaitThreadRequest
     // and not to have to mess with move semantics
     CallbackRequestFunction *callback;
+    bool wait_for_gpu = false;
 };
 
 // only used with the DoubleBuffer Method

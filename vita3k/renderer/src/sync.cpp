@@ -33,11 +33,55 @@
 #include <util/tracy.h>
 
 namespace renderer {
+static void wait_for_submitted_work(State &state) {
+    if (state.render_abort.load(std::memory_order_relaxed))
+        return;
+
+    if (state.current_backend == Backend::OpenGL) {
+        glFinish();
+        return;
+    }
+
+    if (state.current_backend != Backend::Vulkan || state.features.enable_memory_mapping)
+        return;
+
+    auto &vk_state = static_cast<vulkan::VKState &>(state);
+    // Only the render thread may wait here, since it also resets these fences.
+    for (const auto &frame : vk_state.frames) {
+        if (frame.rendered_fences.empty())
+            continue;
+
+        while (!state.render_abort.load(std::memory_order_relaxed)
+            && !vk_state.device_lost.load(std::memory_order_acquire)) {
+            vk::Result result;
+            try {
+                result = vk_state.device.waitForFences(frame.rendered_fences, VK_TRUE, 100'000'000ULL);
+            } catch (const vk::SystemError &) {
+                result = vk::Result::eErrorDeviceLost;
+            }
+            if (result == vk::Result::eSuccess)
+                break;
+            if (result == vk::Result::eTimeout)
+                continue;
+
+            LOG_CRITICAL("Could not wait for Vulkan completion: {}", vk::to_string(result));
+            vk_state.device_lost.store(true, std::memory_order_release);
+            return;
+        }
+    }
+}
+
 COMMAND(handle_nop) {
     TRACY_FUNC_COMMANDS(handle_nop);
-    // Signal back to client
     int code_to_finish = helper.pop<int>();
-    complete_command(renderer, helper, code_to_finish);
+    if (helper.pop<bool>())
+        wait_for_submitted_work(renderer);
+
+    // An aborted waiter may already have released its status storage.
+    const std::lock_guard<std::mutex> lock(renderer.command_finish_one_mutex);
+    if (!renderer.render_abort.load(std::memory_order_relaxed))
+        helper.complete(code_to_finish);
+    renderer.command_finish_one.notify_all();
 }
 
 COMMAND(handle_signal_sync_object) {
@@ -123,9 +167,9 @@ COMMAND(new_frame) {
 }
 
 // Client side function
-void finish(State &state, Context *context) {
+void finish(State &state, Context *context, bool wait_for_gpu) {
     // Add NOP then wait for it
-    renderer::send_single_command(state, context, renderer::CommandOpcode::Nop, true, 1);
+    renderer::send_single_command(state, context, renderer::CommandOpcode::Nop, true, 1, wait_for_gpu);
 
     // unblock game threads if shutting down
     if (state.render_abort.load(std::memory_order_relaxed))
@@ -140,7 +184,7 @@ void finish(State &state, Context *context) {
         auto callback = [promise]() {
             promise->set_value();
         };
-        vk_state.request_queue.push(vulkan::CallbackRequest{ new vulkan::CallbackRequestFunction(callback) });
+        vk_state.request_queue.push(vulkan::CallbackRequest{ new vulkan::CallbackRequestFunction(callback), wait_for_gpu });
 
         // The wait thread can stop after the abort check above.
         auto future = promise->get_future();
