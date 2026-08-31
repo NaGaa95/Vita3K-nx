@@ -20,7 +20,7 @@
 namespace {
 
 constexpr const char *VITA_DIR = "sdmc:/switch/vita3k/vita";
-constexpr const char *EXTERNAL_DIR = "sdmc:/switch/vita3k/vita/vs0/sys/external";
+constexpr const char *UR0_DATA_DIR = "sdmc:/switch/vita3k/vita/ur0/data";
 constexpr const char *TAI_DIR = "sdmc:/switch/vita3k/vita/ur0/tai";
 // A ledger of what the launcher installed, so a module can report the release
 // it came from rather than only that some file of the right name exists.
@@ -29,7 +29,7 @@ constexpr curl_off_t MAX_DOWNLOAD = 64ll * 1024 * 1024;
 
 const ModuleEntry ENTRIES[] = {
   { "SceShaccCg", "Runtime shader compiler some titles load at boot",
-    "AnimMouse/SceShaccCg", "libshacccg.suprx", "main", EXTERNAL_DIR, nullptr },
+    "AnimMouse/SceShaccCg", "libshacccg.suprx", "main", UR0_DATA_DIR, nullptr },
   { "kubridge", "Kernel bridge the homebrew ports link against",
     "bythos14/kubridge", "kubridge.skprx", nullptr, TAI_DIR, "*KERNEL" },
   { "FdFix", "File-descriptor fixes those ports also expect",
