@@ -17,6 +17,8 @@
 
 #include <module/module.h>
 
+#include <io/functions.h>
+
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceFios2Kernel);
 
@@ -33,12 +35,40 @@ struct sceFiosKernelOverlayResolveWithRangeSync_opt {
     int reserved6;
 };
 
-EXPORT(int, _sceFiosKernelOverlayAdd) {
-    return UNIMPLEMENTED();
+enum SceFiosKernelResult {
+    SCE_FIOS_OK = 0,
+    SCE_FIOS_ERROR_BAD_PTR = 0x80B4000B,
+};
+
+using SceFiosOverlayID = SceUID;
+
+static int copy_resolved_path(EmuEnvState &emuenv, Ptr<char> output, SceSize capacity, const std::string &path) {
+    if (!output || capacity == 0)
+        return static_cast<int>(SCE_FIOS_ERROR_BAD_PTR);
+
+    char *destination = output.get(emuenv.mem);
+    const size_t length = std::min<size_t>(path.size(), capacity - 1);
+    std::memcpy(destination, path.data(), length);
+    destination[length] = '\0';
+    return SCE_FIOS_OK;
 }
 
-EXPORT(int, _sceFiosKernelOverlayAddForProcess) {
-    return UNIMPLEMENTED();
+EXPORT(int, _sceFiosKernelOverlayAdd, SceFiosProcessOverlay *pOverlay, SceFiosOverlayID *pOutID) {
+    TRACY_FUNC(_sceFiosKernelOverlayAdd, pOverlay, pOutID);
+    if (!pOverlay || !pOutID)
+        return RET_ERROR(SCE_FIOS_ERROR_BAD_PTR);
+
+    *pOutID = create_overlay(emuenv.io, pOverlay);
+    return SCE_FIOS_OK;
+}
+
+EXPORT(int, _sceFiosKernelOverlayAddForProcess, SceUID pid, SceFiosProcessOverlay *pOverlay, SceFiosOverlayID *pOutID) {
+    TRACY_FUNC(_sceFiosKernelOverlayAddForProcess, pid, pOverlay, pOutID);
+    if (!pOverlay || !pOutID)
+        return RET_ERROR(SCE_FIOS_ERROR_BAD_PTR);
+
+    *pOutID = create_overlay(emuenv.io, pOverlay);
+    return SCE_FIOS_OK;
 }
 
 EXPORT(int, _sceFiosKernelOverlayDHChstatSync) {
@@ -73,8 +103,22 @@ EXPORT(int, _sceFiosKernelOverlayGetInfoForProcess) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceFiosKernelOverlayGetList) {
-    return UNIMPLEMENTED();
+EXPORT(int, _sceFiosKernelOverlayGetList, SceUID pid, uint32_t minOrder, uint32_t maxOrder, SceFiosOverlayID *pOutIDs, SceUInt32 maxIDs, SceUInt32 *pActualIDs) {
+    TRACY_FUNC(_sceFiosKernelOverlayGetList, pid, minOrder, maxOrder, pOutIDs, maxIDs, pActualIDs);
+    const std::lock_guard<std::mutex> guard(emuenv.io.overlay_mutex);
+
+    std::vector<SceFiosOverlayID> overlay_ids;
+    for (const auto &overlay : emuenv.io.overlays) {
+        if (overlay.order >= minOrder && overlay.order <= maxOrder)
+            overlay_ids.push_back(overlay.id);
+    }
+
+    if (pActualIDs)
+        *pActualIDs = static_cast<SceUInt32>(overlay_ids.size());
+    if (pOutIDs)
+        std::memcpy(pOutIDs, overlay_ids.data(), std::min<size_t>(overlay_ids.size(), maxIDs) * sizeof(SceFiosOverlayID));
+
+    return SCE_FIOS_OK;
 }
 
 EXPORT(int, _sceFiosKernelOverlayGetRecommendedScheduler) {
@@ -89,24 +133,44 @@ EXPORT(int, _sceFiosKernelOverlayModifyForProcess) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, _sceFiosKernelOverlayRemove) {
-    return UNIMPLEMENTED();
+static int remove_overlay_by_id(IOState &io, SceFiosOverlayID id) {
+    const std::lock_guard<std::mutex> guard(io.overlay_mutex);
+    const auto overlay = std::find_if(io.overlays.begin(), io.overlays.end(), [id](const FiosOverlay &entry) {
+        return entry.id == id;
+    });
+    if (overlay != io.overlays.end())
+        io.overlays.erase(overlay);
+    return SCE_FIOS_OK;
 }
 
-EXPORT(int, _sceFiosKernelOverlayRemoveForProcess) {
-    return UNIMPLEMENTED();
+EXPORT(int, _sceFiosKernelOverlayRemove, SceFiosOverlayID id) {
+    TRACY_FUNC(_sceFiosKernelOverlayRemove, id);
+    return remove_overlay_by_id(emuenv.io, id);
 }
 
-EXPORT(int, _sceFiosKernelOverlayResolveSync) {
-    return UNIMPLEMENTED();
+EXPORT(int, _sceFiosKernelOverlayRemoveForProcess, SceUID pid, SceFiosOverlayID id) {
+    TRACY_FUNC(_sceFiosKernelOverlayRemoveForProcess, pid, id);
+    return remove_overlay_by_id(emuenv.io, id);
+}
+
+EXPORT(int, _sceFiosKernelOverlayResolveSync, SceUID pid, int resolveFlag, const char *pInPath, Ptr<char> pOutPath, SceSize maxPath) {
+    TRACY_FUNC(_sceFiosKernelOverlayResolveSync, pid, resolveFlag, pInPath, pOutPath, maxPath);
+    if (!pInPath)
+        return RET_ERROR(SCE_FIOS_ERROR_BAD_PTR);
+
+    return copy_resolved_path(emuenv, pOutPath, maxPath, resolve_path(emuenv.io, pInPath));
 }
 
 EXPORT(int, _sceFiosKernelOverlayResolveWithRangeSync, SceUID pid, int resolveFlag, const char *pInPath, sceFiosKernelOverlayResolveWithRangeSync_opt *opt) {
     TRACY_FUNC(_sceFiosKernelOverlayResolveWithRangeSync, pid, resolveFlag, pInPath, opt);
-    STUBBED("Using strncpy");
-    strncpy(opt->pOutPath.get(emuenv.mem), pInPath, opt->maxPath);
+    if (!pInPath || !opt)
+        return RET_ERROR(SCE_FIOS_ERROR_BAD_PTR);
 
-    return 0;
+    const SceUInt32 min_order = static_cast<uint8_t>(opt->loOrderFilter);
+    const SceUInt32 max_order = (opt->loOrderFilter == 0 && opt->hiOrderFilter == 0)
+        ? 0x7F
+        : static_cast<uint8_t>(opt->hiOrderFilter);
+    return copy_resolved_path(emuenv, opt->pOutPath, opt->maxPath, resolve_path(emuenv.io, pInPath, min_order, max_order));
 }
 
 EXPORT(int, _sceFiosKernelOverlayThreadIsDisabled) {
