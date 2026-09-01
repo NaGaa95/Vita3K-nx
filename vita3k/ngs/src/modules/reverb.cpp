@@ -28,6 +28,9 @@ bool ReverbModule::process(KernelState &kern, const MemState &mem, const SceUID 
         }
     }
 
+    if (!data.parent->inputs.inputs.empty())
+        data.parent->products[0].data = data.parent->inputs.inputs[0].data();
+
     return false;
 }
 } // namespace ngs
