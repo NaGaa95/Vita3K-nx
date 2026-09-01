@@ -184,11 +184,13 @@ bool init(IOState &io, const fs::path &cache_path, const fs::path &log_path, con
 }
 
 void io_deinit(IOState &io) {
-    io.std_files.clear();
+    {
+        const std::lock_guard<std::mutex> lock(io.file_mutex);
+        io.std_files.clear();
+        io.tty_files.clear();
+        io.next_fd = 0;
+    }
     io.dir_entries.clear();
-    io.tty_files.clear();
-
-    io.next_fd = 0;
 
     if (!io.memory_path.empty() && io.memory_path.filename().string().starts_with("session-")
         && io.memory_path.parent_path().filename() == "memory") {
@@ -392,8 +394,12 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
         if (flags & SCE_O_WRONLY)
             tty_type |= TTY_OUT;
 
-        const auto fd = io.next_fd++;
-        io.tty_files.emplace(fd, tty_type);
+        SceUID fd;
+        {
+            const std::lock_guard<std::mutex> lock(io.file_mutex);
+            fd = io.next_fd++;
+            io.tty_files.emplace(fd, tty_type);
+        }
 
         LOG_TRACE_IF(log_file_op, "{}: Opening terminal {}:", export_name, device);
         return fd;
@@ -451,8 +457,12 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
         LOG_ERROR("Cannot open file: {} (target path: {})", system_path, path);
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
     }
-    const auto fd = io.next_fd++;
-    io.std_files.emplace(fd, f);
+    SceUID fd;
+    {
+        const std::lock_guard<std::mutex> lock(io.file_mutex);
+        fd = io.next_fd++;
+        io.std_files.emplace(fd, f);
+    }
 
     LOG_TRACE_IF(log_file_op, "{}: Opening file {} ({}), fd: {}", export_name, path, normalized_path, log_hex(fd));
     return fd;
@@ -513,6 +523,7 @@ int read_file(void *data, IOState &io, const SceUID fd, const SceSize size, cons
     assert(data != nullptr);
     assert(size >= 0);
 
+    std::unique_lock<std::mutex> lock(io.file_mutex);
     const auto file = io.std_files.find(fd);
     if (file != io.std_files.end()) {
 #ifdef __SWITCH__
@@ -533,9 +544,19 @@ int read_file(void *data, IOState &io, const SceUID fd, const SceSize size, cons
         LOG_TRACE_IF(log_file_op && log_file_read, "{}: Reading {} bytes of fd {}", export_name, read, log_hex(fd));
         return static_cast<int>(read);
     }
+    lock.unlock();
 
-    const auto tty_file = io.tty_files.find(fd);
-    if (tty_file != io.tty_files.end()) {
+    TtyType tty_type = TTY_UNKNOWN;
+    bool has_tty = false;
+    {
+        const std::lock_guard<std::mutex> lock(io.file_mutex);
+        const auto tty_file = io.tty_files.find(fd);
+        if (tty_file != io.tty_files.end()) {
+            tty_type = tty_file->second;
+            has_tty = true;
+        }
+    }
+    if (has_tty) {
 #ifdef __SWITCH__
         // Horizon has no console input, so std::cin returns instantly and a
         // game polling its debug TTY spins flat out - Ratchet & Clank's
@@ -544,11 +565,11 @@ int read_file(void *data, IOState &io, const SceUID fd, const SceSize size, cons
         // unfed console thread costs nothing while exit paths still see it
         // return.
         std::this_thread::sleep_for(std::chrono::milliseconds(16));
-        if (tty_file->second & TTY_IN)
+        if (tty_type & TTY_IN)
             return 0;
         return IO_ERROR_UNK();
 #else
-        if (tty_file->second == TTY_IN) {
+        if (tty_type == TTY_IN) {
             std::cin.read(static_cast<char *>(data), size);
             LOG_TRACE_IF(log_file_op && log_file_read, "{}: Reading terminal fd: {}, size: {}", export_name, log_hex(fd), size);
             return size;
@@ -569,9 +590,18 @@ int write_file(SceUID fd, const void *data, const SceSize size, const IOState &i
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
     }
 
-    const auto tty_file = io.tty_files.find(fd);
-    if (tty_file != io.tty_files.end()) {
-        if (tty_file->second & TTY_OUT) {
+    TtyType tty_type = TTY_UNKNOWN;
+    bool has_tty = false;
+    {
+        const std::lock_guard<std::mutex> lock(io.file_mutex);
+        const auto tty_file = io.tty_files.find(fd);
+        if (tty_file != io.tty_files.end()) {
+            tty_type = tty_file->second;
+            has_tty = true;
+        }
+    }
+    if (has_tty) {
+        if (tty_type & TTY_OUT) {
             std::string s(static_cast<char const *>(data), size);
 
             // trim newline
@@ -588,6 +618,7 @@ int write_file(SceUID fd, const void *data, const SceSize size, const IOState &i
         return IO_ERROR_UNK();
     }
 
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
     const auto file = io.std_files.find(fd);
     if (file == io.std_files.end())
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
@@ -610,6 +641,7 @@ int truncate_file(const SceUID fd, unsigned long long length, const IOState &io,
     if (fd < 0)
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
 
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
     const auto file = io.std_files.find(fd);
     if (file == io.std_files.end())
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
@@ -625,6 +657,7 @@ SceOff seek_file(const SceUID fd, const SceOff offset, const SceIoSeekMode whenc
     if (fd < 0)
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
 
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
     const auto file = io.std_files.find(fd);
     if (file == io.std_files.end())
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
@@ -649,6 +682,7 @@ SceOff tell_file(IOState &io, const SceUID fd, const char *export_name) {
     if (fd < 0)
         return IO_ERROR(SCE_ERROR_ERRNO_EMFILE);
 
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
     const auto std_file = io.std_files.find(fd);
 
     if (std_file == io.std_files.end()) {
@@ -661,6 +695,7 @@ SceOff tell_file(IOState &io, const SceUID fd, const char *export_name) {
 int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &vita_fs_path, const char *export_name, const SceUID fd) {
     assert(statp != nullptr);
 
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
     memset(statp, '\0', sizeof(SceIoStat));
 
     fs::path file_path = "";
@@ -794,20 +829,14 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
 
 int stat_file_by_fd(IOState &io, const SceUID fd, SceIoStat *statp, const fs::path &vita_fs_path, const char *export_name) {
     assert(statp != nullptr);
-    memset(statp, '\0', sizeof(SceIoStat));
-
-    const auto std_file = io.std_files.find(fd);
-    if (std_file == io.std_files.end()) {
-        return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
-    }
-
-    return stat_file(io, std_file->second.get_vita_loc(), statp, vita_fs_path, export_name, fd);
+    return stat_file(io, nullptr, statp, vita_fs_path, export_name, fd);
 }
 
 int close_file(IOState &io, const SceUID fd, const char *export_name) {
     if (fd < 0)
         return IO_ERROR(SCE_ERROR_ERRNO_EMFILE);
 
+    const std::lock_guard<std::mutex> lock(io.file_mutex);
     LOG_TRACE_IF(log_file_op, "{}: Closing file fd: {}", export_name, log_hex(fd));
 
     io.tty_files.erase(fd);
@@ -930,7 +959,7 @@ SceUID open_dir(IOState &io, const char *path, const fs::path &vita_fs_path, con
 
     const auto normalized = device::construct_normalized_path(device, translated_path);
     const DirStats d{ path, normalized, dir_path, opened };
-    const auto fd = io.next_fd++;
+    const SceUID fd = io.next_fd++;
     io.dir_entries.emplace(fd, d);
 
     LOG_TRACE_IF(log_file_op, "{}: Opening dir {} ({}), fd: {}", export_name, path, normalized, log_hex(fd));

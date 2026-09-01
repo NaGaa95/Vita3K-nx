@@ -21,6 +21,7 @@
 #include <io/types.h>
 #include <io/util.h>
 
+#include <atomic>
 #include <map>
 #include <unordered_map>
 
@@ -117,7 +118,7 @@ struct IOState {
 
     bool redirect_stdio;
 
-    SceUID next_fd = 0;
+    std::atomic<SceUID> next_fd{ 0 };
     TtyFiles tty_files;
     StdFiles std_files;
     DirEntries dir_entries;
@@ -125,8 +126,7 @@ struct IOState {
     std::unordered_map<std::string, std::string> cachemap;
     bool case_isens_find_enabled = false;
 
-    // Serializes positional I/O while the shared file position is temporarily changed.
-    std::mutex file_mutex;
+    mutable std::mutex file_mutex;
 
     fs::path memory_path;
 
