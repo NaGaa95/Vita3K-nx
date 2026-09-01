@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <kernel/thread/thread_data_queue.h>
 #include <kernel/types.h>
 #include <util/byte_ring_buffer.h>
@@ -128,6 +129,7 @@ struct Mutex : SyncPrimitive {
     ThreadStatePtr owner;
     WaitingThreadQueuePtr waiting_threads;
     Ptr<SceKernelLwMutexWork> workarea;
+    std::atomic<bool> deleted{ false };
 };
 
 typedef std::shared_ptr<Mutex> MutexPtr;

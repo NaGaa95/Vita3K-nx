@@ -23,6 +23,8 @@
 #include <util/lock_and_find.h>
 #include <util/log.h>
 
+#include <array>
+
 static constexpr bool LOG_SYNC_PRIMITIVES = false;
 
 // ***********
@@ -49,12 +51,40 @@ inline static CondvarPtrs &get_condvars(KernelState &kernel, SyncWeight weight) 
     return weight == SyncWeight::Light ? kernel.lwcondvars : kernel.condvars;
 }
 
+namespace {
+struct MutexCacheEntry {
+    SceUID uid = 0;
+    SyncWeight weight = SyncWeight::Light;
+    MutexPtr mutex;
+};
+
+thread_local std::array<MutexCacheEntry, 8> mutex_cache;
+thread_local size_t next_mutex_cache_entry = 0;
+} // namespace
+
 inline static int find_mutex(MutexPtr &mutex_out, MutexPtrs **mutexes_out, KernelState &kernel, const char *export_name, SceUID mutexid, SyncWeight weight) {
     MutexPtrs &mutexes = get_mutexes(kernel, weight);
+
+    for (auto &entry : mutex_cache) {
+        if (entry.uid != mutexid || entry.weight != weight || !entry.mutex)
+            continue;
+        if (entry.mutex->deleted.load(std::memory_order_acquire)) {
+            entry = {};
+            continue;
+        }
+
+        mutex_out = entry.mutex;
+        if (mutexes_out)
+            *mutexes_out = &mutexes;
+        return SCE_KERNEL_OK;
+    }
+
     mutex_out = lock_and_find(mutexid, mutexes, kernel.mutex);
     if (!mutex_out) {
         return unknown_mutex_id(export_name, weight);
     }
+
+    mutex_cache[next_mutex_cache_entry++ % mutex_cache.size()] = { mutexid, weight, mutex_out };
 
     if (mutexes_out)
         *mutexes_out = &mutexes;
@@ -807,6 +837,7 @@ int mutex_delete(KernelState &kernel, const char *export_name, SceUID thread_id,
 
     if (mutex->waiting_threads->empty()) {
         const std::lock_guard<std::mutex> kernel_guard(kernel.mutex);
+        mutex->deleted.store(true, std::memory_order_release);
         mutexes->erase(mutexid);
     } else {
         // TODO:
