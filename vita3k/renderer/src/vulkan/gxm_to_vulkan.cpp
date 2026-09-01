@@ -364,6 +364,10 @@ static vk::ComponentMapping translate_swizzle4_abgr(SceGxmColorSwizzle4Mode mode
 }
 
 vk::ComponentMapping translate_swizzle(SceGxmColorFormat format) {
+    // U8_A surfaces are canonicalized to the host red channel by the shader recompiler.
+    if (format == SCE_GXM_COLOR_FORMAT_U8_A)
+        return swizzle_r001;
+
     const SceGxmColorBaseFormat base_format = gxm::get_base_format(format);
     const uint32_t swizzle = format & SCE_GXM_COLOR_SWIZZLE_MASK;
     switch (base_format) {
