@@ -676,7 +676,17 @@ inline static int mutex_lock_impl(KernelState &kernel, MemState &mem, const char
         const auto data_it = mutex->waiting_threads->push(data);
         thread_lock.unlock();
 
-        int res = handle_timeout(kernel, thread, thread_lock, mutex_lock, mutex->waiting_threads, data_it, export_name, timeout);
+        int res;
+        while (true) {
+            res = handle_timeout(kernel, thread, thread_lock, mutex_lock, mutex->waiting_threads, data_it, export_name, timeout);
+
+            if (res != SCE_KERNEL_OK || mutex->owner == thread || thread->is_delete_requested())
+                break;
+
+            thread_lock.lock();
+            thread->update_status(ThreadStatus::wait, ThreadStatus::run);
+            thread_lock.unlock();
+        }
 
         if (weight == SyncWeight::Light) {
             mutex->workarea.get(mem)->lockCount = mutex->lock_count;
