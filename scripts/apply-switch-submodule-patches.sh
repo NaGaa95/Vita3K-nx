@@ -46,6 +46,9 @@ apply_one "external/dynarmic" \
 apply_one "external/ffmpeg" \
     "ffmpeg-switch.patch" \
     "02f4f2691b0efffff8923235baf146a87fc37263"
+apply_one "external/LibAtrac9" \
+    "libatrac9-switch.patch" \
+    "82767fe38823c32536726ea798f392b0b49e66b9"
 apply_one "external/sdl" \
     "sdl-switch.patch" \
     "f5e5f6588921eed3d7d048ce43d9eb1ff0da0ffc"

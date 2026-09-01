@@ -1,0 +1,579 @@
+diff --git a/C/src/band_extension.c b/C/src/band_extension.c
+index 2847053..74e3129 100644
+--- a/C/src/band_extension.c
++++ b/C/src/band_extension.c
+@@ -38,7 +38,7 @@ static void ApplyBandExtensionChannel(Channel* channel)
+ 	double scales[6];
+ 	int* values = channel->BexValues;
+ 
+-	const BexGroup* bexInfo = &BexGroupInfo[channel->Block->QuantizationUnitCount - 13];
++	const BexGroup* bexInfo = &BexGroupInfo[channel->Block->QuantizationUnitCount - BexGroupMinQuantUnits];
+ 	const int bandCount = bexInfo->BandCount;
+ 	const int groupBUnit = bexInfo->GroupBUnit;
+ 	const int groupCUnit = bexInfo->GroupCUnit;
+@@ -207,7 +207,7 @@ static unsigned short RngNext(RngCxt* rng)
+ 	return rng->StateA;
+ }
+ 
+-const BexGroup BexGroupInfo[8] =
++const BexGroup BexGroupInfo[BexGroupCount] =
+ {
+ 	{ 16, 21, 0 },
+ 	{ 18, 22, 1 },
+diff --git a/C/src/band_extension.h b/C/src/band_extension.h
+index 8cbee35..01ec636 100644
+--- a/C/src/band_extension.h
++++ b/C/src/band_extension.h
+@@ -4,6 +4,12 @@
+ 
+ void ApplyBandExtension(Block* block);
+ 
+-extern const BexGroup BexGroupInfo[8];
++enum
++{
++	BexGroupMinQuantUnits = 13,
++	BexGroupCount = 8
++};
++
++extern const BexGroup BexGroupInfo[BexGroupCount];
+ extern const char BexEncodedValueCounts[5][6];
+ extern const char BexDataLengths[5][6][4];
+diff --git a/C/src/bit_reader.c b/C/src/bit_reader.c
+index 090352b..0602d29 100644
+--- a/C/src/bit_reader.c
++++ b/C/src/bit_reader.c
+@@ -3,23 +3,26 @@
+ 
+ static int PeekIntFallback(BitReaderCxt* br, int bitCount);
+ 
+-void InitBitReaderCxt(BitReaderCxt* br, const void * buffer)
++void InitBitReaderCxt(BitReaderCxt* br, const void * buffer, int byteLength)
+ {
+ 	br->Buffer = buffer;
+ 	br->Position = 0;
++	br->BitLength = byteLength * 8;
++	br->HasError = 0;
+ }
+ 
+ int ReadInt(BitReaderCxt* br, const int bits)
+ {
+ 	const int value = PeekInt(br, bits);
+-	br->Position += bits;
++	SkipBits(br, bits);
+ 	return value;
+ }
+ 
+ int ReadSignedInt(BitReaderCxt* br, const int bits)
+ {
+ 	const int value = PeekInt(br, bits);
+-	br->Position += bits;
++	SkipBits(br, bits);
++	if (bits == 0) return 0;
+ 	return SignExtend32(value, bits);
+ }
+ 
+@@ -27,17 +30,25 @@ int ReadOffsetBinary(BitReaderCxt* br, const int bits)
+ {
+ 	const int offset = 1 << (bits - 1);
+ 	const int value = PeekInt(br, bits) - offset;
+-	br->Position += bits;
++	SkipBits(br, bits);
+ 	return value;
+ }
+ 
+ int PeekInt(BitReaderCxt* br, const int bits)
+ {
++	if (bits < 0 || bits > 32 || br->Position < 0 || br->Position > br->BitLength)
++	{
++		br->HasError = 1;
++		return 0;
++	}
++	if (bits == 0) return 0;
++
+ 	const int byteIndex = br->Position / 8;
+ 	const int bitIndex = br->Position % 8;
++	const int byteLength = br->BitLength / 8;
+ 	const unsigned char* buffer = br->Buffer;
+ 
+-	if (bits <= 9)
++	if (br->Position + bits <= br->BitLength && bits <= 9 && byteIndex + 1 < byteLength)
+ 	{
+ 		int value = buffer[byteIndex] << 8 | buffer[byteIndex + 1];
+ 		value &= 0xFFFF >> bitIndex;
+@@ -45,7 +56,7 @@ int PeekInt(BitReaderCxt* br, const int bits)
+ 		return value;
+ 	}
+ 
+-	if (bits <= 17)
++	if (br->Position + bits <= br->BitLength && bits <= 17 && byteIndex + 2 < byteLength)
+ 	{
+ 		int value = buffer[byteIndex] << 16 | buffer[byteIndex + 1] << 8 | buffer[byteIndex + 2];
+ 		value &= 0xFFFFFF >> bitIndex;
+@@ -53,20 +64,32 @@ int PeekInt(BitReaderCxt* br, const int bits)
+ 		return value;
+ 	}
+ 
+-	if (bits <= 25)
++	if (br->Position + bits <= br->BitLength && bits <= 25 && byteIndex + 3 < byteLength)
+ 	{
+-		int value = buffer[byteIndex] << 24
+-			| buffer[byteIndex + 1] << 16
+-			| buffer[byteIndex + 2] << 8
++		unsigned int value = (unsigned int)buffer[byteIndex] << 24
++			| (unsigned int)buffer[byteIndex + 1] << 16
++			| (unsigned int)buffer[byteIndex + 2] << 8
+ 			| buffer[byteIndex + 3];
+ 
+-		value &= (int)(0xFFFFFFFF >> bitIndex);
++		value &= 0xFFFFFFFFu >> bitIndex;
+ 		value >>= 32 - bits - bitIndex;
+-		return value;
++		return (int)value;
+ 	}
+ 	return PeekIntFallback(br, bits);
+ }
+ 
++void SkipBits(BitReaderCxt* br, const int bits)
++{
++	if (bits < 0 || br->Position < 0 || br->Position > br->BitLength
++		|| bits > br->BitLength - br->Position)
++	{
++		br->HasError = 1;
++		br->Position = br->BitLength;
++		return;
++	}
++	br->Position += bits;
++}
++
+ void AlignPosition(BitReaderCxt* br, const unsigned int multiple)
+ {
+ 	const int position = br->Position;
+@@ -75,12 +98,15 @@ void AlignPosition(BitReaderCxt* br, const unsigned int multiple)
+ 		return;
+ 	}
+ 
+-	br->Position = position + multiple - position % multiple;
++	SkipBits(br, multiple - position % multiple);
+ }
+ 
+ static int PeekIntFallback(BitReaderCxt* br, int bitCount)
+ {
+ 	int value = 0;
++	const int bitsAvailable = br->BitLength - br->Position;
++	const int missingBits = bitCount > bitsAvailable ? bitCount - bitsAvailable : 0;
++	if (bitCount > bitsAvailable) bitCount = bitsAvailable;
+ 	int byteIndex = br->Position / 8;
+ 	int bitIndex = br->Position % 8;
+ 	const unsigned char* buffer = br->Buffer;
+@@ -106,5 +132,5 @@ static int PeekIntFallback(BitReaderCxt* br, int bitCount)
+ 		bitIndex += bitsToRead;
+ 		bitCount -= bitsToRead;
+ 	}
+-	return value;
+-}
+\ No newline at end of file
++	return missingBits == 32 ? 0 : (int)((unsigned int)value << missingBits);
++}
+diff --git a/C/src/bit_reader.h b/C/src/bit_reader.h
+index 1271187..5f33b7e 100644
+--- a/C/src/bit_reader.h
++++ b/C/src/bit_reader.h
+@@ -3,13 +3,16 @@
+ typedef struct {
+ 	const unsigned char * Buffer;
+ 	int Position;
++	int BitLength;
++	int HasError;
+ } BitReaderCxt;
+ 
+ // Make MSVC compiler happy. Leave const in for value parameters
+ 
+-void InitBitReaderCxt(BitReaderCxt* br, const void * buffer);
++void InitBitReaderCxt(BitReaderCxt* br, const void * buffer, int byteLength);
+ int PeekInt(BitReaderCxt* br, const int bits);
+ int ReadInt(BitReaderCxt* br, const int bits);
+ int ReadSignedInt(BitReaderCxt* br, const int bits);
+ int ReadOffsetBinary(BitReaderCxt* br, const int bits);
++void SkipBits(BitReaderCxt* br, const int bits);
+ void AlignPosition(BitReaderCxt* br, const unsigned int multiple);
+diff --git a/C/src/decinit.c b/C/src/decinit.c
+index 2424985..9897f15 100644
+--- a/C/src/decinit.c
++++ b/C/src/decinit.c
+@@ -58,7 +58,7 @@ static At9Status InitConfigData(ConfigData* config, unsigned char* configData)
+ static At9Status ReadConfigData(ConfigData* config)
+ {
+ 	BitReaderCxt br;
+-	InitBitReaderCxt(&br, &config->ConfigData);
++	InitBitReaderCxt(&br, &config->ConfigData, CONFIG_DATA_SIZE);
+ 
+ 	const int header = ReadInt(&br, 8);
+ 	config->SampleRateIndex = ReadInt(&br, 4);
+diff --git a/C/src/decoder.c b/C/src/decoder.c
+index 9b9f0ba..c880584 100644
+--- a/C/src/decoder.c
++++ b/C/src/decoder.c
+@@ -14,9 +14,15 @@ static void ApplyIntensityStereo(Block* block);
+ static void PcmFloatToShort(Frame* frame, short* pcmOut);
+ 
+ At9Status Decode(Atrac9Handle* handle, const unsigned char* audio, unsigned char* pcm, int* bytesUsed)
++{
++	// Frames are variable-length; only the superframe has a fixed size.
++	return DecodeBounded(handle, audio, handle->Config.SuperframeBytes, pcm, bytesUsed);
++}
++
++At9Status DecodeBounded(Atrac9Handle* handle, const unsigned char* audio, int audioBytes, unsigned char* pcm, int* bytesUsed)
+ {
+ 	BitReaderCxt br;
+-	InitBitReaderCxt(&br, audio);
++	InitBitReaderCxt(&br, audio, audioBytes);
+ 	ERROR_CHECK(DecodeFrame(&handle->Frame, &br));
+ 
+ 	PcmFloatToShort(&handle->Frame, (short*)pcm);
+diff --git a/C/src/decoder.h b/C/src/decoder.h
+index 69f8ac5..c6410f1 100644
+--- a/C/src/decoder.h
++++ b/C/src/decoder.h
+@@ -4,4 +4,5 @@
+ #include "structures.h"
+ 
+ At9Status Decode(Atrac9Handle* handle, const unsigned char* audio, unsigned char* pcm, int* bytesUsed);
++At9Status DecodeBounded(Atrac9Handle* handle, const unsigned char* audio, int audioBytes, unsigned char* pcm, int* bytesUsed);
+ int GetCodecInfo(Atrac9Handle* handle, CodecInfo* pCodecInfo);
+diff --git a/C/src/error_codes.h b/C/src/error_codes.h
+index bbdece6..1c56ce4 100644
+--- a/C/src/error_codes.h
++++ b/C/src/error_codes.h
+@@ -22,7 +22,9 @@ typedef enum At9Status
+ 	ERR_UNPACK_SCALE_FACTOR_MODE_INVALID,
+ 	ERR_UNPACK_SCALE_FACTOR_OOB,
+ 
+-	ERR_UNPACK_EXTENSION_DATA_INVALID
++	ERR_UNPACK_EXTENSION_DATA_INVALID,
++	ERR_UNPACK_SPECTRUM_DATA_INVALID,
++	ERR_UNPACK_FRAME_DATA_INVALID
+ } At9Status;
+ 
+ #define ERROR_CHECK(x) do { \
+diff --git a/C/src/huffCodes.c b/C/src/huffCodes.c
+index 64dfea8..517d5a5 100644
+--- a/C/src/huffCodes.c
++++ b/C/src/huffCodes.c
+@@ -4,10 +4,20 @@
+ 
+ int ReadHuffmanValue(const HuffmanCodebook* huff, BitReaderCxt* br, int isSigned)
+ {
++	if (!huff->Lookup || !huff->Bits || huff->Length == 0 || huff->MaxBitSize <= 0 || huff->MaxBitSize > 32)
++	{
++		br->HasError = 1;
++		return 0;
++	}
+ 	const int code = PeekInt(br, huff->MaxBitSize);
+ 	const unsigned char value = huff->Lookup[code];
+ 	const int bits = huff->Bits[value];
+-	br->Position += bits;
++	if (bits == 0)
++	{
++		br->HasError = 1;
++		return 0;
++	}
++	SkipBits(br, bits);
+ 	return isSigned ? SignExtend32(value, huff->ValueBits) : value;
+ }
+ 
+diff --git a/C/src/libatrac9.c b/C/src/libatrac9.c
+index 6434cb5..c8275e6 100644
+--- a/C/src/libatrac9.c
++++ b/C/src/libatrac9.c
+@@ -25,6 +25,11 @@ int Atrac9Decode(void* handle, const unsigned char *pAtrac9Buffer, short *pPcmBu
+ 	return Decode(handle, pAtrac9Buffer, (unsigned char*)pPcmBuffer, pNBytesUsed);
+ }
+ 
++int Atrac9DecodeBounded(void* handle, const unsigned char *pAtrac9Buffer, int nAtrac9Bytes, short *pPcmBuffer, int *pNBytesUsed)
++{
++	return DecodeBounded(handle, pAtrac9Buffer, nAtrac9Bytes, (unsigned char*)pPcmBuffer, pNBytesUsed);
++}
++
+ int Atrac9GetCodecInfo(void* handle, Atrac9CodecInfo * pCodecInfo)
+ {
+ 	return GetCodecInfo(handle, (CodecInfo*)pCodecInfo);
+diff --git a/C/src/libatrac9.h b/C/src/libatrac9.h
+index 9ec323a..d487cad 100644
+--- a/C/src/libatrac9.h
++++ b/C/src/libatrac9.h
+@@ -21,6 +21,7 @@ void Atrac9ReleaseHandle(void* handle);
+ 
+ int Atrac9InitDecoder(void* handle, unsigned char *pConfigData);
+ int Atrac9Decode(void* handle, const unsigned char *pAtrac9Buffer, short *pPcmBuffer, int *pNBytesUsed);
++int Atrac9DecodeBounded(void* handle, const unsigned char *pAtrac9Buffer, int nAtrac9Bytes, short *pPcmBuffer, int *pNBytesUsed);
+ 
+ int Atrac9GetCodecInfo(void* handle, Atrac9CodecInfo *pCodecInfo);
+ 
+diff --git a/C/src/structures.h b/C/src/structures.h
+index 67363cf..879e0bc 100644
+--- a/C/src/structures.h
++++ b/C/src/structures.h
+@@ -8,6 +8,7 @@
+ #define MAX_BEX_VALUES 4
+ 
+ #define MAX_QUANT_UNITS 30
++#define MAX_GRADIENT_UNITS 48
+ 
+ typedef struct Frame Frame;
+ typedef struct Block Block;
+@@ -111,7 +112,7 @@ struct Block {
+ 	int ExtensionUnit;
+ 	int QuantizationUnitsPrev;
+ 
+-	int Gradient[31];
++	int Gradient[MAX_GRADIENT_UNITS];
+ 	int GradientMode;
+ 	int GradientStartUnit;
+ 	int GradientStartValue;
+diff --git a/C/src/unpack.c b/C/src/unpack.c
+index 8b66e49..1ffbf5a 100644
+--- a/C/src/unpack.c
++++ b/C/src/unpack.c
+@@ -11,9 +11,11 @@ static At9Status UnpackBlock(Block* block, BitReaderCxt* br);
+ static At9Status ReadBlockHeader(Block* block, BitReaderCxt* br);
+ static At9Status UnpackStandardBlock(Block* block, BitReaderCxt* br);
+ static At9Status ReadBandParams(Block* block, BitReaderCxt* br);
++static At9Status ValidateBandParams(Block* block);
+ static At9Status ReadGradientParams(Block* block, BitReaderCxt* br);
+ static At9Status ReadStereoParams(Block* block, BitReaderCxt* br);
+ static At9Status ReadExtensionParams(Block* block, BitReaderCxt* br);
++static At9Status ValidateBexValues(Channel* channel, int bexBand);
+ static void UpdateCodedUnits(Channel* channel);
+ static void CalculateSpectrumCodebookIndex(Channel* channel);
+ 
+@@ -32,10 +34,9 @@ At9Status UnpackFrame(Frame* frame, BitReaderCxt* br)
+ 	for (int i = 0; i < blockCount; i++)
+ 	{
+ 		ERROR_CHECK(UnpackBlock(&frame->Blocks[i], br));
+-
+-		if (frame->Blocks[i].FirstInSuperframe && frame->IndexInSuperframe)
++		if (br->HasError)
+ 		{
+-			return ERR_UNPACK_SUPERFRAME_FLAG_INVALID;
++			return ERR_UNPACK_FRAME_DATA_INVALID;
+ 		}
+ 	}
+ 
+@@ -71,7 +72,13 @@ static At9Status ReadBlockHeader(Block* block, BitReaderCxt* br)
+ 	block->FirstInSuperframe = !ReadInt(br, 1);
+ 	block->ReuseBandParams = ReadInt(br, 1);
+ 
+-	if (block->FirstInSuperframe && block->ReuseBandParams && block->BlockType != LFE)
++	if (block->FirstInSuperframe && block->Frame->IndexInSuperframe)
++	{
++		return ERR_UNPACK_SUPERFRAME_FLAG_INVALID;
++	}
++
++	if (block->ReuseBandParams && block->BlockType != LFE
++		&& (block->FirstInSuperframe || !block->Frame->IndexInSuperframe))
+ 	{
+ 		return ERR_UNPACK_REUSE_BAND_PARAMS_INVALID;
+ 	}
+@@ -85,6 +92,7 @@ static At9Status UnpackStandardBlock(Block* block, BitReaderCxt* br)
+ 	{
+ 		ERROR_CHECK(ReadBandParams(block, br));
+ 	}
++	ERROR_CHECK(ValidateBandParams(block));
+ 
+ 	ERROR_CHECK(ReadGradientParams(block, br));
+ 	ERROR_CHECK(CreateGradient(block));
+@@ -95,6 +103,10 @@ static At9Status UnpackStandardBlock(Block* block, BitReaderCxt* br)
+ 	{
+ 		Channel* channel = &block->Channels[i];
+ 		UpdateCodedUnits(channel);
++		if (channel->CodedQuantUnits < 0 || channel->CodedQuantUnits > block->QuantizationUnitCount)
++		{
++			return ERR_UNPACK_BAND_PARAMS_INVALID;
++		}
+ 
+ 		ERROR_CHECK(ReadScaleFactors(channel, br));
+ 		CalculateMask(channel);
+@@ -109,6 +121,45 @@ static At9Status UnpackStandardBlock(Block* block, BitReaderCxt* br)
+ 	return ERR_SUCCESS;
+ }
+ 
++static At9Status ValidateBandParams(Block* block)
++{
++	const int minBandCount = MinBandCount[block->Config->HighSampleRate];
++	if (block->BandCount < minBandCount || block->BandCount > MaxBandCount[block->Config->SampleRateIndex])
++	{
++		return ERR_UNPACK_BAND_PARAMS_INVALID;
++	}
++	if (block->QuantizationUnitCount != BandToQuantUnitCount[block->BandCount])
++	{
++		return ERR_UNPACK_BAND_PARAMS_INVALID;
++	}
++
++	if (block->BlockType == Stereo)
++	{
++		if (block->StereoBand < minBandCount || block->StereoBand > block->BandCount
++			|| block->StereoQuantizationUnit != BandToQuantUnitCount[block->StereoBand])
++		{
++			return ERR_UNPACK_BAND_PARAMS_INVALID;
++		}
++	}
++
++	if (block->BandExtensionEnabled)
++	{
++		if (block->ExtensionBand < block->BandCount
++			|| block->ExtensionBand > MaxExtensionBand[block->Config->HighSampleRate]
++			|| block->ExtensionUnit != BandToQuantUnitCount[block->ExtensionBand])
++		{
++			return ERR_UNPACK_BAND_PARAMS_INVALID;
++		}
++	}
++	else if (block->ExtensionBand != block->BandCount
++		|| block->ExtensionUnit != block->QuantizationUnitCount)
++	{
++		return ERR_UNPACK_BAND_PARAMS_INVALID;
++	}
++
++	return ERR_SUCCESS;
++}
++
+ static At9Status ReadBandParams(Block* block, BitReaderCxt* br)
+ {
+ 	const int minBandCount = MinBandCount[block->Config->HighSampleRate];
+@@ -243,19 +294,42 @@ static void BexReadData(Channel* channel, BitReaderCxt* br, int bexBand)
+ 	}
+ }
+ 
++static At9Status ValidateBexValues(Channel* channel, int bexBand)
++{
++	if (channel->BexMode < 0 || channel->BexMode >= 5
++		|| channel->BexValueCount != BexEncodedValueCounts[channel->BexMode][bexBand])
++	{
++		return ERR_UNPACK_EXTENSION_DATA_INVALID;
++	}
++	for (int i = 0; i < channel->BexValueCount; i++)
++	{
++		const int dataLength = BexDataLengths[channel->BexMode][bexBand][i];
++		if (dataLength <= 0 || channel->BexValues[i] < 0 || channel->BexValues[i] >= 1 << dataLength)
++		{
++			return ERR_UNPACK_EXTENSION_DATA_INVALID;
++		}
++	}
++	return ERR_SUCCESS;
++}
++
+ static At9Status ReadExtensionParams(Block* block, BitReaderCxt* br)
+ {
+ 	int bexBand = 0;
+ 	if (block->BandExtensionEnabled)
+ 	{
+-		bexBand = BexGroupInfo[block->QuantizationUnitCount - 13].BandCount;
++		const int bexGroup = block->QuantizationUnitCount - BexGroupMinQuantUnits;
++		if (bexGroup < 0 || bexGroup >= BexGroupCount)
++		{
++			return ERR_UNPACK_EXTENSION_DATA_INVALID;
++		}
++		bexBand = BexGroupInfo[bexGroup].BandCount;
+ 		if (block->BlockType == Stereo)
+ 		{
+ 			BexReadHeader(&block->Channels[1], br, bexBand);
+ 		}
+ 		else
+ 		{
+-			br->Position += 1;
++			SkipBits(br, 1);
+ 		}
+ 	}
+ 	block->HasExtensionData = ReadInt(br, 1);
+@@ -265,14 +339,22 @@ static At9Status ReadExtensionParams(Block* block, BitReaderCxt* br)
+ 	{
+ 		block->BexMode = ReadInt(br, 2);
+ 		block->BexDataLength = ReadInt(br, 5);
+-		br->Position += block->BexDataLength;
++		SkipBits(br, block->BexDataLength);
+ 		return ERR_SUCCESS;
+ 	}
+ 
+ 	BexReadHeader(&block->Channels[0], br, bexBand);
+ 
+ 	block->BexDataLength = ReadInt(br, 5);
+-	if (block->BexDataLength == 0) return ERR_SUCCESS;
++	if (block->BexDataLength == 0)
++	{
++		ERROR_CHECK(ValidateBexValues(&block->Channels[0], bexBand));
++		if (block->BlockType == Stereo)
++		{
++			ERROR_CHECK(ValidateBexValues(&block->Channels[1], bexBand));
++		}
++		return ERR_SUCCESS;
++	}
+ 	const int bexDataEnd = br->Position + block->BexDataLength;
+ 
+ 	BexReadData(&block->Channels[0], br, bexBand);
+@@ -287,6 +369,11 @@ static At9Status ReadExtensionParams(Block* block, BitReaderCxt* br)
+ 	{
+ 		return ERR_UNPACK_EXTENSION_DATA_INVALID;
+ 	}
++	ERROR_CHECK(ValidateBexValues(&block->Channels[0], bexBand));
++	if (block->BlockType == Stereo)
++	{
++		ERROR_CHECK(ValidateBexValues(&block->Channels[1], bexBand));
++	}
+ 
+ 	return ERR_SUCCESS;
+ }
+@@ -363,9 +450,17 @@ static At9Status ReadSpectra(Channel* channel, BitReaderCxt* br)
+ 	{
+ 		const int subbandCount = QuantUnitToCoeffCount[i];
+ 		const int precision = channel->Precisions[i] + 1;
++		if (precision < 2)
++		{
++			return ERR_UNPACK_SPECTRUM_DATA_INVALID;
++		}
+ 		if (precision <= maxHuffPrecision)
+ 		{
+ 			const HuffmanCodebook* huff = &HuffmanSpectrum[channel->CodebookSet[i]][precision][QuantUnitToCodebookIndex[i]];
++			if (!huff->Lookup || !huff->Bits || huff->Length == 0)
++			{
++				return ERR_UNPACK_SPECTRUM_DATA_INVALID;
++			}
+ 			const int groupCount = subbandCount >> huff->ValueCountPower;
+ 			for (int j = 0; j < groupCount; j++)
+ 			{
+@@ -393,6 +488,10 @@ static At9Status ReadSpectraFine(Channel* channel, BitReaderCxt* br)
+ 
+ 	for (int i = 0; i < channel->CodedQuantUnits; i++)
+ 	{
++		if (channel->PrecisionsFine[i] < 0 || channel->PrecisionsFine[i] >= 16)
++		{
++			return ERR_UNPACK_SPECTRUM_DATA_INVALID;
++		}
+ 		if (channel->PrecisionsFine[i] > 0)
+ 		{
+ 			const int overflowBits = channel->PrecisionsFine[i] + 1;
+diff --git a/C/src/utility.c b/C/src/utility.c
+index 54b9e2a..1af0a7d 100644
+--- a/C/src/utility.c
++++ b/C/src/utility.c
+@@ -6,6 +6,7 @@ int Min(int a, int b) { return a > b ? b : a; }
+ 
+ unsigned int BitReverse32(unsigned int value, int bitCount)
+ {
++	if (bitCount == 0) return 0;
+ 	value = ((value & 0xaaaaaaaa) >> 1) | ((value & 0x55555555) << 1);
+ 	value = ((value & 0xcccccccc) >> 2) | ((value & 0x33333333) << 2);
+ 	value = ((value & 0xf0f0f0f0) >> 4) | ((value & 0x0f0f0f0f) << 4);
+@@ -16,8 +17,12 @@ unsigned int BitReverse32(unsigned int value, int bitCount)
+ 
+ int SignExtend32(int value, int bits)
+ {
+-	const int shift = 8 * sizeof(int) - bits;
+-	return (value << shift) >> shift;
++	if (bits <= 0) return 0;
++	if (bits >= 32) return value;
++	const unsigned int mask = (1u << bits) - 1;
++	const unsigned int sign = 1u << (bits - 1);
++	const unsigned int unsignedValue = (unsigned int)value & mask;
++	return unsignedValue & sign ? -(int)((~unsignedValue & mask) + 1) : (int)unsignedValue;
+ }
+ 
+ short Clamp16(int value)
