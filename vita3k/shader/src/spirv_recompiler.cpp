@@ -1862,8 +1862,8 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
                     z = b.createBinOp(spv::OpFMul, f32, z, z_scale);
                     z = b.createBinOp(spv::OpFAdd, f32, z, z_offset);
 
-                    // z values below 0 get clamped
-                    z = b.createBuiltinCall(f32, utils.std_builtins, GLSLstd450FMax, { z, zero });
+                    if (!features.support_clip_distance)
+                        z = b.createBuiltinCall(f32, utils.std_builtins, GLSLstd450FMax, { z, zero });
 
                     if (!translation_state.is_vulkan) {
                         // convert [0,1] depth range (gxp, vulkan) to [-1,1] depth range (opengl)
@@ -1878,6 +1878,23 @@ static spv::Function *make_vert_finalize_function(spv::Builder &b, const SpirvSh
                 }
 
                 cond_builder.makeEndIf();
+
+                if (translation_state.is_vulkan && features.support_clip_distance) {
+                    b.addCapability(spv::CapabilityClipDistance);
+                    const spv::Id clip_type = b.makeArrayType(f32, b.makeUintConstant(2), 0);
+                    const spv::Id clip_var = b.createVariable(spv::NoPrecision, spv::StorageClassOutput, clip_type, "gl_ClipDistance");
+                    b.addDecoration(clip_var, spv::DecorationBuiltIn, spv::BuiltInClipDistance);
+                    translation_state.interfaces.push_back(clip_var);
+
+                    const spv::Id clip_z_ref = utils::create_access_chain(b, spv::StorageClassOutput, out_var, { b.makeIntConstant(2) });
+                    const spv::Id clip_w_ref = utils::create_access_chain(b, spv::StorageClassOutput, out_var, { b.makeIntConstant(3) });
+                    const spv::Id clip_z = b.createLoad(clip_z_ref, spv::NoPrecision);
+                    const spv::Id clip_w = b.createLoad(clip_w_ref, spv::NoPrecision);
+                    const spv::Id clip_dist0_ref = utils::create_access_chain(b, spv::StorageClassOutput, clip_var, { b.makeIntConstant(0) });
+                    const spv::Id clip_dist1_ref = utils::create_access_chain(b, spv::StorageClassOutput, clip_var, { b.makeIntConstant(1) });
+                    b.createStore(clip_w, clip_dist0_ref);
+                    b.createStore(b.createBinOp(spv::OpFAdd, f32, clip_z, clip_w), clip_dist1_ref);
+                }
             } else if (vo == SCE_GXM_VERTEX_PROGRAM_OUTPUT_PSIZE) {
                 b.addDecoration(out_var, spv::DecorationBuiltIn, spv::BuiltInPointSize);
                 b.createStore(o_val, out_var);

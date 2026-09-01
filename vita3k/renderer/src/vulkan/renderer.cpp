@@ -769,15 +769,21 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             return false;
         }
 
+        features.support_clip_distance = enable_depth_clamp
+            && static_cast<bool>(physical_device_features.depthClamp)
+            && static_cast<bool>(physical_device_features.shaderClipDistance);
+
         // use these features (because they are used by the vita GPU) if they are available
         vk::PhysicalDeviceFeatures enabled_features{
             .independentBlend = physical_device_features.independentBlend,
+            .depthClamp = features.support_clip_distance ? VK_TRUE : VK_FALSE,
             .fillModeNonSolid = physical_device_features.fillModeNonSolid,
             .wideLines = physical_device_features.wideLines,
             .samplerAnisotropy = physical_device_features.samplerAnisotropy,
             .occlusionQueryPrecise = physical_device_features.occlusionQueryPrecise,
             .fragmentStoresAndAtomics = physical_device_features.fragmentStoresAndAtomics,
             .shaderStorageImageExtendedFormats = physical_device_features.shaderStorageImageExtendedFormats,
+            .shaderClipDistance = features.support_clip_distance ? VK_TRUE : VK_FALSE,
             .shaderInt16 = physical_device_features.shaderInt16,
         };
 
@@ -1489,7 +1495,8 @@ uint32_t VKState::get_features_mask() {
         | (uint32_t(features.use_mask_bit) << 6)
         | (uint32_t(features.direct_fragcolor) << 7)
         | (uint32_t(features.support_texture_barrier) << 8)
-        | (uint32_t(features.support_unknown_format) << 9);
+        | (uint32_t(features.support_unknown_format) << 9)
+        | (uint32_t(features.support_clip_distance) << 10);
 }
 
 int VKState::get_supported_filters() {

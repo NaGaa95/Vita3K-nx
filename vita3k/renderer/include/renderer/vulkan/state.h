@@ -33,6 +33,8 @@ struct Config;
 
 namespace renderer::vulkan {
 
+inline constexpr bool enable_depth_clamp = true;
+
 enum class LinuxSurfaceType {
     Unknown,
     Wayland,
