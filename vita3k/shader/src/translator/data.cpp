@@ -214,6 +214,12 @@ bool USSETranslatorVisitor::vmov(
             spv::Id cond_result = m_b.createOp(compare_op, utils::make_vector_or_scalar_type(m_b, m_b.makeBoolType(), m_b.getNumComponents(source_to_compare_with_0)),
                 { source_to_compare_with_0, v0 });
 
+            const int result_components = m_b.getNumComponents(source_2);
+            if (m_b.getNumComponents(cond_result) == 1 && result_components > 1) {
+                const spv::Id condition_type = m_b.makeVectorType(m_b.makeBoolType(), result_components);
+                cond_result = m_b.createCompositeConstruct(condition_type, std::vector<spv::Id>(result_components, cond_result));
+            }
+
             // For each component, if the compare result is true, move the equivalent component from source1 to dest,
             // else the same thing with source2
             // This behavior matches with OpSelect, so use it. Since IMix doesn't exist (really)

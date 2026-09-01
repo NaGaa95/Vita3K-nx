@@ -1214,10 +1214,10 @@ bool shader::usse::USSETranslatorVisitor::sop2m(Imm2 pred,
     if (wmask & 0b1000) {
         // Alpha is written, so calculate and also store
         const spv::Id alpha_index = m_b.makeIntConstant(3);
-        spv::Id a1 = m_b.createBinOp(spv::OpVectorExtractDynamic, alpha_type, operation_1, alpha_index);
-        spv::Id a2 = m_b.createBinOp(spv::OpVectorExtractDynamic, alpha_type, operation_2, alpha_index);
+        spv::Id a1 = utils::extract_vector_component(m_b, alpha_type, operation_1, alpha_index);
+        spv::Id a2 = utils::extract_vector_component(m_b, alpha_type, operation_2, alpha_index);
 
-        result = m_b.createTriOp(spv::OpVectorInsertDynamic, src_type, result, apply_opcode(alpha_op, alpha_type, a1, a2), alpha_index);
+        result = utils::insert_vector_component(m_b, src_type, result, apply_opcode(alpha_op, alpha_type, a1, a2), alpha_index);
     }
 
     result = utils::convert_to_int(m_b, m_util_funcs, result, DataType::UINT8, true);

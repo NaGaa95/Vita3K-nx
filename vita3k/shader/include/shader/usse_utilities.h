@@ -55,6 +55,9 @@ void buffer_address_access(spv::Builder &b, const SpirvShaderParameters &params,
 
 spv::Id make_vector_or_scalar_type(spv::Builder &b, spv::Id component, int size);
 
+spv::Id extract_vector_component(spv::Builder &b, spv::Id type, spv::Id vector, spv::Id index);
+spv::Id insert_vector_component(spv::Builder &b, spv::Id type, spv::Id vector, spv::Id component, spv::Id index);
+
 spv::Id unwrap_type(spv::Builder &b, spv::Id type);
 
 spv::Id convert_to_float(spv::Builder &b, const SpirvUtilFunctions &utils, spv::Id opr, DataType type, bool normal);
