@@ -2136,6 +2136,10 @@ void VKState::preclose_action() {
     pipeline_cache.save_pipeline_cache();
 }
 
+void VKState::wait_gpu_idle() {
+    wait_device_idle();
+}
+
 #ifdef __ANDROID__
 bool VKState::support_custom_drivers() {
     // vendor ID 0x5143 is Qualcomm, being stock or turnip

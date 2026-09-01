@@ -206,6 +206,7 @@ struct VKState : public renderer::State {
 
     void precompile_shader(const ShadersHash &hash) override;
     void preclose_action() override;
+    void wait_gpu_idle() override;
 
     inline FrameObject &frame() {
         return frames[current_frame_idx];
