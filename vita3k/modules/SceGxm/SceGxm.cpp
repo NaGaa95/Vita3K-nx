@@ -2383,47 +2383,86 @@ static int gxmDrawElementGeneral(EmuEnvState &emuenv, const char *export_name, c
         }
     }
 
-    if (!context->state.fragment_program || !context->state.vertex_program) {
+    if (!context->state.fragment_program || !context->state.vertex_program)
         return RET_ERROR(SCE_GXM_ERROR_NULL_PROGRAM);
-    }
 
-    const SceGxmFragmentProgram &gxm_fragment_program = *context->state.fragment_program.get(emuenv.mem);
-    const SceGxmVertexProgram &gxm_vertex_program = *context->state.vertex_program.get(emuenv.mem);
+    SceGxmPrecomputedVertexState *pre_vert = context->state.precomputed_vertex_state.cast<SceGxmPrecomputedVertexState>().get(emuenv.mem);
+    SceGxmPrecomputedFragmentState *pre_frag = context->state.precomputed_fragment_state.cast<SceGxmPrecomputedFragmentState>().get(emuenv.mem);
+
+    const Ptr<const SceGxmFragmentProgram> frag_program_ptr = pre_frag && pre_frag->program
+        ? pre_frag->program
+        : context->state.fragment_program;
+    const Ptr<const SceGxmVertexProgram> vert_program_ptr = pre_vert && pre_vert->program
+        ? pre_vert->program
+        : context->state.vertex_program;
+
+    const SceGxmFragmentProgram *gxm_fragment_program_ptr = frag_program_ptr.get(emuenv.mem);
+    const SceGxmVertexProgram *gxm_vertex_program_ptr = vert_program_ptr.get(emuenv.mem);
+    if (!gxm_fragment_program_ptr || !gxm_vertex_program_ptr
+        || !gxm_fragment_program_ptr->renderer_data || !gxm_vertex_program_ptr->renderer_data)
+        return RET_ERROR(SCE_GXM_ERROR_NULL_PROGRAM);
+
+    const SceGxmFragmentProgram &gxm_fragment_program = *gxm_fragment_program_ptr;
+    const SceGxmVertexProgram &gxm_vertex_program = *gxm_vertex_program_ptr;
 
     // Set uniforms
-    const SceGxmProgram &vertex_program_gxp = *gxm_vertex_program.program.get(emuenv.mem);
-    const SceGxmProgram &fragment_program_gxp = *gxm_fragment_program.program.get(emuenv.mem);
+    const SceGxmProgram *vertex_program_gxp_ptr = gxm_vertex_program.program.get(emuenv.mem);
+    const SceGxmProgram *fragment_program_gxp_ptr = gxm_fragment_program.program.get(emuenv.mem);
+    if (!vertex_program_gxp_ptr || !fragment_program_gxp_ptr)
+        return RET_ERROR(SCE_GXM_ERROR_NULL_PROGRAM);
+
+    const SceGxmProgram &vertex_program_gxp = *vertex_program_gxp_ptr;
+    const SceGxmProgram &fragment_program_gxp = *fragment_program_gxp_ptr;
 
     const void *indices_ptr = indexData.get(emuenv.mem);
 
-    gxmSetUniformBuffers(*emuenv.renderer, emuenv.gxm, context, vertex_program_gxp, context->state.vertex_uniform_buffers, gxm_vertex_program.renderer_data->uniform_buffer_sizes,
-        emuenv.mem);
-    gxmSetUniformBuffers(*emuenv.renderer, emuenv.gxm, context, fragment_program_gxp, context->state.fragment_uniform_buffers, gxm_fragment_program.renderer_data->uniform_buffer_sizes,
-        emuenv.mem);
+    std::span<UniformBuffer> vert_buffers(context->state.vertex_uniform_buffers);
+    std::span<UniformBuffer> frag_buffers(context->state.fragment_uniform_buffers);
+    if (pre_vert && pre_vert->uniform_buffers) {
+        UniformBuffer *buffers = pre_vert->uniform_buffers.get(emuenv.mem);
+        if (buffers)
+            vert_buffers = { buffers, std::min<size_t>(pre_vert->buffer_count, gxm_vertex_program.renderer_data->uniform_buffer_sizes.size()) };
+    }
+    if (pre_frag && pre_frag->uniform_buffers) {
+        UniformBuffer *buffers = pre_frag->uniform_buffers.get(emuenv.mem);
+        if (buffers)
+            frag_buffers = { buffers, std::min<size_t>(pre_frag->buffer_count, gxm_fragment_program.renderer_data->uniform_buffer_sizes.size()) };
+    }
 
-    if (context->last_precomputed) {
-        // Need to re-set the data
-
-        renderer::set_program(*emuenv.renderer, context->renderer.get(), context->state.vertex_program, false);
-        renderer::set_program(*emuenv.renderer, context->renderer.get(), context->state.fragment_program, true);
+    if (context->last_precomputed || pre_vert || pre_frag) {
+        renderer::set_program(*emuenv.renderer, context->renderer.get(), vert_program_ptr, false);
+        renderer::set_program(*emuenv.renderer, context->renderer.get(), frag_program_ptr, true);
 
         context->last_precomputed = false;
     }
 
-    // set textures that are dirty
-    const gxp::TextureInfo vert_textures_sync = gxm_vertex_program.renderer_data->textures_used & context->is_vert_texture_dirty;
+    gxmSetUniformBuffers(*emuenv.renderer, emuenv.gxm, context, vertex_program_gxp, vert_buffers, gxm_vertex_program.renderer_data->uniform_buffer_sizes,
+        emuenv.mem);
+    gxmSetUniformBuffers(*emuenv.renderer, emuenv.gxm, context, fragment_program_gxp, frag_buffers, gxm_fragment_program.renderer_data->uniform_buffer_sizes,
+        emuenv.mem);
+
+    const gxp::TextureInfo vert_textures_sync = gxm_vertex_program.renderer_data->textures_used;
     context->is_vert_texture_dirty &= ~vert_textures_sync;
-    const gxp::TextureInfo frag_textures_sync = gxm_fragment_program.renderer_data->textures_used & context->is_frag_texture_dirty;
+    const gxp::TextureInfo frag_textures_sync = gxm_fragment_program.renderer_data->textures_used;
     context->is_frag_texture_dirty &= ~frag_textures_sync;
     const auto &textures = context->state.textures;
+    const SceGxmTexture *pre_vert_textures = pre_vert && pre_vert->textures ? pre_vert->textures.get(emuenv.mem) : nullptr;
+    const SceGxmTexture *pre_frag_textures = pre_frag && pre_frag->textures ? pre_frag->textures.get(emuenv.mem) : nullptr;
     for (uint16_t texture_index = 0; texture_index < SCE_GXM_MAX_TEXTURE_UNITS; texture_index++) {
         if (vert_textures_sync[texture_index]) {
             const uint16_t index_position = SCE_GXM_MAX_TEXTURE_UNITS + texture_index;
-            renderer::set_texture(*emuenv.renderer, context->renderer.get(), index_position, textures[index_position]);
+            const SceGxmTexture &texture = pre_vert_textures && texture_index < pre_vert->texture_count
+                ? pre_vert_textures[texture_index]
+                : textures[index_position];
+            renderer::set_texture(*emuenv.renderer, context->renderer.get(), index_position, texture);
         }
 
-        if (frag_textures_sync[texture_index])
-            renderer::set_texture(*emuenv.renderer, context->renderer.get(), texture_index, textures[texture_index]);
+        if (frag_textures_sync[texture_index]) {
+            const SceGxmTexture &texture = pre_frag_textures && texture_index < pre_frag->texture_count
+                ? pre_frag_textures[texture_index]
+                : textures[texture_index];
+            renderer::set_texture(*emuenv.renderer, context->renderer.get(), texture_index, texture);
+        }
     }
 
     // Update vertex data. We should stores a copy of the data to pass it to GPU later, since another scene
@@ -2482,6 +2521,7 @@ static int gxmDrawElementGeneral(EmuEnvState &emuenv, const char *export_name, c
         context->was_frag_default_uniform_reserved = false;
     }
 
+    context->last_precomputed = pre_vert || pre_frag;
     return 0;
 }
 
@@ -2522,25 +2562,40 @@ EXPORT(int, sceGxmDrawPrecomputed, SceGxmContext *context, SceGxmPrecomputedDraw
 
     // not sure if precomputed uses current program... maybe it does?
     // anyway states have to be made on a program to program basis so this should be safe
-    const Ptr<const SceGxmFragmentProgram> fragment_program_gptr = fragment_state ? fragment_state->program : context->state.fragment_program;
-    const Ptr<const SceGxmVertexProgram> vertex_program_gptr = vertex_state ? vertex_state->program : context->state.vertex_program;
+    const Ptr<const SceGxmFragmentProgram> fragment_program_gptr = fragment_state && fragment_state->program ? fragment_state->program : context->state.fragment_program;
+    const Ptr<const SceGxmVertexProgram> vertex_program_gptr = vertex_state && vertex_state->program ? vertex_state->program : context->state.vertex_program;
 
     const SceGxmFragmentProgram *fragment_program = fragment_program_gptr.get(emuenv.mem);
     const SceGxmVertexProgram *vertex_program = vertex_program_gptr.get(emuenv.mem);
 
-    if (!vertex_program || !fragment_program) {
+    if (!vertex_program || !fragment_program || !vertex_program->renderer_data || !fragment_program->renderer_data) {
         return RET_ERROR(SCE_GXM_ERROR_NULL_PROGRAM);
     }
+
+    // Set uniforms
+    const SceGxmProgram *vertex_program_gxp_ptr = vertex_program->program.get(emuenv.mem);
+    const SceGxmProgram *fragment_program_gxp_ptr = fragment_program->program.get(emuenv.mem);
+    if (!vertex_program_gxp_ptr || !fragment_program_gxp_ptr)
+        return RET_ERROR(SCE_GXM_ERROR_NULL_PROGRAM);
 
     renderer::set_program(*emuenv.renderer, context->renderer.get(), fragment_program_gptr, true);
     renderer::set_program(*emuenv.renderer, context->renderer.get(), vertex_program_gptr, false);
 
-    // Set uniforms
-    const SceGxmProgram &vertex_program_gxp = *vertex_program->program.get(emuenv.mem);
-    const SceGxmProgram &fragment_program_gxp = *fragment_program->program.get(emuenv.mem);
+    const SceGxmProgram &vertex_program_gxp = *vertex_program_gxp_ptr;
+    const SceGxmProgram &fragment_program_gxp = *fragment_program_gxp_ptr;
 
-    std::span<UniformBuffer> vertex_buffers = vertex_state ? std::span(vertex_state->uniform_buffers.get(emuenv.mem), vertex_state->buffer_count) : context->state.vertex_uniform_buffers;
-    std::span<UniformBuffer> fragment_buffers = fragment_state ? std::span(fragment_state->uniform_buffers.get(emuenv.mem), fragment_state->buffer_count) : context->state.fragment_uniform_buffers;
+    std::span<UniformBuffer> vertex_buffers(context->state.vertex_uniform_buffers);
+    std::span<UniformBuffer> fragment_buffers(context->state.fragment_uniform_buffers);
+    if (vertex_state && vertex_state->uniform_buffers) {
+        UniformBuffer *buffers = vertex_state->uniform_buffers.get(emuenv.mem);
+        if (buffers)
+            vertex_buffers = { buffers, std::min<size_t>(vertex_state->buffer_count, vertex_program->renderer_data->uniform_buffer_sizes.size()) };
+    }
+    if (fragment_state && fragment_state->uniform_buffers) {
+        UniformBuffer *buffers = fragment_state->uniform_buffers.get(emuenv.mem);
+        if (buffers)
+            fragment_buffers = { buffers, std::min<size_t>(fragment_state->buffer_count, fragment_program->renderer_data->uniform_buffer_sizes.size()) };
+    }
 
     gxmSetUniformBuffers(*emuenv.renderer, emuenv.gxm, context, vertex_program_gxp, vertex_buffers, vertex_program->renderer_data->uniform_buffer_sizes,
         emuenv.mem);
@@ -2567,16 +2622,23 @@ EXPORT(int, sceGxmDrawPrecomputed, SceGxmContext *context, SceGxmPrecomputedDraw
     context->is_vert_texture_dirty |= vert_textures_sync;
     const gxp::TextureInfo frag_textures_sync = fragment_program->renderer_data->textures_used;
     context->is_frag_texture_dirty |= frag_textures_sync;
-    const SceGxmTexture *frag_textures = fragment_state ? fragment_state->textures.get(emuenv.mem) : context->state.textures.data();
-    SceGxmTexture *vert_textures = vertex_state ? vertex_state->textures.get(emuenv.mem) : (context->state.textures.data() + SCE_GXM_MAX_TEXTURE_UNITS);
+    const SceGxmTexture *frag_textures = fragment_state && fragment_state->textures ? fragment_state->textures.get(emuenv.mem) : nullptr;
+    const SceGxmTexture *vert_textures = vertex_state && vertex_state->textures ? vertex_state->textures.get(emuenv.mem) : nullptr;
     for (uint16_t texture_index = 0; texture_index < SCE_GXM_MAX_TEXTURE_UNITS; texture_index++) {
         if (vert_textures_sync[texture_index]) {
             const uint16_t index_position = SCE_GXM_MAX_TEXTURE_UNITS + texture_index;
-            renderer::set_texture(*emuenv.renderer, context->renderer.get(), index_position, vert_textures[texture_index]);
+            const SceGxmTexture &texture = vert_textures && texture_index < vertex_state->texture_count
+                ? vert_textures[texture_index]
+                : context->state.textures[index_position];
+            renderer::set_texture(*emuenv.renderer, context->renderer.get(), index_position, texture);
         }
 
-        if (frag_textures_sync[texture_index])
-            renderer::set_texture(*emuenv.renderer, context->renderer.get(), texture_index, frag_textures[texture_index]);
+        if (frag_textures_sync[texture_index]) {
+            const SceGxmTexture &texture = frag_textures && texture_index < fragment_state->texture_count
+                ? frag_textures[texture_index]
+                : context->state.textures[texture_index];
+            renderer::set_texture(*emuenv.renderer, context->renderer.get(), texture_index, texture);
+        }
     }
 
     size_t max_data_length[SCE_GXM_MAX_VERTEX_STREAMS] = {};
