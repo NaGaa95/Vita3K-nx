@@ -44,6 +44,8 @@ QString restart_required_setting_label(config::RestartRequiredSetting setting) {
         return QCoreApplication::translate("SettingsDialogTooltips", "Vulkan Validation Layer");
     case config::RestartRequiredSetting::SpirvShader:
         return QCoreApplication::translate("SettingsDialogTooltips", "Direct SPIR-V");
+    case config::RestartRequiredSetting::FullPrecision:
+        return QCoreApplication::translate("SettingsDialogTooltips", "Full-precision Shaders");
     }
 
     return {};

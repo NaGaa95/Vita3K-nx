@@ -157,6 +157,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(bool, "turbo-mode", false, turbo_mode)                                                         \
     code(int, "gpu-idx", 0, gpu_idx)                                                                    \
     code(bool, "high-accuracy", false, high_accuracy)                                                   \
+    code(bool, "force-full-precision", false, force_full_precision)                                     \
     code(float, "resolution-multiplier", 1.0f, resolution_multiplier)                                   \
     code(bool, "disable-surface-sync", true, disable_surface_sync)                                      \
     code(std::string, "screen-filter", "Bilinear", screen_filter)                                       \

@@ -43,6 +43,7 @@ void copy_global_to_current(Config::CurrentConfig &current, const Config &cfg) {
     current.custom_driver_name = cfg.custom_driver_name;
 #endif
     current.high_accuracy = cfg.high_accuracy;
+    current.force_full_precision = cfg.force_full_precision;
     current.resolution_multiplier = cfg.resolution_multiplier;
     current.disable_surface_sync = cfg.disable_surface_sync;
     current.screen_filter = cfg.screen_filter;
@@ -93,6 +94,7 @@ void copy_current_to_global(Config &cfg, const Config::CurrentConfig &current) {
     cfg.custom_driver_name = current.custom_driver_name;
 #endif
     cfg.high_accuracy = current.high_accuracy;
+    cfg.force_full_precision = current.force_full_precision;
     cfg.resolution_multiplier = current.resolution_multiplier;
     cfg.disable_surface_sync = current.disable_surface_sync;
     cfg.screen_filter = current.screen_filter;
@@ -154,6 +156,7 @@ std::vector<RestartRequiredSetting> get_restart_required_settings(
     append_if_changed(before.audio_backend != after.audio_backend, RestartRequiredSetting::AudioBackend);
     append_if_changed(before.validation_layer != after.validation_layer, RestartRequiredSetting::ValidationLayer);
     append_if_changed(before.spirv_shader != after.spirv_shader, RestartRequiredSetting::SpirvShader);
+    append_if_changed(before.force_full_precision != after.force_full_precision, RestartRequiredSetting::FullPrecision);
 
     return changed;
 }
@@ -206,6 +209,7 @@ bool load_custom_config(Config::CurrentConfig &out, const fs::path &config_path,
         out.custom_driver_name = gpu.attribute("custom-driver-name").as_string();
 #endif
         out.high_accuracy = gpu.attribute("high-accuracy").as_bool();
+        out.force_full_precision = gpu.attribute("force-full-precision").as_bool();
         out.resolution_multiplier = gpu.attribute("resolution-multiplier").as_float();
         out.disable_surface_sync = gpu.attribute("disable-surface-sync").as_bool();
         out.screen_filter = gpu.attribute("screen-filter").as_string();
@@ -299,6 +303,7 @@ bool save_custom_config(const Config::CurrentConfig &cc, const fs::path &config_
     gpu_child.append_attribute("custom-driver-name") = cc.custom_driver_name.c_str();
 #endif
     gpu_child.append_attribute("high-accuracy") = cc.high_accuracy;
+    gpu_child.append_attribute("force-full-precision") = cc.force_full_precision;
     gpu_child.append_attribute("resolution-multiplier") = cc.resolution_multiplier;
     gpu_child.append_attribute("disable-surface-sync") = cc.disable_surface_sync;
     gpu_child.append_attribute("screen-filter") = cc.screen_filter.c_str();

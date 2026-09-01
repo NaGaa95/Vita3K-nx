@@ -516,7 +516,7 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
 
                 pa_iter_var = b.createBinOp(spv::OpFDiv, v4, pa_iter_var, res_multiplier);
             } else {
-                spv::Decoration precision = get_data_type_size(pa_dtype) < 4 ? spv::DecorationRelaxedPrecision : spv::NoPrecision;
+                spv::Decoration precision = get_data_type_size(pa_dtype) < 4 && !features.force_full_precision ? spv::DecorationRelaxedPrecision : spv::NoPrecision;
                 pa_iter_var = b.createVariable(precision, spv::StorageClassInput, pa_iter_type, pa_name.c_str());
                 b.addDecoration(pa_iter_var, spv::DecorationLocation, pa_loc);
 
@@ -772,7 +772,7 @@ static void create_fragment_inputs(spv::Builder &b, SpirvShaderParameters &param
                 target_to_store.type = DataType::F32;
         }
 
-        spv::Decoration precision = get_data_type_size(target_to_store.type) < 4 ? spv::DecorationRelaxedPrecision : spv::NoPrecision;
+        spv::Decoration precision = get_data_type_size(target_to_store.type) < 4 && !features.force_full_precision ? spv::DecorationRelaxedPrecision : spv::NoPrecision;
         if (target_to_store.type == DataType::INT16 || target_to_store.type == DataType::UINT16)
             // a F16 cannot hold a INT16 or UINT16
             precision = spv::NoPrecision;
@@ -1593,7 +1593,7 @@ static spv::Function *make_frag_finalize_function(spv::Builder &b, const SpirvSh
             color_val_operand.type = DataType::F32;
     }
 
-    spv::Decoration precision = get_data_type_size(color_val_operand.type) < 4 ? spv::DecorationRelaxedPrecision : spv::NoPrecision;
+    spv::Decoration precision = get_data_type_size(color_val_operand.type) < 4 && !features.force_full_precision ? spv::DecorationRelaxedPrecision : spv::NoPrecision;
     if (color_val_operand.type == DataType::INT16 || color_val_operand.type == DataType::UINT16)
         // a F16 cannot hold a INT16 or UINT16
         precision = spv::NoPrecision;

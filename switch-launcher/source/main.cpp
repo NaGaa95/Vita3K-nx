@@ -387,6 +387,7 @@ static const Opt S_graphics[] = {
   O_CHOICE("Resolution scale",        "resolution-multiplier",      C_resmult, "1.0"),
   O_CHOICE("Memory mapping",          "memory-mapping",             C_memmap,  "external-host"),
   O_CHOICE("High accuracy",           "high-accuracy",              C_bool,    "false"),
+  O_CHOICE("Full-precision shaders",  "force-full-precision",       C_bool,    "false"),
   O_CHOICE("Screen filter",           "screen-filter",              C_filter,  "Bilinear"),
   O_CHOICE("FSR sharpness",           "fsr-sharpness",              C_fsrSharpness, "0.2"),
   O_CHOICE("Stretch to screen",       "stretch_the_display_area",   C_bool,    "false"),
@@ -2173,6 +2174,7 @@ static int choiceIdx(const Opt &o) {
 static bool isVulkanOnlyOption(const Opt &o) {
   if (!o.key) return false;
   return !strcmp(o.key,"memory-mapping") || !strcmp(o.key,"high-accuracy") ||
+         !strcmp(o.key,"force-full-precision") ||
          !strcmp(o.key,"async-pipeline-compilation") || !strcmp(o.key,"fsr-sharpness") ||
          !strncmp(o.key,"switch-lsfg-",12);
 }
@@ -2267,6 +2269,7 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"resolution-multiplier","Graphics","Scales the Vita render resolution. Higher values sharpen the image but increase GPU and memory cost."},
   {"memory-mapping","Compatibility","Selects how Vulkan sees Vita GPU memory. External host maps the Vita's own memory straight to the GPU (fastest, default). Double buffer keeps a checked copy instead. Disabled turns mapping off entirely, which some games need."},
   {"high-accuracy","Compatibility","Uses more accurate GPU behavior for games that render incorrectly, at a possible performance cost."},
+  {"force-full-precision","Compatibility","Uses full precision for Vulkan shader inputs and outputs. It may fix rendering errors at a performance cost."},
   {"screen-filter","Graphics","Chooses the final image scaling filter. Nearest is sharp, Bilinear is inexpensive, and advanced filters cost more GPU time."},
   {"fsr-sharpness","Graphics","Adjusts FSR sharpening: 0.0 is strongest, 2.0 is softer. The default is 0.2. Requires Vulkan and the FSR screen filter."},
   {"stretch_the_display_area","Graphics","Fills the whole screen instead of preserving the Vita 16:9.4 aspect. The image is distorted, and touch coordinates follow the stretched area."},

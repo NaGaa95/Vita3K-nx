@@ -16,6 +16,7 @@ class EmulatorConfig {
     // GPU
     @JvmField var backendRenderer: String = "Vulkan"
     @JvmField var highAccuracy: Boolean = false
+    @JvmField var forceFullPrecision: Boolean = false
     @JvmField var resolutionMultiplier: Float = 1.0f
     @JvmField var disableSurfaceSync: Boolean = true
     @JvmField var screenFilter: String = "Bilinear"
@@ -103,6 +104,7 @@ class EmulatorConfig {
         config.cpuOpt = cpuOpt
         config.backendRenderer = backendRenderer
         config.highAccuracy = highAccuracy
+        config.forceFullPrecision = forceFullPrecision
         config.resolutionMultiplier = resolutionMultiplier
         config.disableSurfaceSync = disableSurfaceSync
         config.screenFilter = screenFilter
@@ -182,6 +184,7 @@ class EmulatorConfig {
             cpuOpt == other.cpuOpt &&
             backendRenderer == other.backendRenderer &&
             highAccuracy == other.highAccuracy &&
+            forceFullPrecision == other.forceFullPrecision &&
             resolutionMultiplier == other.resolutionMultiplier &&
             disableSurfaceSync == other.disableSurfaceSync &&
             screenFilter == other.screenFilter &&
@@ -258,6 +261,7 @@ class EmulatorConfig {
         result = 31 * result + cpuOpt.hashCode()
         result = 31 * result + backendRenderer.hashCode()
         result = 31 * result + highAccuracy.hashCode()
+        result = 31 * result + forceFullPrecision.hashCode()
         result = 31 * result + resolutionMultiplier.hashCode()
         result = 31 * result + disableSurfaceSync.hashCode()
         result = 31 * result + screenFilter.hashCode()

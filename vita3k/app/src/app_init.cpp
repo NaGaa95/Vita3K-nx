@@ -235,6 +235,9 @@ static Config::CurrentConfig get_runtime_current_config_after_save(
         case config::RestartRequiredSetting::SpirvShader:
             runtime_current.spirv_shader = previous_current.spirv_shader;
             break;
+        case config::RestartRequiredSetting::FullPrecision:
+            runtime_current.force_full_precision = previous_current.force_full_precision;
+            break;
         }
     }
 

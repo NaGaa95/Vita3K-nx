@@ -1185,6 +1185,7 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
     }
 
     features.enable_memory_mapping = mapping_method != MappingMethod::Disabled;
+    features.force_full_precision = cfg.current_config.force_full_precision;
 
 #ifdef __ANDROID__
     if (mapping_method == MappingMethod::NativeBuffer) {
@@ -1496,7 +1497,8 @@ uint32_t VKState::get_features_mask() {
         | (uint32_t(features.direct_fragcolor) << 7)
         | (uint32_t(features.support_texture_barrier) << 8)
         | (uint32_t(features.support_unknown_format) << 9)
-        | (uint32_t(features.support_clip_distance) << 10);
+        | (uint32_t(features.support_clip_distance) << 10)
+        | (uint32_t(features.force_full_precision) << 11);
 }
 
 int VKState::get_supported_filters() {

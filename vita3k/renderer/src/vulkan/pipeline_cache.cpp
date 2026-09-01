@@ -567,7 +567,7 @@ vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmPro
     const std::string hash_text = hex_string(hash);
 
     LOG_INFO("Generating vulkan spv shader {}", hash_text);
-    const std::string shader_version = fmt::format("vk{}", shader::CURRENT_VERSION);
+    const std::string shader_version = fmt::format("vk{}-fp{}", shader::CURRENT_VERSION, state.features.force_full_precision ? 1 : 0);
 
     shader::usse::SpirvCode source = load_spirv_shader(*program, state.features, true, hints, maskupdate, state.shaders_path, state.shaders_log_path, shader_version, true, state.shader_debug_dump);
 
@@ -1151,7 +1151,7 @@ vk::ShaderModule PipelineCache::precompile_shader(const Sha256Hash &hash, bool s
 
     Sha256Hash shader_hash;
     memcpy(shader_hash.data(), hash.data(), sizeof(Sha256Hash));
-    const std::string shader_file_name = fmt::format("vk{}-{}.spv", shader::CURRENT_VERSION, hex_string(shader_hash));
+    const std::string shader_file_name = fmt::format("vk{}-fp{}-{}.spv", shader::CURRENT_VERSION, state.features.force_full_precision ? 1 : 0, hex_string(shader_hash));
     const std::vector<uint32_t> source = renderer::pre_load_shader_spirv(state.shaders_path / shader_file_name);
 
     if (source.empty())

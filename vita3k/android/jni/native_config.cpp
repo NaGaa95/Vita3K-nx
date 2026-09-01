@@ -45,6 +45,7 @@ struct EmulatorConfigFields {
     jfieldID cpuOpt = nullptr;
     jfieldID backendRenderer = nullptr;
     jfieldID highAccuracy = nullptr;
+    jfieldID forceFullPrecision = nullptr;
     jfieldID resolutionMultiplier = nullptr;
     jfieldID disableSurfaceSync = nullptr;
     jfieldID screenFilter = nullptr;
@@ -130,6 +131,7 @@ EmulatorConfigFields resolve_config_fields(JNIEnv *env) {
     fields.cpuOpt = env->GetFieldID(fields.cls, "cpuOpt", "Z");
     fields.backendRenderer = env->GetFieldID(fields.cls, "backendRenderer", "Ljava/lang/String;");
     fields.highAccuracy = env->GetFieldID(fields.cls, "highAccuracy", "Z");
+    fields.forceFullPrecision = env->GetFieldID(fields.cls, "forceFullPrecision", "Z");
     fields.resolutionMultiplier = env->GetFieldID(fields.cls, "resolutionMultiplier", "F");
     fields.disableSurfaceSync = env->GetFieldID(fields.cls, "disableSurfaceSync", "Z");
     fields.screenFilter = env->GetFieldID(fields.cls, "screenFilter", "Ljava/lang/String;");
@@ -302,6 +304,7 @@ void fill_config_object(JNIEnv *env, jobject obj, const EmulatorConfigFields &fi
         env->DeleteLocalRef(value);
     }
     env->SetBooleanField(obj, fields.highAccuracy, current_config.high_accuracy);
+    env->SetBooleanField(obj, fields.forceFullPrecision, current_config.force_full_precision);
     env->SetFloatField(obj, fields.resolutionMultiplier, current_config.resolution_multiplier);
     env->SetBooleanField(obj, fields.disableSurfaceSync, current_config.disable_surface_sync);
     {
@@ -440,6 +443,7 @@ void read_config_object(JNIEnv *env, jobject obj, const EmulatorConfigFields &fi
         }
     }
     current_config.high_accuracy = env->GetBooleanField(obj, fields.highAccuracy) != JNI_FALSE;
+    current_config.force_full_precision = env->GetBooleanField(obj, fields.forceFullPrecision) != JNI_FALSE;
     current_config.resolution_multiplier = env->GetFloatField(obj, fields.resolutionMultiplier);
     current_config.disable_surface_sync = env->GetBooleanField(obj, fields.disableSurfaceSync) != JNI_FALSE;
     {

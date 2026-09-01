@@ -75,6 +75,7 @@ struct Config {
         std::string custom_driver_name{};
 #endif
         bool high_accuracy = false;
+        bool force_full_precision = false;
         float resolution_multiplier = 1.0f;
         bool disable_surface_sync = false;
         std::string screen_filter = "Bilinear";

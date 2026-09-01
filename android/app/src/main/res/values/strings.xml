@@ -410,6 +410,7 @@
     <string name="settings_gpu_shader_cache_desc">Enable shader caching. Reduces stuttering on subsequent runs.</string>
     <string name="settings_gpu_spirv_shader">Use SPIR-V Shader (deprecated)</string>
     <string name="settings_gpu_spirv_shader_desc">Pass generated Spir-V shader directly to driver.\nNote that some beneficial extensions will be disabled, and not all GPUs are compatible with this.</string>
+    <string name="settings_gpu_full_precision">Full-precision Shaders</string>
     <string name="settings_gpu_memory_mapping">Memory Mapping</string>
     <string name="settings_gpu_memory_mapping_desc">Memory mapping improved performance, reduces memory usage and fixes many graphical issues. However, it may be unstable on some GPUs.</string>
     <string name="settings_gpu_custom_driver">Custom GPU Driver</string>
