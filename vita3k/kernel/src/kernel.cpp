@@ -58,6 +58,24 @@ struct ThreadParams {
     SDL_Semaphore *host_may_destroy_params = nullptr;
 };
 
+namespace {
+thread_local SceUID current_thread_id = SCE_KERNEL_ERROR_ILLEGAL_THREAD_ID;
+thread_local ThreadStatePtr current_thread;
+
+class CurrentThreadScope {
+public:
+    CurrentThreadScope(SceUID id, const ThreadStatePtr &thread) {
+        current_thread_id = id;
+        current_thread = thread;
+    }
+
+    ~CurrentThreadScope() {
+        current_thread_id = SCE_KERNEL_ERROR_ILLEGAL_THREAD_ID;
+        current_thread.reset();
+    }
+};
+} // namespace
+
 static int SDLCALL thread_function(void *data) {
     assert(data != nullptr);
     const ThreadParams params = *static_cast<const ThreadParams *>(data);
@@ -81,8 +99,12 @@ static int SDLCALL thread_function(void *data) {
     }
 #endif
 
-    thread->run_loop();
-    const uint32_t r0 = read_reg(*thread->cpu, 0);
+    uint32_t r0;
+    {
+        const CurrentThreadScope current(params.thid, thread);
+        thread->run_loop();
+        r0 = read_reg(*thread->cpu, 0);
+    }
 
     {
         std::lock_guard<std::mutex> lock(params.kernel->mutex);
@@ -150,6 +172,8 @@ void KernelState::invalidate_jit_cache(Address start, size_t length) {
 }
 
 ThreadStatePtr KernelState::get_thread(SceUID thread_id) {
+    if (thread_id == current_thread_id && current_thread)
+        return current_thread;
     return lock_and_find(thread_id, threads, mutex);
 }
 
