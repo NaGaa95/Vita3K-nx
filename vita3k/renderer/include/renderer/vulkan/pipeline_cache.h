@@ -78,11 +78,9 @@ private:
 
     vk::PipelineCache pipeline_cache;
 
-    // first index: 0 if color is backed by memory, 1 otherwise
-    // second index: 1 if depth-stencil is force loaded, 0 otherwise
-    // third index: 1 if depth-stencil is force stored, 0 otherwise
-    std::map<vk::Format, vk::RenderPass> render_passes[2][2][2];
-    std::map<vk::Format, vk::RenderPass> render_passes_with_raw[2][2];
+    // [color transient][depth load][stencil load][store]
+    std::map<vk::Format, vk::RenderPass> render_passes[2][2][2][2];
+    std::map<vk::Format, vk::RenderPass> render_passes_with_raw[2][2][2];
     std::set<VkRenderPass> raw_attachment_passes;
     // render passes used along shader interlock
     std::map<vk::Format, vk::RenderPass> shader_interlock_pass;
@@ -131,7 +129,7 @@ public:
     void read_pipeline_cache();
     void save_pipeline_cache();
 
-    vk::RenderPass retrieve_render_pass(vk::Format format, bool force_load, bool force_store, bool is_color_transient, bool no_color = false, bool has_raw_attachment = false);
+    vk::RenderPass retrieve_render_pass(vk::Format format, bool depth_load, bool stencil_load, bool force_store, bool is_color_transient, bool no_color = false, bool has_raw_attachment = false);
     bool render_pass_has_raw_attachment(vk::RenderPass pass) const {
         return raw_attachment_passes.count(static_cast<VkRenderPass>(pass)) > 0;
     }

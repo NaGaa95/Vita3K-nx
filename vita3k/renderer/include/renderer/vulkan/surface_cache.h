@@ -157,12 +157,17 @@ struct DepthStencilSurfaceCacheInfo : public SurfaceCacheInfo {
     uint32_t stride_samples;
     SceGxmMultisampleMode multisample_mode;
 
+    bool depth_content_stored = true;
+    Address last_scene_color_addr = 0;
+
     // used when reading from this depth stencil in a shader with texture viewport enabled
     vk::ImageView depth_view = nullptr;
     vk::ImageView stencil_view = nullptr;
 
     // used when texture viewport is not enabled
     std::vector<DepthSurfaceView> read_surfaces;
+
+    std::unique_ptr<vkutil::Image> sample_rate_copy;
 };
 
 // result when looking in the surface cache for a texture
@@ -219,6 +224,8 @@ private:
 
     VKRenderTarget *target = nullptr;
     ColorSurfaceCacheInfo *last_written_surface = nullptr;
+    DepthStencilSurfaceCacheInfo *pending_ds_scene = nullptr;
+    bool pending_ds_scene_stores = false;
 
     // destroy all framebuffers using view as their color or depth-stencil
     void destroy_framebuffers(vk::ImageView view);
@@ -257,6 +264,9 @@ public:
     std::optional<TextureLookupResult> retrieve_color_surface_as_texture(const SceGxmTexture &texture, const SceGxmColorBaseFormat base_format, TextureViewport *texture_viewport, bool allow_raw_bits = false);
 
     SurfaceRetrieveResult retrieve_depth_stencil_for_framebuffer(SceGxmDepthStencilSurface *depth_stencil, const uint32_t width, const uint32_t height);
+    bool begin_ds_scene_depth_check(const SceGxmDepthStencilSurface &depth_stencil, bool this_scene_stores, Address scene_color_addr);
+    void resolve_ds_scene_end(bool scene_wrote_depth);
+    bool try_transfer_depth_gpu(Address src_address, Address dst_address, uint32_t width, uint32_t height);
 
     bool color_surface_has_raw_alias(Address address) const {
         const auto it = color_address_lookup.find(address);

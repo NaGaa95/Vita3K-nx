@@ -196,6 +196,9 @@ void VKContext::wait_thread_function(const MemState &mem) {
 }
 
 void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const FeatureState &features) {
+    context.state.surface_cache.resolve_ds_scene_end(context.scene_wrote_depth);
+    context.scene_wrote_depth = false;
+
     context.render_target = rt;
     context.scene_timestamp++;
     context.state.texture_cache.current_scene_timestamp = context.scene_timestamp;
@@ -251,9 +254,7 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
         refresh_viewport_and_clipping(context);
 
     SceGxmDepthStencilSurface *ds_surface_fin = &context.record.depth_stencil_surface;
-    // if the depth-stencil buffer is not backed by memory or we don't read nor write it to memory, use the transient attachment instead
-    if ((!ds_surface_fin->depth_data && !ds_surface_fin->stencil_data)
-        || (!ds_surface_fin->force_load && !ds_surface_fin->force_store)) {
+    if (!ds_surface_fin->depth_data && !ds_surface_fin->stencil_data) {
         ds_surface_fin = nullptr;
     }
 
@@ -269,14 +270,23 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
         force_load = false;
         force_store = false;
     }
-    if (ds_surface_fin != nullptr || context.state.features.support_shader_interlock)
-        // Preserve depth-stencil across render passes even without guest readback.
-        force_store = true;
+    // GXM force_store controls guest writeback, not render-pass preservation.
+    force_store = true;
+
+    bool depth_load = force_load;
+    const bool stencil_load = force_load;
+    if (ds_surface_fin != nullptr) {
+        const bool game_stores = context.record.depth_stencil_surface.force_store;
+        const bool depth_content_valid = state.surface_cache.begin_ds_scene_depth_check(
+            *ds_surface_fin, game_stores, context.record.color_surface.data.address());
+        if (game_stores && !depth_content_valid)
+            depth_load = false;
+    }
     const bool color_has_raw = state.surface_cache.color_surface_has_raw_alias(context.record.color_surface.data.address());
-    context.current_render_pass = context.state.pipeline_cache.retrieve_render_pass(vk_format, force_load, force_store, color_surface_fin == nullptr, false, color_has_raw);
+    context.current_render_pass = context.state.pipeline_cache.retrieve_render_pass(vk_format, depth_load, stencil_load, force_store, color_surface_fin == nullptr, false, color_has_raw);
     if (context.state.features.support_shader_interlock)
         // also retrieve / create the shader interlock pass
-        context.current_shader_interlock_pass = context.state.pipeline_cache.retrieve_render_pass(vk_format, true, true, color_surface_fin == nullptr, true);
+        context.current_shader_interlock_pass = context.state.pipeline_cache.retrieve_render_pass(vk_format, true, true, true, color_surface_fin == nullptr, true);
 
     Framebuffer &framebuffer = state.surface_cache.retrieve_framebuffer_handle(mem, color_surface_fin, ds_surface_fin, context.current_render_pass,
         context.current_shader_interlock_pass, context.current_color_view, context.current_color_storage_view, context.current_ds_view);
@@ -691,7 +701,7 @@ void VKContext::check_for_macroblock_change(bool is_draw) {
         // TODO: with the feedback loop extension we can do better
         ignore_macroblock = true;
         // in this case we must load and store the depth stencil each time
-        current_render_pass = state.pipeline_cache.retrieve_render_pass(current_color_format, true, true, !record.color_surface.data, false,
+        current_render_pass = state.pipeline_cache.retrieve_render_pass(current_color_format, true, true, true, !record.color_surface.data, false,
             state.surface_cache.color_surface_has_raw_alias(record.color_surface.data.address()));
     }
 

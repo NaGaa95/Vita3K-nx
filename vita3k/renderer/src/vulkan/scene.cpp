@@ -362,7 +362,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         && (context.state.features.support_shader_interlock || context.ignore_macroblock
             || !context.render_target->has_macroblock_sync)) {
         // update the render pass to load and store the depth and stencil
-        context.current_render_pass = context.state.pipeline_cache.retrieve_render_pass(context.current_color_format, true, true, !context.record.color_surface.data, false,
+        context.current_render_pass = context.state.pipeline_cache.retrieve_render_pass(context.current_color_format, true, true, true, !context.record.color_surface.data, false,
             context.state.surface_cache.color_surface_has_raw_alias(context.record.color_surface.data.address()));
         context.is_first_scene_draw = false;
     }
@@ -557,6 +557,8 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
 
     context.render_cmd.drawIndexed(count, instance_count, 0, 0, 0);
     if (count && instance_count) {
+        if (context.record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED)
+            context.scene_wrote_depth = true;
         context.state.surface_cache.mark_surface_written(context.record.color_surface.data.address(),
             context.state.pipeline_cache.render_pass_has_raw_attachment(context.curr_renderpass_info.renderPass));
     }

@@ -256,6 +256,9 @@ void VKSurfaceCache::create_raw_alias(ColorSurfaceCacheInfo &info) {
 void VKSurfaceCache::destroy_surface(DepthStencilSurfaceCacheInfo &info) {
     vkutil::DestroyQueue &destroy_queue = state.frame().destroy_queue;
 
+    if (pending_ds_scene == &info)
+        pending_ds_scene = nullptr;
+
     for (auto &read_only : info.read_surfaces) {
         destroy_queue.add_image(read_only.stencil_view);
         destroy_queue.add_image(read_only.depth_view);
@@ -267,6 +270,12 @@ void VKSurfaceCache::destroy_surface(DepthStencilSurfaceCacheInfo &info) {
 
     destroy_framebuffers(info.texture.view);
     destroy_queue.add_image(info.texture);
+
+    if (info.sample_rate_copy) {
+        destroy_framebuffers(info.sample_rate_copy->view);
+        destroy_queue.add_image(*info.sample_rate_copy);
+        info.sample_rate_copy.reset();
+    }
 }
 
 void VKSurfaceCache::ensure_reinterpret_pipeline() {
@@ -1207,6 +1216,41 @@ static int32_t ds_rows_allocated(SurfaceTiling tiling, int32_t memory_height) {
     return (tiling == SurfaceTiling::Tiled) ? align(memory_height, 32) : memory_height;
 }
 
+static bool ds_format_has_stencil(vk::Format format) {
+    return format == vk::Format::eD16UnormS8Uint
+        || format == vk::Format::eD24UnormS8Uint
+        || format == vk::Format::eD32SfloatS8Uint;
+}
+
+bool VKSurfaceCache::begin_ds_scene_depth_check(const SceGxmDepthStencilSurface &depth_stencil,
+    bool this_scene_stores, Address scene_color_addr) {
+    DepthStencilSurfaceCacheInfo *cached_info = nullptr;
+    if (depth_stencil.depth_data) {
+        const auto it = depth_address_lookup.find(depth_stencil.depth_data.address());
+        if (it != depth_address_lookup.end())
+            cached_info = it->second;
+    } else if (depth_stencil.stencil_data) {
+        const auto it = stencil_address_lookup.find(depth_stencil.stencil_data.address());
+        if (it != stencil_address_lookup.end())
+            cached_info = it->second;
+    }
+
+    pending_ds_scene = cached_info;
+    pending_ds_scene_stores = this_scene_stores;
+    if (!cached_info)
+        return true;
+
+    const bool is_continuation = cached_info->last_scene_color_addr == scene_color_addr;
+    cached_info->last_scene_color_addr = scene_color_addr;
+    return cached_info->depth_content_stored || is_continuation;
+}
+
+void VKSurfaceCache::resolve_ds_scene_end(bool scene_wrote_depth) {
+    if (pending_ds_scene && scene_wrote_depth)
+        pending_ds_scene->depth_content_stored = pending_ds_scene_stores;
+    pending_ds_scene = nullptr;
+}
+
 SurfaceRetrieveResult VKSurfaceCache::retrieve_depth_stencil_for_framebuffer(SceGxmDepthStencilSurface *depth_stencil, const uint32_t width, const uint32_t height) {
     // when writing we use the render target size which is already upscaled
     int32_t memory_width = static_cast<int32_t>(width / state.res_multiplier);
@@ -1237,16 +1281,87 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_depth_stencil_for_framebuffer(Sce
         // this the most recently used depth-stencil surface
         ds_surface_queue.set_as_mru(cached_info);
 
-        bool need_remake = cached_info->texture.width < width
+        const bool need_remake = cached_info->texture.width < width
             || cached_info->texture.height < height
             || cached_info->stride_samples != depth_stencil->get_stride()
             || cached_info->tiling != tiling;
 
-        if (!need_remake)
+        if (!need_remake) {
+            VKContext *context = static_cast<VKContext *>(state.context);
+            uint32_t scale_x = 1;
+            uint32_t scale_y = 1;
+            if (target->multisample_mode != SCE_GXM_MULTISAMPLE_NONE && context
+                && context->record.color_surface.downscale && !depth_stencil->force_store) {
+                scale_y = 2;
+                if (target->multisample_mode == SCE_GXM_MULTISAMPLE_4X)
+                    scale_x = 2;
+            }
+
+            vkutil::Image &full = cached_info->texture;
+            const uint32_t source_width = width * scale_x;
+            const uint32_t source_height = height * scale_y;
+            const auto format_features = state.physical_device.getFormatProperties(full.format).optimalTilingFeatures;
+            const auto required_features = vk::FormatFeatureFlagBits::eBlitSrc | vk::FormatFeatureFlagBits::eBlitDst;
+            const bool can_blit = (format_features & required_features) == required_features;
+
+            if ((scale_x > 1 || scale_y > 1) && can_blit && full.image
+                && full.width >= source_width && full.height >= source_height) {
+                if (!cached_info->sample_rate_copy
+                    || cached_info->sample_rate_copy->width != width
+                    || cached_info->sample_rate_copy->height != height
+                    || cached_info->sample_rate_copy->format != full.format) {
+                    if (cached_info->sample_rate_copy) {
+                        destroy_framebuffers(cached_info->sample_rate_copy->view);
+                        state.frame().destroy_queue.add_image(*cached_info->sample_rate_copy);
+                    }
+                    cached_info->sample_rate_copy = std::make_unique<vkutil::Image>(width, height, full.format);
+                    cached_info->sample_rate_copy->init_image(vk::ImageUsageFlagBits::eDepthStencilAttachment
+                        | vk::ImageUsageFlagBits::eTransferDst | vk::ImageUsageFlagBits::eTransferSrc
+                        | vk::ImageUsageFlagBits::eSampled);
+                }
+
+                vkutil::Image &resampled = *cached_info->sample_rate_copy;
+                vk::CommandBuffer command_buffer = context->prerender_cmd;
+                const vk::ImageSubresourceRange &range = ds_format_has_stencil(full.format)
+                    ? vkutil::ds_subresource_range
+                    : vkutil::d_subresource_range;
+                full.transition_to(command_buffer, vkutil::ImageLayout::TransferSrc, range);
+                resampled.transition_to_discard(command_buffer, vkutil::ImageLayout::TransferDst, range);
+
+                const std::array<vk::Offset3D, 2> source_bounds{
+                    vk::Offset3D{ 0, 0, 0 },
+                    vk::Offset3D{ static_cast<int32_t>(source_width - (scale_x - 1)),
+                        static_cast<int32_t>(source_height - (scale_y - 1)), 1 }
+                };
+                const std::array<vk::Offset3D, 2> destination_bounds{
+                    vk::Offset3D{ 0, 0, 0 },
+                    vk::Offset3D{ static_cast<int32_t>(width), static_cast<int32_t>(height), 1 }
+                };
+                const auto blit_aspect = [&](vk::ImageAspectFlagBits aspect) {
+                    const vk::ImageSubresourceLayers layers{ aspect, 0, 0, 1 };
+                    const vk::ImageBlit region{
+                        .srcSubresource = layers,
+                        .srcOffsets = source_bounds,
+                        .dstSubresource = layers,
+                        .dstOffsets = destination_bounds
+                    };
+                    command_buffer.blitImage(full.image, vk::ImageLayout::eTransferSrcOptimal,
+                        resampled.image, vk::ImageLayout::eTransferDstOptimal, region, vk::Filter::eNearest);
+                };
+                blit_aspect(vk::ImageAspectFlagBits::eDepth);
+                if (ds_format_has_stencil(full.format))
+                    blit_aspect(vk::ImageAspectFlagBits::eStencil);
+
+                full.transition_to(command_buffer, vkutil::ImageLayout::DepthStencilReadOnly, range);
+                resampled.transition_to(command_buffer, vkutil::ImageLayout::DepthStencilReadOnly, range);
+                return { resampled.view, &resampled };
+            }
+
             return {
                 cached_info->texture.view,
                 &cached_info->texture
             };
+        }
     } else {
         // retrieve a new depth stencil
         cached_info = ds_surface_queue.get_lru();
@@ -1273,6 +1388,8 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_depth_stencil_for_framebuffer(Sce
     cached_info->multisample_mode = target->multisample_mode;
     cached_info->stride_samples = depth_stencil->get_stride();
     cached_info->tiling = tiling;
+    cached_info->depth_content_stored = true;
+    cached_info->last_scene_color_addr = 0;
 
     uint32_t bytes_per_sample;
     switch (depth_stencil->get_format()) {
@@ -1312,6 +1429,84 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_depth_stencil_for_framebuffer(Sce
         image.view,
         &image
     };
+}
+
+bool VKSurfaceCache::try_transfer_depth_gpu(Address src_address, Address dst_address, uint32_t width, uint32_t height) {
+    if (src_address == dst_address)
+        return false;
+
+    const auto src_it = depth_address_lookup.find(src_address);
+    const auto dst_it = depth_address_lookup.find(dst_address);
+    if (src_it == depth_address_lookup.end() || dst_it == depth_address_lookup.end())
+        return false;
+    if (color_address_lookup.contains(src_address) || color_address_lookup.contains(dst_address))
+        return false;
+
+    DepthStencilSurfaceCacheInfo *src_info = src_it->second;
+    DepthStencilSurfaceCacheInfo *dst_info = dst_it->second;
+    if (!src_info || !dst_info || src_info == dst_info)
+        return false;
+    if (!src_info->texture.image || !dst_info->texture.image)
+        return false;
+
+    const uint32_t scaled_width = static_cast<uint32_t>(width * state.res_multiplier);
+    const uint32_t scaled_height = static_cast<uint32_t>(height * state.res_multiplier);
+    const uint32_t copy_width = std::min({ scaled_width, src_info->texture.width, dst_info->texture.width });
+    const uint32_t copy_height = std::min({ scaled_height, src_info->texture.height, dst_info->texture.height });
+    if (copy_width == 0 || copy_height == 0)
+        return false;
+
+    vk::CommandBuffer transfer_cmd = nullptr;
+    const vk::Fence fence = state.device.createFence({});
+    {
+        const std::lock_guard<std::mutex> lock(state.multithread_pool_mutex);
+        transfer_cmd = vkutil::create_single_time_command(state.device, state.multithread_command_pool);
+
+        const vk::ImageSubresourceRange &range = ds_format_has_stencil(src_info->texture.format)
+            ? vkutil::ds_subresource_range
+            : vkutil::d_subresource_range;
+        src_info->texture.transition_to(transfer_cmd, vkutil::ImageLayout::TransferSrc, range);
+        dst_info->texture.transition_to_discard(transfer_cmd, vkutil::ImageLayout::TransferDst, range);
+
+        const auto copy_aspect = [&](vk::ImageAspectFlagBits aspect) {
+            const vk::ImageSubresourceLayers layers{ aspect, 0, 0, 1 };
+            const vk::ImageCopy image_copy{
+                .srcSubresource = layers,
+                .srcOffset = { 0, 0, 0 },
+                .dstSubresource = layers,
+                .dstOffset = { 0, 0, 0 },
+                .extent = { copy_width, copy_height, 1 }
+            };
+            transfer_cmd.copyImage(src_info->texture.image, vk::ImageLayout::eTransferSrcOptimal,
+                dst_info->texture.image, vk::ImageLayout::eTransferDstOptimal, image_copy);
+        };
+        copy_aspect(vk::ImageAspectFlagBits::eDepth);
+        if (ds_format_has_stencil(src_info->texture.format))
+            copy_aspect(vk::ImageAspectFlagBits::eStencil);
+
+        src_info->texture.transition_to(transfer_cmd, vkutil::ImageLayout::DepthStencilReadOnly, range);
+        dst_info->texture.transition_to(transfer_cmd, vkutil::ImageLayout::DepthStencilReadOnly, range);
+        transfer_cmd.end();
+    }
+
+    vk::SubmitInfo submit_info{};
+    submit_info.setCommandBuffers(transfer_cmd);
+    state.submit_general(submit_info, fence, "depth transfer submission");
+
+    dst_info->depth_content_stored = true;
+
+    CallbackRequestFunction cleanup = [&state = this->state, fence, transfer_cmd]() {
+        const vk::Result result = state.device.waitForFences(fence, vk::True, std::numeric_limits<uint64_t>::max());
+        if (result != vk::Result::eSuccess)
+            LOG_ERROR("Could not wait for the depth transfer fence.");
+
+        state.device.destroyFence(fence);
+
+        const std::lock_guard<std::mutex> lock(state.multithread_pool_mutex);
+        state.device.freeCommandBuffers(state.multithread_command_pool, transfer_cmd);
+    };
+    state.request_queue.push(CallbackRequest{ new CallbackRequestFunction(std::move(cleanup)) });
+    return true;
 }
 
 std::optional<TextureLookupResult> VKSurfaceCache::retrieve_depth_stencil_as_texture(const SceGxmTexture &texture, TextureViewport *texture_viewport) {
