@@ -36,14 +36,14 @@
 #include <unistd.h>
 #endif
 
+#include <atomic>
 #include <cassert>
+#include <chrono>
 #include <iostream>
 #include <iterator>
 #include <string>
 
 #ifdef __SWITCH__
-#include <atomic>
-#include <chrono>
 #include <thread>
 #endif
 
@@ -127,7 +127,8 @@ static bool is_valid_output_path(const VitaIoDevice device) {
     return !(device == VitaIoDevice::savedata0 || device == VitaIoDevice::savedata1 || device == VitaIoDevice::app0
         || device == VitaIoDevice::_INVALID || device == VitaIoDevice::addcont0 || device == VitaIoDevice::tty0
         || device == VitaIoDevice::tty1 || device == VitaIoDevice::tty2 || device == VitaIoDevice::tty3
-        || device == VitaIoDevice::music0 || device == VitaIoDevice::photo0 || device == VitaIoDevice::video0);
+        || device == VitaIoDevice::music0 || device == VitaIoDevice::photo0 || device == VitaIoDevice::video0
+        || device == VitaIoDevice::memory);
 }
 
 bool init(IOState &io, const fs::path &cache_path, const fs::path &log_path, const fs::path &vita_fs_path, bool redirect_stdio) {
@@ -152,6 +153,13 @@ bool init(IOState &io, const fs::path &cache_path, const fs::path &log_path, con
     const fs::path vd0{ vita_fs_path / "vd0" };
 
     create_path(ux0 / "data");
+    create_path(ux0 / "data" / "memory");
+    static std::atomic<uint64_t> memory_session_counter{ 0 };
+    const auto memory_session = "session-" + std::to_string(std::chrono::system_clock::now().time_since_epoch().count())
+        + '-' + std::to_string(memory_session_counter.fetch_add(1, std::memory_order_relaxed));
+    io.device_paths.memory0 = (fs::path("data") / "memory" / memory_session).generic_string();
+    io.memory_path = ux0 / "data" / "memory" / memory_session;
+    create_path(io.memory_path);
     create_path(ux0 / "app");
     create_path(ux0 / "music");
     create_path(ux0 / "picture");
@@ -181,6 +189,15 @@ void io_deinit(IOState &io) {
     io.tty_files.clear();
 
     io.next_fd = 0;
+
+    if (!io.memory_path.empty() && io.memory_path.filename().string().starts_with("session-")
+        && io.memory_path.parent_path().filename() == "memory") {
+        boost::system::error_code ec;
+        fs::remove_all(io.memory_path, ec);
+        if (ec)
+            LOG_WARN("Failed to remove memory device directory {}: {}", io.memory_path, ec.message());
+    }
+    io.memory_path.clear();
 
     io.device_paths = {};
     io.addcont.clear();
@@ -291,6 +308,11 @@ std::string translate_path(const char *path, VitaIoDevice &device, const IOState
     }
     case VitaIoDevice::music0: { // Redirect music0: to ux0:music
         relative_path = device::remove_device_from_path(relative_path, device, "music");
+        device = VitaIoDevice::ux0;
+        break;
+    }
+    case VitaIoDevice::memory: {
+        relative_path = device::remove_device_from_path(relative_path, device, device_paths.memory0);
         device = VitaIoDevice::ux0;
         break;
     }

@@ -103,6 +103,7 @@ struct IOState {
         std::string app0;
         std::string savedata0;
         std::string addcont0;
+        std::string memory0;
     } device_paths;
 
     std::string addcont;
@@ -126,6 +127,8 @@ struct IOState {
 
     // Serializes positional I/O while the shared file position is temporarily changed.
     std::mutex file_mutex;
+
+    fs::path memory_path;
 
     std::mutex overlay_mutex;
     SceUID next_overlay_id = 1;
