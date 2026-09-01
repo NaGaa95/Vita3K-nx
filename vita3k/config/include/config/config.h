@@ -160,6 +160,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(bool, "force-full-precision", false, force_full_precision)                                     \
     code(float, "resolution-multiplier", 1.0f, resolution_multiplier)                                   \
     code(bool, "disable-surface-sync", true, disable_surface_sync)                                      \
+    code(bool, "surface-sync-clamp-rt", true, surface_sync_clamp_rt)                                    \
     code(std::string, "screen-filter", "Bilinear", screen_filter)                                       \
     code(float, "fsr-sharpness", 0.2f, fsr_sharpness)                                                    \
     code(bool, "v-sync", true, v_sync)                                                                  \

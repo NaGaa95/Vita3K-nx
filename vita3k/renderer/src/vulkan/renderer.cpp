@@ -1141,6 +1141,7 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
 void VKState::late_init(const Config &cfg, const std::string_view game_id, MemState &mem) {
     this->mem = &mem;
     shader_debug_dump = cfg.current_config.shader_debug_dump;
+    surface_sync_clamp_rt = cfg.surface_sync_clamp_rt;
 
     bool use_high_accuracy = cfg.current_config.high_accuracy;
 

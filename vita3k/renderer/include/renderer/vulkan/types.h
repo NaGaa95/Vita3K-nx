@@ -263,6 +263,10 @@ struct VKContext : public renderer::Context {
 
     bool scene_wrote_depth = false;
     bool scene_has_unsynced_color_draw = false;
+    int32_t draw_rect_x0 = INT32_MAX;
+    int32_t draw_rect_y0 = INT32_MAX;
+    int32_t draw_rect_x1 = 0;
+    int32_t draw_rect_y1 = 0;
 
     vkutil::HostRingBuffer vertex_stream_ring_buffer;
     vkutil::HostRingBuffer index_stream_ring_buffer;

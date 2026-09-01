@@ -89,6 +89,12 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
     uint16_t original_height;
     uint32_t stride_bytes;
     uint64_t last_frame_rendered;
+    uint16_t rendered_w = 0;
+    uint16_t rendered_h = 0;
+    int32_t written_x0 = INT32_MAX;
+    int32_t written_y0 = INT32_MAX;
+    int32_t written_x1 = 0;
+    int32_t written_y1 = 0;
 
     SceGxmColorBaseFormat format;
     vk::ComponentMapping swizzle;
@@ -251,8 +257,11 @@ private:
     std::optional<bool> raw_cast_supported;
 
     bool submit_immediate_surface_sync(ColorSurfaceCacheInfo &surface);
+    void update_rendered_extent(ColorSurfaceCacheInfo &surface);
 
 public:
+    void note_scene_draw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1);
+
     // when creating a mutable image, can we pass as an argument
     // the possible format used for an image view to improve performance ?
     bool support_image_format_specifier = false;

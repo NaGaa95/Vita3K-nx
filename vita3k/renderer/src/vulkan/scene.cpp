@@ -17,6 +17,9 @@
 
 #include <renderer/vulkan/functions.h>
 
+#include <algorithm>
+#include <cmath>
+
 #include <gxm/functions.h>
 #include <renderer/vulkan/gxm_to_vulkan.h>
 
@@ -26,6 +29,35 @@
 #include <util/log.h>
 
 namespace renderer::vulkan {
+
+static void record_draw_rect(VKContext &context) {
+    const float vx1f = context.viewport.x + context.viewport.width;
+    const float vy1f = context.viewport.y + context.viewport.height;
+    if (!std::isfinite(context.viewport.x) || !std::isfinite(context.viewport.y)
+        || !std::isfinite(vx1f) || !std::isfinite(vy1f))
+        return;
+
+    const int32_t sx0 = context.scissor.offset.x;
+    const int32_t sy0 = context.scissor.offset.y;
+    const int32_t sx1 = sx0 + static_cast<int32_t>(context.scissor.extent.width);
+    const int32_t sy1 = sy0 + static_cast<int32_t>(context.scissor.extent.height);
+    const int32_t vx0 = static_cast<int32_t>(std::floor(std::min(context.viewport.x, vx1f)));
+    const int32_t vy0 = static_cast<int32_t>(std::floor(std::min(context.viewport.y, vy1f)));
+    const int32_t vx1 = static_cast<int32_t>(std::ceil(std::max(context.viewport.x, vx1f)));
+    const int32_t vy1 = static_cast<int32_t>(std::ceil(std::max(context.viewport.y, vy1f)));
+    const int32_t x0 = std::max(sx0, vx0);
+    const int32_t y0 = std::max(sy0, vy0);
+    const int32_t x1 = std::min(sx1, vx1);
+    const int32_t y1 = std::min(sy1, vy1);
+
+    if (x1 <= x0 || y1 <= y0)
+        return;
+
+    context.draw_rect_x0 = std::min(context.draw_rect_x0, x0);
+    context.draw_rect_y0 = std::min(context.draw_rect_y0, y0);
+    context.draw_rect_x1 = std::max(context.draw_rect_x1, x1);
+    context.draw_rect_y1 = std::max(context.draw_rect_y1, y1);
+}
 
 void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *program, const bool vertex_shader, const int block_num, const int size, Ptr<uint8_t> data) {
     auto offset = program->uniform_buffer_data_offsets.at(block_num);
@@ -558,6 +590,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
 
     context.render_cmd.drawIndexed(count, instance_count, 0, 0, 0);
     if (count && instance_count) {
+        record_draw_rect(context);
         context.scene_has_unsynced_color_draw = true;
         if (context.record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED)
             context.scene_wrote_depth = true;

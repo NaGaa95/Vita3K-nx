@@ -16,6 +16,10 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <renderer/vulkan/surface_cache.h>
+
+#include <algorithm>
+#include <cmath>
+
 #include <renderer/texture/packed.h>
 #include <renderer/texture/readback.h>
 #include <mem/functions.h>
@@ -449,6 +453,45 @@ void VKSurfaceCache::cleanup() {
     last_written_surface = nullptr;
 }
 
+void VKSurfaceCache::update_rendered_extent(ColorSurfaceCacheInfo &surface) {
+    auto *context = static_cast<VKContext *>(state.context);
+    if (!context->render_target || state.res_multiplier <= 0.0f)
+        return;
+
+    const uint32_t width = std::min<uint32_t>(surface.original_width,
+        static_cast<uint32_t>(std::lround(context->render_target->width / state.res_multiplier)));
+    const uint32_t height = std::min<uint32_t>(surface.original_height,
+        static_cast<uint32_t>(std::lround(context->render_target->height / state.res_multiplier)));
+    surface.rendered_w = std::max<uint16_t>(surface.rendered_w, static_cast<uint16_t>(width));
+    surface.rendered_h = std::max<uint16_t>(surface.rendered_h, static_cast<uint16_t>(height));
+}
+
+void VKSurfaceCache::note_scene_draw_rect(int32_t x0, int32_t y0, int32_t x1, int32_t y1) {
+    if (!last_written_surface || x1 <= x0 || y1 <= y0 || state.res_multiplier <= 0.0f)
+        return;
+
+    constexpr float tile_size = 32.0f;
+    const float scale = state.res_multiplier * tile_size;
+    int32_t ux0 = static_cast<int32_t>(std::floor(x0 / scale)) * 32;
+    int32_t uy0 = static_cast<int32_t>(std::floor(y0 / scale)) * 32;
+    int32_t ux1 = static_cast<int32_t>(std::ceil(x1 / scale)) * 32;
+    int32_t uy1 = static_cast<int32_t>(std::ceil(y1 / scale)) * 32;
+
+    const auto width = static_cast<int32_t>(last_written_surface->original_width);
+    const auto height = static_cast<int32_t>(last_written_surface->original_height);
+    ux0 = std::clamp(ux0, 0, width);
+    uy0 = std::clamp(uy0, 0, height);
+    ux1 = std::clamp(ux1, 0, width);
+    uy1 = std::clamp(uy1, 0, height);
+    if (ux1 <= ux0 || uy1 <= uy0)
+        return;
+
+    last_written_surface->written_x0 = std::min(last_written_surface->written_x0, ux0);
+    last_written_surface->written_y0 = std::min(last_written_surface->written_y0, uy0);
+    last_written_surface->written_x1 = std::max(last_written_surface->written_x1, ux1);
+    last_written_surface->written_y1 = std::max(last_written_surface->written_y1, uy1);
+}
+
 SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(MemState &mem, SceGxmColorSurface *color) {
     // Create the key to access the cache struct
     const uint32_t address = color->data.address();
@@ -522,6 +565,7 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
             color_surface_queue.set_as_lru(&info);
         } else {
             color_surface_queue.set_as_mru(&info);
+            update_rendered_extent(info);
 
             if (info.data && *info.dirty)
                 protect_surface(mem, info);
@@ -571,6 +615,13 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
     info_added.height = height;
     info_added.original_width = original_width;
     info_added.original_height = original_height;
+    info_added.rendered_w = 0;
+    info_added.rendered_h = 0;
+    info_added.written_x0 = INT32_MAX;
+    info_added.written_y0 = INT32_MAX;
+    info_added.written_x1 = 0;
+    info_added.written_y1 = 0;
+    update_rendered_extent(info_added);
     info_added.stride_bytes = bytes_per_stride;
     info_added.data = color->data;
     info_added.total_bytes = total_surface_size;
@@ -2103,6 +2154,10 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
         LOG_ERROR("Invalid color surface readback dimensions");
         return nullptr;
     }
+    if (context->record.color_surface.data.address() == last_written_surface->data.address()) {
+        note_scene_draw_rect(context->draw_rect_x0, context->draw_rect_y0,
+            context->draw_rect_x1, context->draw_rect_y1);
+    }
     vk::CommandBuffer cmd_buffer = context->render_cmd;
 
     bool sync_from_raw = typeless_read_from_raw(*last_written_surface);
@@ -2114,7 +2169,6 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
     const vk::Format sync_format = sync_from_raw ? vk::Format::eR16G16B16A16Uint : last_written_surface->texture.format;
     vk::Image image_to_copy = sync_from_raw ? last_written_surface->raw_image->image : last_written_surface->texture.image;
     vk::ImageLayout image_layout = vk::ImageLayout::eGeneral;
-    barrier_render_to_transfer_read(cmd_buffer, image_to_copy);
 
     // this works for surface swizzles
     bool is_swizzle_identity = last_written_surface->swizzle.r == vk::ComponentSwizzle::eR;
@@ -2123,6 +2177,39 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
 
         is_swizzle_identity = true;
     }
+
+    const uint32_t pixel_stride = last_written_surface->stride_bytes / guest_bpp;
+    const bool needs_copy_buffer = format_need_additional_memory(last_written_surface->format)
+        || surface_is_repacked_u4u4u4u4(*last_written_surface)
+        || surface_is_repacked_float(*last_written_surface);
+    const bool can_clamp = state.surface_sync_clamp_rt && !sync_from_raw
+        && !needs_copy_buffer && is_swizzle_identity;
+
+    int32_t sync_x0 = 0;
+    int32_t sync_y0 = 0;
+    int32_t sync_x1 = last_written_surface->original_width;
+    int32_t sync_y1 = last_written_surface->original_height;
+    if (can_clamp) {
+        if (last_written_surface->rendered_w > 0)
+            sync_x1 = std::min(sync_x1, static_cast<int32_t>(last_written_surface->rendered_w));
+        if (last_written_surface->rendered_h > 0)
+            sync_y1 = std::min(sync_y1, static_cast<int32_t>(last_written_surface->rendered_h));
+
+        sync_x0 = std::max(sync_x0, last_written_surface->written_x0);
+        sync_y0 = std::max(sync_y0, last_written_surface->written_y0);
+        sync_x1 = std::min(sync_x1, last_written_surface->written_x1);
+        sync_y1 = std::min(sync_y1, last_written_surface->written_y1);
+        if (sync_x1 <= sync_x0 || sync_y1 <= sync_y0)
+            return nullptr;
+    }
+
+    const uint32_t sync_width = static_cast<uint32_t>(sync_x1 - sync_x0);
+    const uint32_t sync_height = static_cast<uint32_t>(sync_y1 - sync_y0);
+    const bool clamp_sync = sync_x0 != 0 || sync_y0 != 0
+        || sync_width != last_written_surface->original_width
+        || sync_height != last_written_surface->original_height;
+
+    barrier_render_to_transfer_read(cmd_buffer, image_to_copy);
 
     if (state.res_multiplier != 1.0f) {
         // scale back the image using a blit command first
@@ -2145,11 +2232,26 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
             blit_image.transition_to_discard(cmd_buffer, vkutil::ImageLayout::TransferDst);
         }
 
+        int32_t src_x0 = 0;
+        int32_t src_y0 = 0;
+        int32_t src_x1 = last_written_surface->width;
+        int32_t src_y1 = last_written_surface->height;
+        if (clamp_sync) {
+            src_x0 = static_cast<int32_t>(std::floor(sync_x0 * state.res_multiplier));
+            src_y0 = static_cast<int32_t>(std::floor(sync_y0 * state.res_multiplier));
+            src_x1 = static_cast<int32_t>(std::ceil(sync_x1 * state.res_multiplier));
+            src_y1 = static_cast<int32_t>(std::ceil(sync_y1 * state.res_multiplier));
+            src_x0 = std::clamp(src_x0, 0, static_cast<int32_t>(last_written_surface->width));
+            src_y0 = std::clamp(src_y0, 0, static_cast<int32_t>(last_written_surface->height));
+            src_x1 = std::clamp(src_x1, 0, static_cast<int32_t>(last_written_surface->width));
+            src_y1 = std::clamp(src_y1, 0, static_cast<int32_t>(last_written_surface->height));
+        }
+
         vk::ImageBlit blit{
             .srcSubresource = vkutil::color_subresource_layer,
-            .srcOffsets = std::array<vk::Offset3D, 2>{ vk::Offset3D{ 0, 0, 0 }, vk::Offset3D{ last_written_surface->width, last_written_surface->height, 1 } },
+            .srcOffsets = std::array<vk::Offset3D, 2>{ vk::Offset3D{ src_x0, src_y0, 0 }, vk::Offset3D{ src_x1, src_y1, 1 } },
             .dstSubresource = vkutil::color_subresource_layer,
-            .dstOffsets = std::array<vk::Offset3D, 2>{ vk::Offset3D{ 0, 0, 0 }, vk::Offset3D{ last_written_surface->original_width, last_written_surface->original_height, 1 } },
+            .dstOffsets = std::array<vk::Offset3D, 2>{ vk::Offset3D{ sync_x0, sync_y0, 0 }, vk::Offset3D{ sync_x1, sync_y1, 1 } },
         };
         // Apply nearest filter for the time being, linear might be better if we have no data in the texture tho
         cmd_buffer.blitImage(image_to_copy, image_layout, blit_image.image, vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eNearest);
@@ -2161,10 +2263,7 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
 
     vk::Buffer buffer;
     uint32_t offset;
-    const uint32_t pixel_stride = last_written_surface->stride_bytes / guest_bpp;
-    if (format_need_additional_memory(last_written_surface->format)
-        || surface_is_repacked_u4u4u4u4(*last_written_surface)
-        || surface_is_repacked_float(*last_written_surface)) {
+    if (needs_copy_buffer) {
         if (!last_written_surface->copy_buffer)
             last_written_surface->copy_buffer = std::make_unique<vkutil::Buffer>();
 
@@ -2201,6 +2300,12 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
         .imageOffset = { 0, 0, 0 },
         .imageExtent = { last_written_surface->original_width, last_written_surface->original_height, 1 }
     };
+    if (clamp_sync) {
+        copy.bufferOffset += static_cast<uint32_t>(sync_y0) * last_written_surface->stride_bytes
+            + static_cast<uint32_t>(sync_x0) * guest_bpp;
+        copy.imageOffset = vk::Offset3D{ sync_x0, sync_y0, 0 };
+        copy.imageExtent = vk::Extent3D{ sync_width, sync_height, 1 };
+    }
     cmd_buffer.copyImageToBuffer(image_to_copy, image_layout, buffer, copy);
 
     if (last_written_surface->gpu_read_needs_barrier) {

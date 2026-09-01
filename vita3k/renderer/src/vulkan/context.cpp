@@ -199,6 +199,10 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.state.surface_cache.resolve_ds_scene_end(context.scene_wrote_depth);
     context.scene_wrote_depth = false;
     context.scene_has_unsynced_color_draw = false;
+    context.draw_rect_x0 = INT32_MAX;
+    context.draw_rect_y0 = INT32_MAX;
+    context.draw_rect_x1 = 0;
+    context.draw_rect_y1 = 0;
 
     context.render_target = rt;
     context.scene_timestamp++;
@@ -590,6 +594,7 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
         current_visibility_buffer->queries_used.assign(current_visibility_buffer->size, false);
     }
 
+    state.surface_cache.note_scene_draw_rect(draw_rect_x0, draw_rect_y0, draw_rect_x1, draw_rect_y1);
     ColorSurfaceCacheInfo *surface_info = nullptr;
     if (state.features.enable_memory_mapping && !state.disable_surface_sync && submit)
         surface_info = state.surface_cache.perform_surface_sync();
