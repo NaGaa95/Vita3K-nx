@@ -44,6 +44,8 @@ EXPORT(void, SceImeEventHandler, Ptr<void> arg, const SceImeEvent *e) {
 EXPORT(SceInt32, sceImeClose) {
     TRACY_FUNC(sceImeClose);
     emuenv.ime.state = false;
+    emuenv.ime.event_id = SCE_IME_EVENT_OPEN;
+    emuenv.ime.queued_event_id = SCE_IME_EVENT_OPEN;
 
     if (emuenv.ime.param.inputTextBuffer.address())
         free(emuenv.mem, emuenv.ime.param.inputTextBuffer.address());
@@ -90,6 +92,7 @@ EXPORT(SceInt32, sceImeOpen, SceImeParam *param) {
         emuenv.ime.caps_level = 1;
 
     emuenv.ime.event_id = SCE_IME_EVENT_OPEN;
+    emuenv.ime.queued_event_id = SCE_IME_EVENT_OPEN;
     emuenv.ime.state = true;
 
 #if defined(__ANDROID__) || defined(__SWITCH__)
@@ -147,15 +150,18 @@ EXPORT(SceInt32, sceImeUpdate) {
     if (emuenv.ime.event_id == SCE_IME_EVENT_OPEN)
         return 0;
 
+    const uint32_t event_id = emuenv.ime.event_id;
+    emuenv.ime.event_id = emuenv.ime.queued_event_id;
+    emuenv.ime.queued_event_id = SCE_IME_EVENT_OPEN;
+
     Ptr<SceImeEvent> event = Ptr<SceImeEvent>(alloc(emuenv.mem, sizeof(SceImeEvent), "ime_event"));
     SceImeEvent *e = event.get(emuenv.mem);
-    e->id = emuenv.ime.event_id;
+    e->id = event_id;
     memcpy(emuenv.ime.edit_text.str.get(emuenv.mem), emuenv.ime.str.c_str(), (emuenv.ime.str.length() + 1) * sizeof(SceWChar16));
     e->param.text = emuenv.ime.edit_text;
     e->param.caretIndex = emuenv.ime.caretIndex;
     CALL_EXPORT(SceImeEventHandler, emuenv.ime.param.arg, e);
     free(emuenv.mem, event.address());
-    emuenv.ime.event_id = SCE_IME_EVENT_OPEN;
 
     return 0;
 }

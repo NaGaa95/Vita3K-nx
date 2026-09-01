@@ -159,7 +159,8 @@ bool process_pending_request(EmuEnvState &emuenv) {
             std::lock_guard<std::mutex> lock(emuenv.ime.mutex);
             if (emuenv.ime.state) {
                 replace_ime_text(emuenv.ime, std::move(text), snapshot.max_length);
-                emuenv.ime.event_id = SCE_IME_EVENT_PRESS_ENTER;
+                emuenv.ime.event_id = SCE_IME_EVENT_UPDATE_TEXT;
+                emuenv.ime.queued_event_id = SCE_IME_EVENT_PRESS_ENTER;
             }
         }
     } else if (snapshot.dialog) {
@@ -169,8 +170,10 @@ bool process_pending_request(EmuEnvState &emuenv) {
             s_show_requested.store(true, std::memory_order_release);
     } else {
         std::lock_guard<std::mutex> lock(emuenv.ime.mutex);
-        if (emuenv.ime.state)
+        if (emuenv.ime.state) {
             emuenv.ime.event_id = SCE_IME_EVENT_PRESS_CLOSE;
+            emuenv.ime.queued_event_id = SCE_IME_EVENT_OPEN;
+        }
     }
 
     LOG_INFO("Switch software keyboard closed ({})", R_SUCCEEDED(rc) ? "accepted" : "cancelled");
