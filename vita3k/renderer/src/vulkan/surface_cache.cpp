@@ -632,6 +632,8 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
     info_added.need_surface_sync.reset();
     info_added.need_surface_sync = std::make_shared<bool>(false);
     info_added.dirty = std::make_shared<bool>(false);
+    info_added.gpu_read_sync_only = false;
+    info_added.gpu_read_needs_barrier = false;
 
     // we only support surface sync of linear surfaces for now
     if (!can_mprotect_mapped_memory) {
@@ -1859,6 +1861,22 @@ bool VKSurfaceCache::check_for_surface(MemState &mem, Address source_address, Ca
     if (surface.last_frame_rendered + MAX_FRAMES_RENDERING <= context.frame_timestamp)
         return false;
 
+    if (surface.gpu_read_sync_only) {
+        surface.gpu_read_sync_only = false;
+        if (state.need_cpu_buffer_sync()) {
+            const uint32_t guest_bpp = gxm::bits_per_pixel(surface.format) / 8;
+            const renderer::texture::ReadbackRows rows{
+                surface.stride_bytes,
+                uint32_t(surface.original_width) * guest_bpp,
+                surface.original_height
+            };
+            if (guest_bpp) {
+                if (const auto span_size = rows.span_size())
+                    state.request_queue.push(BufferSyncRequest{ surface.data.address(), *span_size, rows });
+            }
+        }
+    }
+
     // we found something
     if (!*surface.need_surface_sync) {
         // first send the command to sync the surface with the GPU
@@ -1912,6 +1930,157 @@ bool VKSurfaceCache::check_for_surface(MemState &mem, Address source_address, Ca
 
     if (target_address)
         cpu_surfaces_changed.push_back(target_address);
+
+    return true;
+}
+
+bool VKSurfaceCache::submit_immediate_surface_sync(ColorSurfaceCacheInfo &surface) {
+    VKContext &context = *static_cast<VKContext *>(state.context);
+    const bool needed_before = *surface.need_surface_sync;
+    const bool buffer_sync_before = surface.need_buffer_sync;
+    const bool post_sync_before = surface.need_post_surface_sync;
+    *surface.need_surface_sync = true;
+
+    const uint32_t guest_bpp = gxm::bits_per_pixel(surface.format) / 8;
+    if (state.need_cpu_buffer_sync() && guest_bpp) {
+        const renderer::texture::ReadbackRows rows{
+            surface.stride_bytes,
+            uint32_t(surface.original_width) * guest_bpp,
+            surface.original_height
+        };
+        if (const auto span_size = rows.span_size())
+            state.buffer_trapping.access_buffer(surface.data.address(), *span_size, context.mem, true, true);
+    }
+
+    const vk::CommandBuffer previous_command = context.render_cmd;
+    ColorSurfaceCacheInfo *const previous_surface = last_written_surface;
+
+    vk::CommandBuffer surface_command = nullptr;
+    ColorSurfaceCacheInfo *returned_info = nullptr;
+    {
+        const std::lock_guard<std::mutex> lock(state.multithread_pool_mutex);
+        surface_command = vkutil::create_single_time_command(state.device, state.multithread_command_pool);
+        context.render_cmd = surface_command;
+        last_written_surface = &surface;
+        returned_info = perform_surface_sync();
+        context.render_cmd = previous_command;
+        last_written_surface = previous_surface;
+        surface_command.end();
+    }
+
+    if (!returned_info) {
+        *surface.need_surface_sync = needed_before;
+        surface.need_buffer_sync = buffer_sync_before;
+        surface.need_post_surface_sync = post_sync_before;
+        const std::lock_guard<std::mutex> lock(state.multithread_pool_mutex);
+        state.device.freeCommandBuffers(state.multithread_command_pool, surface_command);
+        return false;
+    }
+
+    const vk::Fence fence = state.device.createFence({});
+    vk::SubmitInfo submit_info{};
+    submit_info.setCommandBuffers(surface_command);
+    state.submit_general(submit_info, fence, "GPU surface read synchronization");
+
+    CallbackRequestFunction cleanup = [&state = this->state, fence, surface_command]() {
+        const vk::Result result = state.device.waitForFences(fence, vk::True, std::numeric_limits<uint64_t>::max());
+        if (result != vk::Result::eSuccess)
+            LOG_ERROR("Could not wait for the GPU surface read fence.");
+        state.device.destroyFence(fence);
+        const std::lock_guard<std::mutex> lock(state.multithread_pool_mutex);
+        state.device.freeCommandBuffers(state.multithread_command_pool, surface_command);
+    };
+    state.request_queue.push(CallbackRequest{ new CallbackRequestFunction(std::move(cleanup)) });
+    return true;
+}
+
+bool VKSurfaceCache::sync_surface_for_gpu_read(Address address, uint32_t size) {
+    if (!state.features.enable_memory_mapping || state.disable_surface_sync)
+        return false;
+
+    auto it = color_address_lookup.upper_bound(address);
+    if (it == color_address_lookup.begin())
+        return false;
+    --it;
+
+    if (it->first != address) {
+        const bool contained = address >= it->first
+            && static_cast<uint64_t>(address) + size <= static_cast<uint64_t>(it->first) + it->second->total_bytes;
+        if (!contained && it != color_address_lookup.begin())
+            --it;
+    }
+
+    ColorSurfaceCacheInfo &surface = *it->second;
+    const bool contained = address >= it->first
+        && static_cast<uint64_t>(address) + size <= static_cast<uint64_t>(it->first) + surface.total_bytes;
+    if (!contained)
+        return false;
+
+    constexpr uint32_t minimum_read_size = KiB(16);
+    if (it->first != address && size != 0 && size < minimum_read_size)
+        return false;
+
+    VKContext &context = *static_cast<VKContext *>(state.context);
+    if (surface.last_frame_rendered + MAX_FRAMES_RENDERING <= context.frame_timestamp)
+        return false;
+
+    const bool direct_mapping = !format_need_additional_memory(surface.format)
+        && !surface_is_repacked_u4u4u4u4(surface)
+        && !surface_is_repacked_float(surface)
+        && surface.swizzle.r == vk::ComponentSwizzle::eR;
+    if (!direct_mapping)
+        return false;
+
+    const bool needed_before = *surface.need_surface_sync;
+    const bool gpu_only_before = surface.gpu_read_sync_only;
+    const bool barrier_before = surface.gpu_read_needs_barrier;
+    if (!needed_before)
+        surface.gpu_read_sync_only = true;
+    surface.gpu_read_needs_barrier = true;
+
+    const bool reads_current_surface = context.record.color_surface.data.address() == surface.data.address();
+    if (reads_current_surface && context.scene_has_unsynced_color_draw) {
+        if (context.in_renderpass)
+            context.stop_render_pass();
+
+        const uint32_t guest_bpp = gxm::bits_per_pixel(surface.format) / 8;
+        if (state.need_cpu_buffer_sync() && guest_bpp) {
+            const renderer::texture::ReadbackRows rows{
+                surface.stride_bytes,
+                uint32_t(surface.original_width) * guest_bpp,
+                surface.original_height
+            };
+            if (const auto span_size = rows.span_size())
+                state.buffer_trapping.access_buffer(surface.data.address(), *span_size, context.mem, true, true);
+        }
+
+        const bool buffer_sync_before = surface.need_buffer_sync;
+        const bool post_sync_before = surface.need_post_surface_sync;
+        ColorSurfaceCacheInfo *const previous_surface = last_written_surface;
+        *surface.need_surface_sync = true;
+        last_written_surface = &surface;
+        ColorSurfaceCacheInfo *const returned_info = perform_surface_sync();
+        last_written_surface = previous_surface;
+        if (!returned_info) {
+            *surface.need_surface_sync = needed_before;
+            surface.gpu_read_sync_only = gpu_only_before;
+            surface.gpu_read_needs_barrier = barrier_before;
+            surface.need_buffer_sync = buffer_sync_before;
+            surface.need_post_surface_sync = post_sync_before;
+            return false;
+        }
+
+        context.scene_has_unsynced_color_draw = false;
+        return true;
+    }
+
+    if (!needed_before || !barrier_before) {
+        if (!submit_immediate_surface_sync(surface)) {
+            surface.gpu_read_sync_only = gpu_only_before;
+            surface.gpu_read_needs_barrier = barrier_before;
+            return false;
+        }
+    }
 
     return true;
 }
@@ -2020,7 +2189,7 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
             LOG_ERROR("Color surface readback is not fully mapped");
             return nullptr;
         }
-        last_written_surface->need_buffer_sync = true;
+        last_written_surface->need_buffer_sync = !last_written_surface->gpu_read_sync_only;
         last_written_surface->need_post_surface_sync = !is_swizzle_identity;
         std::tie(buffer, offset) = state.get_matching_mapping(last_written_surface->data);
     }
@@ -2033,6 +2202,21 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
         .imageExtent = { last_written_surface->original_width, last_written_surface->original_height, 1 }
     };
     cmd_buffer.copyImageToBuffer(image_to_copy, image_layout, buffer, copy);
+
+    if (last_written_surface->gpu_read_needs_barrier) {
+        const vk::BufferMemoryBarrier barrier{
+            .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+            .dstAccessMask = vk::AccessFlagBits::eShaderRead,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .buffer = buffer,
+            .offset = offset,
+            .size = *readback_size
+        };
+        cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+            vk::PipelineStageFlagBits::eVertexShader | vk::PipelineStageFlagBits::eFragmentShader,
+            {}, {}, barrier, {});
+    }
 
     ColorSurfaceCacheInfo *return_value = last_written_surface;
     last_written_surface = nullptr;

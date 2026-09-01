@@ -35,7 +35,8 @@ void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *
 
     const uint32_t data_size_upload = std::min<uint32_t>(size, program->uniform_buffer_sizes.at(block_num) * 4);
     if (context.state.features.enable_memory_mapping) {
-        if (context.state.need_cpu_buffer_sync()) {
+        const bool aliases_surface = context.state.surface_cache.sync_surface_for_gpu_read(data.address(), data_size_upload);
+        if (!aliases_surface && context.state.need_cpu_buffer_sync()) {
             // we must always cover everything as some small part of the buffer may get changed only
             context.state.buffer_trapping.access_buffer(data.address(), data_size_upload, mem, false, true);
         }
@@ -557,6 +558,7 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
 
     context.render_cmd.drawIndexed(count, instance_count, 0, 0, 0);
     if (count && instance_count) {
+        context.scene_has_unsynced_color_draw = true;
         if (context.record.front_depth_write_mode == SCE_GXM_DEPTH_WRITE_ENABLED)
             context.scene_wrote_depth = true;
         context.state.surface_cache.mark_surface_written(context.record.color_surface.data.address(),

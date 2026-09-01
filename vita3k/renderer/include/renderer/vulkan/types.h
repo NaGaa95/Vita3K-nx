@@ -262,6 +262,7 @@ struct VKContext : public renderer::Context {
     std::vector<vk::CommandBuffer> cmdbuffers_to_submit = {};
 
     bool scene_wrote_depth = false;
+    bool scene_has_unsynced_color_draw = false;
 
     vkutil::HostRingBuffer vertex_stream_ring_buffer;
     vkutil::HostRingBuffer index_stream_ring_buffer;

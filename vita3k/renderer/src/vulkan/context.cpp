@@ -198,6 +198,7 @@ void VKContext::wait_thread_function(const MemState &mem) {
 void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const FeatureState &features) {
     context.state.surface_cache.resolve_ds_scene_end(context.scene_wrote_depth);
     context.scene_wrote_depth = false;
+    context.scene_has_unsynced_color_draw = false;
 
     context.render_target = rt;
     context.scene_timestamp++;
@@ -592,6 +593,8 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
     ColorSurfaceCacheInfo *surface_info = nullptr;
     if (state.features.enable_memory_mapping && !state.disable_surface_sync && submit)
         surface_info = state.surface_cache.perform_surface_sync();
+    if (surface_info)
+        scene_has_unsynced_color_draw = false;
 
 #ifdef __SWITCH__
     // Flush before submit: a dirty CPU line could overwrite these GPU writes.

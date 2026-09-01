@@ -132,6 +132,9 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
     // only for double buffer, do we need to sync the two views?
     bool need_buffer_sync = false;
 
+    bool gpu_read_sync_only = false;
+    bool gpu_read_needs_barrier = false;
+
     std::shared_ptr<bool> dirty = std::make_shared<bool>(false);
 
     ColorSurfaceCacheInfo() = default;
@@ -247,6 +250,8 @@ private:
     void ensure_reinterpret_pipeline();
     std::optional<bool> raw_cast_supported;
 
+    bool submit_immediate_surface_sync(ColorSurfaceCacheInfo &surface);
+
 public:
     // when creating a mutable image, can we pass as an argument
     // the possible format used for an image view to improve performance ?
@@ -301,6 +306,7 @@ public:
     // if this call is used for a copy or similar operation set the changed address to the destination
     // so that subsequent calls to check_for_surface with the target destination also get delayed
     bool check_for_surface(MemState &mem, Address source_address, CallbackRequestFunction &callback, Address target_address);
+    bool sync_surface_for_gpu_read(Address address, uint32_t size);
 
     // If non-null, the return value must be sent as a PostSurfaceSyncRequest
     ColorSurfaceCacheInfo *perform_surface_sync();
