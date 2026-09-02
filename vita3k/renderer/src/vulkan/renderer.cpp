@@ -1211,6 +1211,11 @@ void VKState::late_init(const Config &cfg, const std::string_view game_id, MemSt
 #else
     LOG_INFO("Using the following memory mapping method: {}", mapping_string[static_cast<int>(mapping_method)]);
 #endif
+#ifdef __SWITCH__
+    // Horizon has no resumable page faults, so guest reads of render targets cannot be
+    // trapped: write every linear surface back to guest memory at scene end instead.
+    surface_cache.can_mprotect_mapped_memory = false;
+#endif
 
 #if defined(__linux__) && !defined(__ANDROID__) // According to my tests (Macdu), mprotect on buffers (mapped with external memory host) only works with Nvidia drivers
     surface_cache.can_mprotect_mapped_memory = mapping_method == MappingMethod::DoubleBuffer
