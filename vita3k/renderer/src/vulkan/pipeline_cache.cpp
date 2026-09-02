@@ -72,6 +72,19 @@ static bool shader_cache_directory_has_entries(const fs::path &path) {
 // Size of the record containing what is needed for the pipeline construction (what is after is dynamic state)
 constexpr size_t record_pipeline_len = offsetof(GxmRecordState, vertex_streams);
 
+struct PipelineVertexProgram {
+    const SceGxmProgram *program;
+    const std::vector<SceGxmVertexStream> &streams;
+    const std::vector<SceGxmVertexAttribute> &attributes;
+    const VertexProgram &renderer_data;
+};
+
+struct PipelineFragmentProgram {
+    const SceGxmProgram &program;
+    bool is_maskupdate;
+    const VKFragmentProgram &renderer_data;
+};
+
 // structure containing everything needed to compile a pipeline
 struct CompileRequest {
     // iterator to the pipeline location
@@ -80,8 +93,13 @@ struct CompileRequest {
     // this is everything we need to compile the shader on another thread (as the original data will change)
     SceGxmPrimitiveType type;
     vk::RenderPass render_pass;
-    SceGxmVertexProgram *vertex_program_gxm;
-    SceGxmFragmentProgram *fragment_program_gxm;
+    std::vector<uint32_t> vertex_program;
+    std::vector<SceGxmVertexStream> vertex_streams;
+    std::vector<SceGxmVertexAttribute> vertex_attributes;
+    VertexProgram vertex_renderer_data;
+    std::vector<uint32_t> fragment_program;
+    bool fragment_is_maskupdate;
+    VKFragmentProgram fragment_renderer_data;
     shader::Hints hints;
 
     // the content of the record useful for the pipeline creation
@@ -91,7 +109,21 @@ struct CompileRequest {
         // note: this object is only half defined, but we are only looking at the part that's defined
         return reinterpret_cast<const GxmRecordState *>(record_data);
     }
+
+    PipelineVertexProgram get_vertex_program() const {
+        return { reinterpret_cast<const SceGxmProgram *>(vertex_program.data()), vertex_streams, vertex_attributes, vertex_renderer_data };
+    }
+
+    PipelineFragmentProgram get_fragment_program() const {
+        return { *reinterpret_cast<const SceGxmProgram *>(fragment_program.data()), fragment_is_maskupdate, fragment_renderer_data };
+    }
 };
+
+static std::vector<uint32_t> copy_program(const SceGxmProgram &program) {
+    std::vector<uint32_t> copy((program.size + sizeof(uint32_t) - 1) / sizeof(uint32_t));
+    std::memcpy(copy.data(), &program, program.size);
+    return copy;
+}
 
 PipelineCache::PipelineCache(VKState &state)
     : state(state)
@@ -748,8 +780,8 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool depth
     return render_passes_map[format];
 }
 
-bool PipelineCache::needs_attribute_bindings(const SceGxmVertexProgram &vertex_program) const {
-    const auto &infos = vertex_program.renderer_data->attribute_infos;
+bool PipelineCache::needs_attribute_bindings(const PipelineVertexProgram &vertex_program) const {
+    const auto &infos = vertex_program.renderer_data.attribute_infos;
     const uint32_t max_offset = state.physical_device_properties.limits.maxVertexInputAttributeOffset;
     for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
         const auto it = infos.find(attribute.regIndex);
@@ -764,7 +796,14 @@ bool PipelineCache::needs_attribute_bindings(const SceGxmVertexProgram &vertex_p
     return false;
 }
 
-vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(const SceGxmVertexProgram &vertex_program, MemState &mem) {
+bool PipelineCache::needs_attribute_bindings(const SceGxmVertexProgram &vertex_program) const {
+    const PipelineVertexProgram program{
+        nullptr, vertex_program.streams, vertex_program.attributes, *vertex_program.renderer_data
+    };
+    return needs_attribute_bindings(program);
+}
+
+vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(const PipelineVertexProgram &vertex_program, MemState &mem) {
     // pointer to these objects are returned (so it needs to be static)
     // and each thread needs one (hence the thread_local)
     static thread_local std::vector<vk::VertexInputBindingDescription> binding_descr;
@@ -788,7 +827,7 @@ vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(con
     };
 
     // Vertex attributes.
-    VertexProgram *vkvert = vertex_program.renderer_data.get();
+    const VertexProgram *vkvert = &vertex_program.renderer_data;
 
     uint32_t used_streams = 0;
 
@@ -903,11 +942,10 @@ void PipelineCache::compiler_thread(MemState &mem) {
             // use this as an instruction to stop the thread
             break;
 
-        vk::Pipeline pipeline = compile_pipeline(request->type, request->render_pass, *request->vertex_program_gxm, *request->fragment_program_gxm, *request->get_record(), request->hints, mem);
+        const PipelineVertexProgram vertex_program = request->get_vertex_program();
+        const PipelineFragmentProgram fragment_program = request->get_fragment_program();
+        vk::Pipeline pipeline = compile_pipeline(request->type, request->render_pass, vertex_program, fragment_program, *request->get_record(), request->hints, mem);
         *request->pipeline = pipeline;
-
-        request->vertex_program_gxm->compile_threads_on.fetch_sub(1, std::memory_order_release);
-        request->fragment_program_gxm->compile_threads_on.fetch_sub(1, std::memory_order_release);
 
         const auto time_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         next_pipeline_cache_save = time_s + pipeline_cache_save_delay;
@@ -927,16 +965,15 @@ static vk::StencilOpState convert_op_state(const GxmStencilStateOp &state) {
     };
 }
 
-vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::RenderPass render_pass, const SceGxmVertexProgram &vertex_program_gxm, const SceGxmFragmentProgram &fragment_program_gxm, const GxmRecordState &record, const shader::Hints &hints, MemState &mem) {
-    const VertexProgram &vertex_program = *vertex_program_gxm.renderer_data;
-    const SceGxmProgram *gxm_fragment_shader = fragment_program_gxm.program.get(mem);
-    const VKFragmentProgram &fragment_program = *reinterpret_cast<VKFragmentProgram *>(
-        fragment_program_gxm.renderer_data.get());
+vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::RenderPass render_pass, const PipelineVertexProgram &vertex_program_gxm, const PipelineFragmentProgram &fragment_program_gxm, const GxmRecordState &record, const shader::Hints &hints, MemState &mem) {
+    const VertexProgram &vertex_program = vertex_program_gxm.renderer_data;
+    const SceGxmProgram *gxm_fragment_shader = &fragment_program_gxm.program;
+    const VKFragmentProgram &fragment_program = fragment_program_gxm.renderer_data;
 
     // the vertex input state must be computed before shader are retrieved in case symbols are stripped
     const vk::PipelineVertexInputStateCreateInfo vertex_input = get_vertex_input_state(vertex_program_gxm, mem);
 
-    const vk::PipelineShaderStageCreateInfo vertex_shader = retrieve_shader(vertex_program_gxm.program.get(mem), vertex_program.hash, true, fragment_program_gxm.is_maskupdate, mem, hints);
+    const vk::PipelineShaderStageCreateInfo vertex_shader = retrieve_shader(vertex_program_gxm.program, vertex_program.hash, true, fragment_program_gxm.is_maskupdate, mem, hints);
     const vk::PipelineShaderStageCreateInfo fragment_shader = retrieve_shader(gxm_fragment_shader, fragment_program.hash, false, fragment_program_gxm.is_maskupdate, mem, hints, record.is_gamma_corrected);
     const vk::PipelineShaderStageCreateInfo shader_stages[] = { vertex_shader, fragment_shader };
     // disable the fragment shader if gxm asks us to
@@ -1067,6 +1104,14 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     SceGxmVertexProgram &vertex_program_gxm = *record.vertex_program.get(mem);
     key ^= vertex_program_gxm.key_hash;
 
+    const PipelineVertexProgram vertex_program{
+        vertex_program_gxm.program.get(mem), vertex_program_gxm.streams,
+        vertex_program_gxm.attributes, *vertex_program_gxm.renderer_data
+    };
+    const PipelineFragmentProgram fragment_program_view{
+        *fragment_program_gxm.program.get(mem), fragment_program_gxm.is_maskupdate, fragment_program
+    };
+
     // and also add the primitive type
     key ^= static_cast<uint64_t>(type);
 
@@ -1104,27 +1149,27 @@ vk::Pipeline PipelineCache::retrieve_pipeline(VKContext &context, SceGxmPrimitiv
     if (compile_pipeline_async) {
         // create the pipeline compile request
         CompileRequest *request = new CompileRequest;
-        *request = {
-            .pipeline = &it->second,
-            .type = type,
-            .render_pass = render_pass,
-            .vertex_program_gxm = &vertex_program_gxm,
-            .fragment_program_gxm = &fragment_program_gxm,
-            .hints = context.shader_hints
-        };
+        request->pipeline = &it->second;
+        request->type = type;
+        request->render_pass = render_pass;
+        request->vertex_program = copy_program(*vertex_program.program);
+        request->vertex_streams = vertex_program.streams;
+        request->vertex_attributes = vertex_program.attributes;
+        request->vertex_renderer_data = vertex_program.renderer_data;
+        request->fragment_program = copy_program(fragment_program_view.program);
+        request->fragment_is_maskupdate = fragment_program_view.is_maskupdate;
+        request->fragment_renderer_data = fragment_program_view.renderer_data;
+        request->hints = context.shader_hints;
+        request->hints.attributes = &request->vertex_attributes;
         memcpy(request->record_data, &record, record_pipeline_len);
         it->second = pipeline_compiling;
-
-        // we must not delete these programs until the worker is done
-        vertex_program_gxm.compile_threads_on.fetch_add(1, std::memory_order_relaxed);
-        fragment_program_gxm.compile_threads_on.fetch_add(1, std::memory_order_relaxed);
 
         pipeline_compile_queue.enqueue(pipeline_compile_queue_token, request);
 
         return nullptr;
     } else {
         // can't wait, compile it right now
-        vk::Pipeline result = compile_pipeline(type, render_pass, vertex_program_gxm, fragment_program_gxm, record, context.shader_hints, mem);
+        vk::Pipeline result = compile_pipeline(type, render_pass, vertex_program, fragment_program_view, record, context.shader_hints, mem);
 
         const auto time_s = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         next_pipeline_cache_save = time_s + pipeline_cache_save_delay;

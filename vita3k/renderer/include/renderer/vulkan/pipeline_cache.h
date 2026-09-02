@@ -48,6 +48,8 @@ namespace vulkan {
 struct VKState;
 struct VKContext;
 struct CompileRequest;
+struct PipelineFragmentProgram;
+struct PipelineVertexProgram;
 
 using PipelineCompileQueue = moodycamel::BlockingConcurrentQueue<CompileRequest *>;
 
@@ -92,7 +94,8 @@ private:
     unordered_map_stable<uint64_t, vk::Pipeline> pipelines;
 
     vk::PipelineShaderStageCreateInfo retrieve_shader(const SceGxmProgram *program, const Sha256Hash &hash, bool is_vertex, bool maskupdate, MemState &mem, const shader::Hints &hints, bool is_srgb = false);
-    vk::PipelineVertexInputStateCreateInfo get_vertex_input_state(const SceGxmVertexProgram &vertex_program, MemState &mem);
+    bool needs_attribute_bindings(const PipelineVertexProgram &vertex_program) const;
+    vk::PipelineVertexInputStateCreateInfo get_vertex_input_state(const PipelineVertexProgram &vertex_program, MemState &mem);
 
     // queue containing request sent by the main thread to the compile threads
     PipelineCompileQueue pipeline_compile_queue;
@@ -102,7 +105,7 @@ private:
     // each pipeline compiler thread uses this function as its entrypoint
     void compiler_thread(MemState &mem);
 
-    vk::Pipeline compile_pipeline(SceGxmPrimitiveType type, vk::RenderPass render_pass, const SceGxmVertexProgram &vertex_program_gxm, const SceGxmFragmentProgram &fragment_program_gxm, const GxmRecordState &record, const shader::Hints &hints, MemState &mem);
+    vk::Pipeline compile_pipeline(SceGxmPrimitiveType type, vk::RenderPass render_pass, const PipelineVertexProgram &vertex_program_gxm, const PipelineFragmentProgram &fragment_program_gxm, const GxmRecordState &record, const shader::Hints &hints, MemState &mem);
 
 public:
     // if not 0, next time the pipeline cache should be saved (in seconds since epoch)
@@ -134,7 +137,6 @@ public:
         return raw_attachment_passes.count(static_cast<VkRenderPass>(pass)) > 0;
     }
     vk::Pipeline retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem);
-
     bool needs_attribute_bindings(const SceGxmVertexProgram &vertex_program) const;
 
     vk::ShaderModule precompile_shader(const Sha256Hash &hash, bool search_first = true);

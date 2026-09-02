@@ -283,8 +283,6 @@ struct GxmContextState {
 struct SceGxmFragmentProgram {
     std::atomic<uint32_t> reference_count = 1;
     Ptr<const SceGxmProgram> program;
-    // only necessary with async compilation
-    std::atomic<uint32_t> compile_threads_on = 0;
     bool is_maskupdate;
     std::unique_ptr<renderer::FragmentProgram> renderer_data;
 };
@@ -335,8 +333,6 @@ struct SceGxmVertexProgram {
     std::vector<SceGxmVertexAttribute> attributes;
     std::unique_ptr<renderer::VertexProgram> renderer_data;
     uint64_t key_hash;
-    // only necessary with async compilation
-    std::atomic<uint32_t> compile_threads_on = 0;
 };
 
 struct SceGxmPrecomputedDraw {
