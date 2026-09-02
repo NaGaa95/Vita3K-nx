@@ -970,6 +970,22 @@ bool is_protecting(MemState &state, Address addr, MemPerm *perm) {
     return false;
 }
 
+#ifdef __SWITCH__
+// Point every page of [dst, dst+size) at the host backing of [src, src+size),
+// so both guest ranges read and write the same bytes.
+bool add_page_alias(MemState &mem, Address dst, Address src, uint32_t size) {
+    if (!mem.use_page_table || ((dst | src | size) & (KiB(4) - 1)) != 0)
+        return false;
+    for (uint32_t off = 0; off < size; off += KiB(4)) {
+        const Address s = src + off;
+        const Address d = dst + off;
+        uint8_t *const host = mem.page_table[s / KiB(4)] + s;
+        mem.page_table[d / KiB(4)] = host - d;
+    }
+    return true;
+}
+#endif
+
 void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *addr_ptr) {
     assert((size & 4095) == 0);
     if (!mem.use_page_table)

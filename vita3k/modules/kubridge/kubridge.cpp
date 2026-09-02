@@ -159,8 +159,24 @@ EXPORT(int, kuKernelMemCommit, Ptr<void> addr, SceSize len, uint32_t prot, Ptr<K
     if (pOpt) {
         auto *opt = pOpt.get(emuenv.mem);
         if (opt->attr & KU_KERNEL_MEM_COMMIT_ATTR_HAS_BASE) {
+#ifdef __SWITCH__
+            const auto state = emuenv.kernel.obj_store.get<SysmemState>();
+            const auto guard = std::lock_guard<std::mutex>(state->mutex);
+            const auto block = state->vm_blocks.find(opt->baseBlock);
+            if (block == state->vm_blocks.end())
+                return RET_ERROR(SCE_KERNEL_ERROR_INVALID_UID);
+            const Address base = block->second->mappedBase.address() + opt->baseOffset;
+            if (!add_page_alias(emuenv.mem, addr.address(), base, len)) {
+                LOG_ERROR("kuKernelMemCommit: could not mirror 0x{:08X} onto 0x{:08X} (len={})",
+                    addr.address(), base, len);
+                return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
+            }
+            LOG_DEBUG("kuKernelMemCommit: mirrored 0x{:08X} -> 0x{:08X}+0x{:X} len={}",
+                addr.address(), block->second->mappedBase.address(), opt->baseOffset, len);
+#else
             LOG_WARN("kuKernelMemCommit: baseBlock mirrors not yet implemented (baseBlock=0x{:08X} offset=0x{:08X})",
                 opt->baseBlock, opt->baseOffset);
+#endif
         }
     }
 

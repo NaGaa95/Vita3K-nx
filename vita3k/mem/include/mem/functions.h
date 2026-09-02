@@ -82,6 +82,9 @@ bool add_protect(MemState &state, Address addr, const uint32_t size, const MemPe
 void open_access_parent_protect_segment(MemState &state, Address addr);
 void close_access_parent_protect_segment(MemState &state, Address addr);
 void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *addr_ptr);
+#ifdef __SWITCH__
+bool add_page_alias(MemState &mem, Address dst, Address src, uint32_t size);
+#endif
 void remove_external_mapping(MemState &mem, uint8_t *addr_ptr, uint32_t size);
 bool is_protecting(MemState &state, Address addr, MemPerm *perm = nullptr);
 bool is_valid_addr(const MemState &state, Address addr);
