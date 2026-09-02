@@ -21,6 +21,7 @@
 #include "module/load_module.h"
 
 #include <config/state.h>
+#include <algorithm>
 #include <ctime>
 #include <ctrl/state.h>
 #include <dialog/state.h>
@@ -302,6 +303,14 @@ static std::vector<std::string> get_archive_contents_path(const ZipPtr &zip) {
     return content_path;
 }
 
+static bool archive_content_is_patch(const ZipPtr &zip, const std::string &content_path) {
+    vfs::FileBuffer buffer;
+    if (!mz_zip_reader_extract_file_to_callback(zip.get(), (content_path + "sce_sys/param.sfo").c_str(), &write_to_buffer, &buffer, 0))
+        return false;
+    sfo::SfoAppInfo info;
+    return sfo::get_param_info(info, buffer, 0) && info.app_category.contains("gp");
+}
+
 std::vector<ContentInfo> install_archive(EmuEnvState &emuenv, const fs::path &archive_path, const std::function<void(ArchiveContents)> &progress_callback, const ReinstallCallback &reinstall_callback) {
     if (string_utils::tolower(archive_path.extension().string()) == ".vci") {
         const auto vci_progress = [&](float pct) {
@@ -329,11 +338,14 @@ std::vector<ContentInfo> install_archive(EmuEnvState &emuenv, const fs::path &ar
         return {};
     }
 
-    const auto content_path = get_archive_contents_path(zip);
+    auto content_path = get_archive_contents_path(zip);
     if (content_path.empty()) {
         fclose(vpk_fp);
         return {};
     }
+    // A patch overlays its base app, so apps go first.
+    std::stable_partition(content_path.begin(), content_path.end(),
+        [&](const std::string &path) { return !archive_content_is_patch(zip, path); });
 
     const auto count = static_cast<float>(content_path.size());
     float current = 0.f;

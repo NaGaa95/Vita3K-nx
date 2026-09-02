@@ -466,6 +466,10 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
     }
 
     const bool is_patch = type == PkgType::PKG_TYPE_VITA_PATCH;
+    if (is_patch && !fs::is_regular_file(install_final_path / "sce_sys/param.sfo")) {
+        LOG_ERROR("Install app before patch: {} has no base app in {}", emuenv.app_info.app_title_id, install_final_path);
+        return false;
+    }
     fs::path path = transaction_sibling(content_final_path,
         is_patch ? ".pkg-extracting" : ".pkg-installing");
     const fs::path commit_staged_path = is_patch
@@ -684,6 +688,55 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
     if (progress_callback)
         progress_callback(100);
     return true;
+}
+
+bool peek_pkg_info(const fs::path &pkg_path, sfo::SfoAppInfo &info) {
+    std::unique_ptr<FILE, decltype(&fclose)> infile(FOPEN(pkg_path.c_str(), "rb"), &fclose);
+    if (!infile || fseek(infile.get(), 0, SEEK_END) != 0)
+        return false;
+    const long size_result = ftell(infile.get());
+    if (size_result < 0)
+        return false;
+    const uint64_t pkg_size = static_cast<uint64_t>(size_result);
+
+    PkgHeader pkg_header{};
+    if (pkg_size < sizeof(PkgHeader) || fseek(infile.get(), 0, SEEK_SET) != 0
+        || fread(&pkg_header, sizeof(PkgHeader), 1, infile.get()) != 1
+        || byte_swap(pkg_header.magic) != 0x7F504B47)
+        return false;
+
+    const auto in_pkg = [pkg_size](const uint64_t offset, const uint64_t size) {
+        return offset <= pkg_size && size <= pkg_size - offset;
+    };
+    uint64_t info_offset = byte_swap(pkg_header.info_offset);
+    const uint32_t info_count = byte_swap(pkg_header.info_count);
+    if (info_count > pkg_size / (2 * sizeof(uint32_t)))
+        return false;
+    uint32_t sfo_offset = 0;
+    uint32_t sfo_size = 0;
+    for (uint32_t i = 0; i < info_count; i++) {
+        uint32_t block[4]{};
+        if (!in_pkg(info_offset, sizeof(block)) || fseek(infile.get(), info_offset, SEEK_SET) != 0
+            || fread(block, sizeof(block), 1, infile.get()) != 1)
+            return false;
+        if (byte_swap(block[0]) == 14) {
+            sfo_offset = byte_swap(block[2]);
+            sfo_size = byte_swap(block[3]);
+        }
+        const uint64_t next_info_offset = info_offset + 2 * sizeof(uint32_t) + byte_swap(block[1]);
+        if (next_info_offset < info_offset || next_info_offset > pkg_size)
+            return false;
+        info_offset = next_info_offset;
+    }
+    if (!in_pkg(sfo_offset, sfo_size) || sfo_size < sizeof(SfoHeader))
+        return false;
+
+    std::vector<uint8_t> sfo_buffer(sfo_size);
+    if (fseek(infile.get(), sfo_offset, SEEK_SET) != 0
+        || fread(sfo_buffer.data(), sfo_buffer.size(), 1, infile.get()) != 1)
+        return false;
+    info = {};
+    return sfo::get_param_info(info, sfo_buffer, 0);
 }
 
 std::string find_pkg_zrif(const fs::path &pkg_path, const fs::path &vita_fs_path) {

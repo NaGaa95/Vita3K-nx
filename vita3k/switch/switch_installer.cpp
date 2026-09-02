@@ -18,6 +18,7 @@
 #include "switch_installer.h"
 
 #include <archive.h>            // install_archive (.vpk / .zip / .vci)
+#include <config/state.h>
 #include <emuenv/state.h>
 #include <packages/functions.h> // install_pup
 #include <packages/license.h>   // copy_license, validate_zrif
@@ -698,6 +699,113 @@ static NestedScan scan_archive(const fs::path &archive_path) {
     return scan;
 }
 
+static bool pkg_is_patch(const fs::path &pkg, std::string *title_id) {
+    sfo::SfoAppInfo info;
+    if (!peek_pkg_info(pkg, info))
+        return false;
+    if (title_id)
+        *title_id = info.app_title_id;
+    return info.app_category.contains("gp");
+}
+
+// True when every content in the archive is a patch.
+static bool archive_only_patches(const fs::path &archive_path) {
+    if (lower(archive_path.extension().string()) == ".vci")
+        return false;
+    mz_zip_archive zip{};
+    std::memset(&zip, 0, sizeof(zip));
+    FILE *fp = std::fopen(archive_path.string().c_str(), "rb");
+    if (!fp)
+        return false;
+    if (!mz_zip_reader_init_cfile(&zip, fp, 0, 0)) {
+        std::fclose(fp);
+        return false;
+    }
+    int contents = 0;
+    int patches = 0;
+    const mz_uint count = mz_zip_reader_get_num_files(&zip);
+    for (mz_uint i = 0; i < count; i++) {
+        mz_zip_archive_file_stat stat;
+        if (!mz_zip_reader_file_stat(&zip, i, &stat) || mz_zip_reader_is_file_a_directory(&zip, i))
+            continue;
+        if (!std::string(stat.m_filename).ends_with("sce_sys/param.sfo"))
+            continue;
+        size_t size = 0;
+        void *data = mz_zip_reader_extract_to_heap(&zip, i, &size, 0);
+        if (!data)
+            continue;
+        const vfs::FileBuffer buffer(static_cast<const uint8_t *>(data), static_cast<const uint8_t *>(data) + size);
+        mz_free(data);
+        sfo::SfoAppInfo info;
+        contents++;
+        if (sfo::get_param_info(info, buffer, 0) && info.app_category.contains("gp"))
+            patches++;
+    }
+    mz_zip_reader_end(&zip);
+    std::fclose(fp);
+    return contents > 0 && contents == patches;
+}
+
+// A dump already in ux0/app is decrypted in place; anything else is copied in.
+static void install_folder(EmuEnvState &emuenv, InstallerUI &ui, const fs::path &folder) {
+    ui.step("Folder: " + folder.filename().string());
+    vfs::FileBuffer param;
+    sfo::SfoAppInfo info;
+    if (!fs_utils::read_data(folder / "sce_sys/param.sfo", param) || !sfo::get_param_info(info, param, emuenv.cfg.sys_lang)) {
+        ui.note("FAILED: sce_sys/param.sfo is unreadable");
+        ui.done("Failed. Nothing was installed - see the log.");
+        return;
+    }
+    const std::string label = info.app_title.empty() ? info.app_title_id : info.app_title;
+    const std::string suffix = info.app_category.empty() ? "" : " [" + info.app_category + "]";
+    const bool is_app = !info.app_category.contains("gp") && info.app_category != "ac";
+    const fs::path app_dir = emuenv.vita_fs_path / "ux0/app" / info.app_title_id;
+    boost::system::error_code ec;
+    const bool app_exists = is_app && fs::exists(app_dir, ec) && !ec;
+    const bool in_place = app_exists && fs::equivalent(folder, app_dir, ec) && !ec;
+    LOG_WARN("Installer folder target: '{}' ({} {}) in_place={}", folder.string(), info.app_title_id, info.app_category, in_place);
+
+    bool ok = false;
+    try {
+        if (in_place) {
+            const fs::path work_bin = folder / "sce_sys/package/work.bin";
+            if (fs::is_regular_file(work_bin, ec)) {
+                emuenv.app_info = info;
+                ok = decrypt_install_nonpdrm(emuenv, work_bin, folder,
+                    [&](float pct) { ui.progress(static_cast<int>(pct * 100.f)); });
+                if (!ok)
+                    ui.note("FAILED: NoNpDrm decryption failed - see the log");
+            } else if (fs::exists(folder / "sce_pfs", ec)) {
+                ui.note("FAILED: encrypted dump without sce_sys/package/work.bin");
+            } else {
+                ui.note("Nothing to do: " + label + " is already installed");
+                ok = true;
+            }
+        } else {
+            if (app_exists && !ui.confirm(label + " (" + info.app_title_id + ") is already installed.",
+                    "Reinstall it", "Keep the installed copy")) {
+                ui.note("SKIPPED: kept the installed copy");
+                ui.done("Nothing to install.");
+                return;
+            }
+            ok = install_contents(emuenv, folder) > 0;
+            if (!ok)
+                ui.note("FAILED (see the log)");
+        }
+    } catch (const std::exception &e) {
+        LOG_ERROR("install_folder('{}') threw: {}", folder.string(), e.what());
+        ui.note(std::string("ERROR: ") + e.what());
+        ok = false;
+    }
+    if (ok && is_app && !fs::is_regular_file(app_dir / "sce_sys" / "param.sfo", ec)) {
+        ui.note("FAILED: " + label + " did not land in ux0/app/" + info.app_title_id);
+        ok = false;
+    }
+    if (ok)
+        ui.note("OK: " + label + suffix);
+    ui.done(ok ? "Done. 1 item installed." : "Failed. Nothing was installed - see the log.");
+}
+
 // Extracts the named members into `dest`, flattened to their base names so a
 // crafted archive cannot write outside it. Returns what landed on disk.
 static std::vector<fs::path> extract_nested(const fs::path &archive_path, const fs::path &dest,
@@ -776,6 +884,8 @@ void run_install(EmuEnvState &emuenv, InstallerUI &ui, const fs::path &target = 
     // everything dropped in sdmc:/switch/vita3k/install.
     boost::system::error_code single_ec;
     const bool single = !target.empty() && fs::is_regular_file(target, single_ec) && !single_ec;
+    const bool single_folder = !target.empty() && fs::is_directory(target, single_ec) && !single_ec
+        && fs::is_regular_file(target / "sce_sys/param.sfo", single_ec) && !single_ec;
     // Where the launcher stages imports. A single target can now live outside it:
     // the launcher installs an SD-resident archive in place rather than copying it.
     const fs::path staging_dir = fs::path("sdmc:/switch/vita3k/install");
@@ -790,6 +900,10 @@ void run_install(EmuEnvState &emuenv, InstallerUI &ui, const fs::path &target = 
     }
     if (single)
         LOG_WARN("Installer target: single file '{}'", target.string());
+    if (single_folder) {
+        install_folder(emuenv, ui, target);
+        return;
+    }
 
     try {
         if (!fs::exists(install_dir))
@@ -936,6 +1050,10 @@ void run_install(EmuEnvState &emuenv, InstallerUI &ui, const fs::path &target = 
             categorise(file);
     }
 
+    // An update overlays the installed game, so the game must land first.
+    std::stable_partition(pkgs.begin(), pkgs.end(), [](const fs::path &p) { return !pkg_is_patch(p, nullptr); });
+    std::stable_partition(archives.begin(), archives.end(), [](const fs::path &p) { return !archive_only_patches(p); });
+
     if (pups.empty() && licenses.empty() && pkgs.empty() && archives.empty()) {
         ui.step("Nothing to install");
         ui.note("Nothing to install. Put files in " + install_dir.string()
@@ -1018,6 +1136,14 @@ void run_install(EmuEnvState &emuenv, InstallerUI &ui, const fs::path &target = 
     for (const auto &pkg : pkgs) {
         ui.step("Package: " + pkg.filename().string() + " (decrypting, please wait)");
         try {
+            std::string patch_title_id;
+            if (pkg_is_patch(pkg, &patch_title_id)
+                && !fs::is_regular_file(emuenv.vita_fs_path / "ux0/app" / patch_title_id / "sce_sys" / "param.sfo")) {
+                ui.note("SKIPPED: install " + patch_title_id + " before its update.");
+                items_failed++;
+                pkg_failed = true;
+                continue;
+            }
             std::string zrif = find_pkg_zrif(pkg, emuenv.vita_fs_path);
             if (zrif.empty())
                 zrif = staged_zrif; // typed into the launcher for this package
@@ -1129,8 +1255,11 @@ void run_install(EmuEnvState &emuenv, InstallerUI &ui, const fs::path &target = 
                     }
                     if (state)
                         ui.note("OK: " + label + suffix);
-                    else if (content.state == state)
-                        ui.note("FAILED: " + label + suffix);
+                    else if (content.state == state) {
+                        const bool patch_without_app = content.category.contains("gp")
+                            && !fs::is_regular_file(emuenv.vita_fs_path / "ux0/app" / content.title_id / "sce_sys" / "param.sfo");
+                        ui.note("FAILED: " + label + suffix + (patch_without_app ? " - install the game before its update" : ""));
+                    }
                     ok_count += state ? 1 : 0;
                     (state ? items_ok : items_failed)++;
                 }

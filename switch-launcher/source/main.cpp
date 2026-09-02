@@ -4433,6 +4433,24 @@ static bool installBrowserFile(const BrowserItem &item){
   return false;
 }
 
+// A game folder (sce_sys/param.sfo inside) picked in the browser: hand its path to the
+// emulator installer, which decrypts a dump already in ux0/app in place or copies it in.
+static bool browserFolderIsVitaApp(const std::string &path){
+  struct stat info{};
+  return stat((path+"/sce_sys/param.sfo").c_str(),&info)==0&&S_ISREG(info.st_mode);
+}
+static bool installBrowserFolder(const BrowserItem &item){
+  if(item.kind!=BrowserItemKind::Directory)return false;
+  if(remove(INSTALL_ZRIF)!=0&&errno!=ENOENT){
+    modalMessageStatic("Import failed",{"A stale zRIF request could not be removed."});return false;
+  }
+  if(!writeAtomicText(INSTALL_TARGET,item.path+"\n")){
+    modalMessageStatic("Import failed",{"The one-shot installer request could not be written."});return false;
+  }
+  toastStatic("Starting Vita3K installer");
+  g_pendingInstall=true;return true;
+}
+
 static bool browserActions(const BrowserItem &item){
   if(item.kind!=BrowserItemKind::Directory&&item.kind!=BrowserItemKind::File)return false;
   enum Action{Install,Copy,Move,Rename,Pin};
@@ -4447,6 +4465,8 @@ static bool browserActions(const BrowserItem &item){
     } else if(importFileType(item.label,ImportKind::FirmwarePup,&importType)){
       installable=true;actions.push_back(Install);labels.push_back("Use as Vita firmware");
     }
+  } else if(item.kind==BrowserItemKind::Directory&&browserFolderIsVitaApp(item.path)){
+    installable=true;actions.push_back(Install);labels.push_back("Install Vita app (folder)");
   }
   actions.push_back(Copy);labels.push_back("Copy");
   actions.push_back(Move);labels.push_back("Move");
@@ -4460,7 +4480,7 @@ static bool browserActions(const BrowserItem &item){
   const int selected=dropdown("File options",choices.data(),(int)choices.size(),-1);
   if(selected<0||selected>=(int)actions.size())return false;
   switch(actions[selected]){
-    case Install:return installable&&installBrowserFile(item);
+    case Install:return installable&&(item.kind==BrowserItemKind::Directory?installBrowserFolder(item):installBrowserFile(item));
     case Copy:g_fileClipboard={item.path,false};toastStatic("Copied to clipboard");return false;
     case Move:g_fileClipboard={item.path,true};toastStatic("Move queued");return false;
     case Rename:{
@@ -6316,6 +6336,8 @@ static void renderGrid(int sel,int top,const char*gamedirLabel){
   clearUiBackground();
   g_cover_budget = COVER_REQUEST_BUDGET;
   if(Game *selected=visibleGame(sel)) ensureCover(*selected,true);
+  const Game *selectedGame=visibleGame(sel);
+  const std::string topLabel=selectedGame?selectedGame->title_id:std::string(gamedirLabel?gamedirLabel:"");
   GLay L=gridLayout();
   int n=(int)g_visibleGames.size(), per=L.cols*L.rows;
   int pages=n?(n+per-1)/per:1,pageIndex=n?sel/per:0,page=pageIndex+1;
@@ -6328,7 +6350,7 @@ static void renderGrid(int sel,int top,const char*gamedirLabel){
     if(g_logo){SDL_Rect logoRect={18,10,logoH,logoH};SDL_RenderCopy(g_ren,g_logo,nullptr,&logoRect);}
     std::string shownInfo=fittedText(g_font_sm,pinfo,std::max(80,SW-2*(logoH+34)));
     drawTextC(g_font_sm,SW/2,highResolutionUi()?22:15,shownInfo.c_str(),COL_VAL);
-    std::string shownFolder=fittedText(g_font_sm,gamedirLabel?gamedirLabel:"",SW-52);
+    std::string shownFolder=fittedText(g_font_sm,topLabel.c_str(),SW-52);
     drawTextC(g_font_sm,SW/2,bandH-TTF_FontHeight(g_font_sm)-12,shownFolder.c_str(),COL_DIM);
   } else {
     int lh=bandH-12;
@@ -6336,7 +6358,7 @@ static void renderGrid(int sel,int top,const char*gamedirLabel){
     drawTextC(g_font,SW/2,(bandH-TTF_FontHeight(g_font))/2,pinfo,COL_VAL);
     int pinfoRight=SW/2+textW(g_font,pinfo)/2;
     int folderMaxW=(SW-34)-(pinfoRight+24);
-    drawScrollTextR(g_font_sm,SW-34,(bandH-TTF_FontHeight(g_font_sm))/2,folderMaxW,gamedirLabel,COL_DIM);
+    drawScrollTextR(g_font_sm,SW-34,(bandH-TTF_FontHeight(g_font_sm))/2,folderMaxW,topLabel.c_str(),COL_DIM);
   }
 
   int rowStride=L.chh+(L.titleH?L.titleH+8:0)+L.gapy;
