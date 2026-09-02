@@ -30,6 +30,22 @@ TRACY_MODULE_NAME(SceNgs);
 // Remember the voice when a missing patch is followed by a volume update.
 static thread_local ngs::Voice *last_missing_output_patch_voice = nullptr;
 
+// Rack teardown frees the voice's mutex with no notice; confirm it's still racked before locking a stale voice.
+static bool voice_is_racked(EmuEnvState &emuenv, const ngs::Voice *voice) {
+    for (const ngs::System *system : emuenv.ngs.systems) {
+        if (!system)
+            continue;
+        for (const ngs::Rack *rack : system->racks) {
+            if (!rack)
+                continue;
+            for (const Ptr<ngs::Voice> &racked : rack->voices)
+                if (racked.get(emuenv.mem) == voice)
+                    return true;
+        }
+    }
+    return false;
+}
+
 struct SceNgsVolumeMatrix {
     SceFloat32 matrix[SCE_NGS_MAX_SYSTEM_CHANNELS][SCE_NGS_MAX_SYSTEM_CHANNELS];
 };
@@ -959,13 +975,16 @@ EXPORT(SceInt32, sceNgsVoicePatchSetVolumesMatrix, ngs::Patch *patch, const SceN
     if (!emuenv.cfg.current_config.ngs_enable)
         return 0;
 
-    // Preserve gain for a missing patch's implicit route to the master.
-    if ((!patch || patch->output_sub_index == -1) && matrix && last_missing_output_patch_voice) {
-        ngs::Voice *voice = last_missing_output_patch_voice;
-        last_missing_output_patch_voice = nullptr;
+    // A routing with no patch to hand back: keep its gain on the voice so the
+    // implicit route into the master can still use it.
+    ngs::Voice *pending = last_missing_output_patch_voice;
+    last_missing_output_patch_voice = nullptr;
+    if ((!patch || patch->output_sub_index == -1) && matrix && pending) {
+        if (!voice_is_racked(emuenv, pending))
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
 
-        const std::lock_guard<std::mutex> guard(*voice->voice_mutex);
-        memcpy(voice->implicit_volume_matrix, matrix->matrix, sizeof(voice->implicit_volume_matrix));
+        const std::lock_guard<std::mutex> guard(*pending->voice_mutex);
+        memcpy(pending->implicit_volume_matrix, matrix->matrix, sizeof(pending->implicit_volume_matrix));
 
         return SCE_NGS_OK;
     }
