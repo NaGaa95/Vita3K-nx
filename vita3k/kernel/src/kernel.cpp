@@ -31,6 +31,7 @@
 #include <util/log.h>
 #include <util/switch_thread.h>
 
+#include <SDL3/SDL_error.h>
 #include <SDL3/SDL_mutex.h>
 #include <SDL3/SDL_thread.h>
 
@@ -181,7 +182,28 @@ ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<c
     return create_thread(mem, name, entry_point, SCE_KERNEL_DEFAULT_PRIORITY, SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT, SCE_KERNEL_STACK_SIZE_USER_MAIN, nullptr);
 }
 
+void KernelState::reap_host_threads(bool wait_all) {
+    std::vector<SDL_Thread *> completed;
+    {
+        const std::scoped_lock lock(mutex, host_threads_mutex);
+        auto it = host_threads.begin();
+        while (it != host_threads.end()) {
+            if (wait_all || !threads.contains(it->first)) {
+                completed.push_back(it->second);
+                it = host_threads.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    for (SDL_Thread *host_thread : completed)
+        SDL_WaitThread(host_thread, nullptr);
+}
+
 ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option) {
+    reap_host_threads(false);
+
     ThreadStatePtr thread = std::make_shared<ThreadState>(get_next_uid(), *this, mem);
     if (thread->init(name, entry_point, init_priority, affinity_mask, stack_size, option) < 0)
         return nullptr;
@@ -196,7 +218,25 @@ ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<c
     params.thid = thread->id;
 
     params.host_may_destroy_params = SDL_CreateSemaphore(0);
-    SDL_DetachThread(SDL_CreateThread(&thread_function, thread->name.c_str(), &params));
+    SDL_Thread *host_thread = params.host_may_destroy_params
+        ? SDL_CreateThread(&thread_function, thread->name.c_str(), &params)
+        : nullptr;
+    if (!host_thread) {
+        LOG_ERROR("Failed to create host thread '{}': {}", thread->name, SDL_GetError());
+        if (params.host_may_destroy_params)
+            SDL_DestroySemaphore(params.host_may_destroy_params);
+        {
+            const std::lock_guard<std::mutex> lock(mutex);
+            threads.erase(thread->id);
+            corenum_allocator.free_corenum(get_processor_id(*thread->cpu));
+            thread_deleted_cond.notify_all();
+        }
+        return nullptr;
+    }
+    {
+        const std::lock_guard<std::mutex> lock(host_threads_mutex);
+        host_threads.emplace_back(thread->id, host_thread);
+    }
     SDL_WaitSemaphore(params.host_may_destroy_params);
     SDL_DestroySemaphore(params.host_may_destroy_params);
 
@@ -231,6 +271,8 @@ void KernelState::process_exit() {
 
     std::unique_lock<std::mutex> lock(mutex);
     thread_deleted_cond.wait(lock, [this] { return threads.empty(); });
+    lock.unlock();
+    reap_host_threads(true);
 }
 
 void KernelState::pause_threads() {

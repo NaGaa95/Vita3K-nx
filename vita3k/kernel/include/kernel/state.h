@@ -43,6 +43,7 @@
 
 struct ThreadState;
 struct MemState;
+struct SDL_Thread;
 
 struct CodecEngineBlock;
 
@@ -188,7 +189,11 @@ struct KernelState {
     SceKernelModuleInfo *find_module_by_addr(Address address);
 
 private:
+    void reap_host_threads(bool wait_all);
+
     std::atomic<SceUID> next_uid{ 1 };
     std::map<SceUID, ThreadStatus> paused_threads_status;
     std::atomic<bool> threads_paused{ false };
+    std::mutex host_threads_mutex;
+    std::vector<std::pair<SceUID, SDL_Thread *>> host_threads;
 };
