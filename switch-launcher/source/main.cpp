@@ -339,7 +339,7 @@ static const Choice C_launcherRotation[] = { {"0 degrees","0"}, {"90 degrees","1
                                              {"180 degrees","2"}, {"270 degrees","3"} };
 static const Choice C_launcherLanguage[] = { {"System","system"}, {"English","en"},
   {"Français","fr"}, {"Deutsch","de"}, {"Español","es"}, {"Italiano","it"},
-  {"Português","pt"} };
+  {"Português","pt"}, {"简体中文","zh-Hans"}, {"繁體中文","zh-Hant"} };
 static const Choice C_gridColumns[] = { {"3","3"}, {"4","4"}, {"5","5"}, {"6","6"}, {"7","7"}, {"8","8"} };
 static const Choice C_gridRows[] = { {"1","1"}, {"2","2"}, {"3","3"} };
 static const Choice C_lsfgFlow[] = { {"Quarter","0.25"}, {"Half","0.5"} };
@@ -1240,6 +1240,52 @@ static void makeGlyphs(){
   g_gPlus=makeGlyph("+",false); g_gMinus=makeGlyph("-",false);
   g_gLeft=makeGlyph("<",false); g_gRight=makeGlyph(">",false);
   g_gL=makeGlyph("L",true); g_gR=makeGlyph("R",true);
+}
+
+static PlSharedFontType requestedUiFontType(){
+  const std::string_view language=LauncherLocalization::CurrentLanguage();
+  if(language=="zh-Hans") return PlSharedFontType_ChineseSimplified;
+  if(language=="zh-Hant") return PlSharedFontType_ChineseTraditional;
+  return PlSharedFontType_Standard;
+}
+
+static void destroyGlyphs(){
+  SDL_Texture **glyphs[]={&g_gA,&g_gB,&g_gX,&g_gY,&g_gPlus,&g_gMinus,
+                         &g_gLeft,&g_gRight,&g_gL,&g_gR};
+  for(SDL_Texture **glyph:glyphs){
+    if(*glyph) SDL_DestroyTexture(*glyph);
+    *glyph=nullptr;
+  }
+}
+
+static bool loadUiFonts(){
+  PlFontData data{};
+  if(R_FAILED(plGetSharedFontByType(&data,requestedUiFontType()))||
+     !data.address||!data.size||data.size>INT_MAX) return false;
+  const int scale=SH>=1080?1:0;
+  auto openFont=[&](int size){
+    SDL_RWops *stream=SDL_RWFromConstMem(data.address,(int)data.size);
+    return stream?TTF_OpenFontRW(stream,1,size):nullptr;
+  };
+  TTF_Font *small=openFont(scale?26:20);
+  TTF_Font *normal=openFont(scale?32:26);
+  TTF_Font *large=openFont(scale?52:40);
+  if(!small||!normal||!large){
+    if(small) TTF_CloseFont(small);
+    if(normal) TTF_CloseFont(normal);
+    if(large) TTF_CloseFont(large);
+    return false;
+  }
+  clearTextCaches();
+  destroyGlyphs();
+  if(g_font_sm) TTF_CloseFont(g_font_sm);
+  if(g_font) TTF_CloseFont(g_font);
+  if(g_font_big) TTF_CloseFont(g_font_big);
+  g_font_sm=small;
+  g_font=normal;
+  g_font_big=large;
+  makeGlyphs();
+  return true;
 }
 
 // --- control hints: centred row of {glyph,label}; each item's tap rect is recorded for touch.
@@ -4551,8 +4597,11 @@ static void launcherSettingsScreen() {
   const int updateRow=listCount,selectionCount=listCount+1;
   int sel=std::max(0,std::min(savedSelection,selectionCount-1)),top=0;
   auto applyChange=[&](){
+    const std::string previousLanguage(LauncherLocalization::CurrentLanguage());
     LauncherLocalization::SetLanguage(storeGet(g_global,"Wrapper/Language","system"));
-    clearTextCaches();
+    if(previousLanguage!=LauncherLocalization::CurrentLanguage()&&!loadUiFonts())
+      toastStatic("Could not load the system font.");
+    else clearTextCaches();
     applyLauncherAppearance();
     const int requested=atoi(storeGet(g_global,"Wrapper/LauncherRotation","0"));
     if(!configureLauncherOrientation(requested)){
@@ -6720,12 +6769,7 @@ static void cleanupLauncher() {
     if (g_flag[i]) SDL_DestroyTexture(g_flag[i]);
     g_flag[i]=nullptr;
   }
-  SDL_Texture **glyphs[] = { &g_gA, &g_gB, &g_gX, &g_gY, &g_gPlus, &g_gMinus,
-                             &g_gLeft, &g_gRight, &g_gL, &g_gR };
-  for (SDL_Texture **glyph : glyphs) {
-    if (*glyph) SDL_DestroyTexture(*glyph);
-    *glyph=nullptr;
-  }
+  destroyGlyphs();
   if (g_logo) SDL_DestroyTexture(g_logo);
   if (g_glowTexture) SDL_DestroyTexture(g_glowTexture);
   g_logo=nullptr; g_glowTexture=nullptr;
@@ -6855,6 +6899,11 @@ int main(int argc, char **argv){
   const Result romfsResult=romfsInit();
   if(R_FAILED(romfsResult)) return earlyStartupFailure("Could not mount the embedded launcher RomFS.",romfsResult);
   g_romfsReady=true;
+  struct stat launcherStat{};
+  recoverAtomicFile(LAUNCHER_INI);
+  const bool firstRun=stat(LAUNCHER_INI,&launcherStat)!=0;
+  storeLoad(g_global,LAUNCHER_INI);
+  LauncherLocalization::SetLanguage(storeGet(g_global,"Wrapper/Language","system"));
   SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS,"1");
   SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY,"linear");
   if(SDL_Init(SDL_INIT_VIDEO|SDL_INIT_GAMECONTROLLER|SDL_INIT_AUDIO)!=0){ return startupFailure("SDL initialization failed."); }
@@ -6890,21 +6939,9 @@ int main(int argc, char **argv){
 
   if(R_FAILED(plInitialize(PlServiceType_User))) return startupFailure("System font service initialization failed.");
   g_plReady=true;
-  PlFontData fd{};
-  if(R_FAILED(plGetSharedFontByType(&fd,PlSharedFontType_Standard))||!fd.address||!fd.size||fd.size>INT_MAX)
-    return startupFailure("Could not load the system font.");
-  int sc=SH>=1080?1:0;
-  auto openFont=[&](int size)->TTF_Font* {
-    SDL_RWops *rw=SDL_RWFromConstMem(fd.address,(int)fd.size);
-    return rw?TTF_OpenFontRW(rw,1,size):nullptr;
-  };
-  g_font_sm=openFont(sc?26:20);
-  g_font=openFont(sc?32:26);
-  g_font_big=openFont(sc?52:40);
-  if(!g_font_sm||!g_font||!g_font_big) return startupFailure("Could not open the system font.");
-  makeGlyphs();   // button-icon textures for the control hints (needs g_font_sm)
+  if(!loadUiFonts()) return startupFailure("Could not load the system font.");
   if(isAppletMode()){
-    LauncherLocalization::SetLanguage("system");applyLauncherAppearance();runAppletInstaller();cleanupLauncher();return 0;
+    applyLauncherAppearance();runAppletInstaller();cleanupLauncher();return 0;
   }
   if(R_SUCCEEDED(socketInitializeDefault())){
     if(curl_global_init(CURL_GLOBAL_ALL)==CURLE_OK) g_networkReady=true;
@@ -6926,10 +6963,6 @@ int main(int argc, char **argv){
   std::string importRecoveryError;
   const bool importRecoveryOk=recoverInterruptedImports(importRecoveryError);
 
-  struct stat bst;
-  recoverAtomicFile(LAUNCHER_INI);
-  bool firstRun = (stat(LAUNCHER_INI, &bst) != 0);
-  storeLoad(g_global, LAUNCHER_INI);
   storeLoad(g_titles, TITLES_INI);
   storeLoad(g_recent, RECENT_INI);
   { int sm = atoi(storeGet(g_global,"Wrapper/SortMode","0")); if(sm>=0 && sm<SORT_COUNT) g_sort = sm; }
