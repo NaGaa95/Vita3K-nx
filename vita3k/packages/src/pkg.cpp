@@ -233,6 +233,42 @@ bool decrypt_install_nonpdrm(EmuEnvState &emuenv, const fs::path &drmlicpath, co
     return commit_staged_replace(title_id_src, title_id_dst, backup_path);
 }
 
+bool decrypt_install_nonpdrm_from(EmuEnvState &emuenv, const fs::path &drmlicpath, const fs::path &source_path, const fs::path &title_path, const std::function<void(float)> &progress_callback) {
+    fs::path title_id_src = source_path;
+    fs::path title_id_dst = transaction_sibling(title_path, ".decrypting");
+    const fs::path backup_path = transaction_sibling(title_path, ".decrypt-backup");
+    if (!remove_path_checked(title_id_dst, "stale decryption directory"))
+        return false;
+    if (!prepare_staged_replace(title_path, title_id_dst, backup_path))
+        return false;
+
+    fs::ifstream binfile(drmlicpath, std::ios::in | std::ios::binary | std::ios::ate);
+    if (!binfile) {
+        LOG_ERROR("Failed to open NoNpDrm license '{}'", drmlicpath);
+        return false;
+    }
+    std::string zRIF = rif2zrif(binfile);
+    F00DEncryptorTypes f00d_enc_type = F00DEncryptorTypes::native;
+    std::string f00d_arg = std::string();
+
+    PfsProgressCallback pfs_progress = [&](std::uint64_t processed, std::uint64_t total, const std::string &) {
+        if (progress_callback)
+            progress_callback(total ? static_cast<float>(processed) / static_cast<float>(total) : 1.f);
+    };
+
+    if (execute(zRIF, title_id_src, title_id_dst, f00d_enc_type, f00d_arg, pfs_progress) < 0) {
+        remove_path_checked(title_id_dst, "failed NoNpDrm output");
+        return false;
+    }
+
+    if (!emuenv.app_info.app_category.contains("gp") && !copy_license(emuenv, drmlicpath)) {
+        remove_path_checked(title_id_dst, "uncommitted NoNpDrm output");
+        return false;
+    }
+
+    return commit_staged_replace(title_path, title_id_dst, backup_path);
+}
+
 bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_zRIF, const std::function<void(float)> &progress_callback) {
     std::unique_ptr<FILE, decltype(&fclose)> infile_owner(FOPEN(pkg_path.c_str(), "rb"), &fclose);
     FILE *const infile = infile_owner.get();

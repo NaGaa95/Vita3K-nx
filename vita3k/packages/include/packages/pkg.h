@@ -85,4 +85,6 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
 std::string find_pkg_zrif(const fs::path &pkg_path, const fs::path &vita_fs_path);
 // Title id and category from the pkg's own param.sfo, which sits unencrypted in the header area.
 bool peek_pkg_info(const fs::path &pkg_path, sfo::SfoAppInfo &info);
+// Decrypts the NoNpDrm dump at source_path straight into title_path (staged, then swapped in).
+bool decrypt_install_nonpdrm_from(EmuEnvState &emuenv, const fs::path &drmlicpath, const fs::path &source_path, const fs::path &title_path, const std::function<void(float)> &progress_callback = nullptr);
 bool decrypt_install_nonpdrm(EmuEnvState &emuenv, const fs::path &drmlicpath, const fs::path &title_path, const std::function<void(float)> &progress_callback = nullptr);

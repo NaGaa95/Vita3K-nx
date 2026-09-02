@@ -746,6 +746,67 @@ static bool archive_only_patches(const fs::path &archive_path) {
     return contents > 0 && contents == patches;
 }
 
+// Copies a game folder into ux0/app through a staging directory, reporting progress per chunk.
+static bool copy_tree_with_progress(const fs::path &source, const fs::path &destination, InstallerUI &ui) {
+    boost::system::error_code ec;
+    const fs::path staged = destination.parent_path() / ("." + destination.filename().string() + ".copying");
+    fs::remove_all(staged, ec);
+
+    uint64_t total = 0;
+    for (fs::recursive_directory_iterator it(source, ec), end; !ec && it != end; it.increment(ec))
+        if (fs::is_regular_file(it->path(), ec))
+            total += fs::file_size(it->path(), ec);
+
+    uint64_t done = 0;
+    std::vector<char> chunk(4u * 1024 * 1024);
+    for (fs::recursive_directory_iterator it(source, ec), end; !ec && it != end; it.increment(ec)) {
+        const fs::path relative = fs::relative(it->path(), source, ec);
+        const fs::path target = staged / relative;
+        if (fs::is_directory(it->path(), ec)) {
+            fs::create_directories(target, ec);
+            if (ec)
+                break;
+            continue;
+        }
+        fs::create_directories(target.parent_path(), ec);
+        fs::ifstream in(it->path(), std::ios::binary);
+        fs::ofstream out(target, std::ios::binary | std::ios::trunc);
+        if (!in || !out) {
+            LOG_ERROR("Installer: cannot copy '{}'", it->path().string());
+            fs::remove_all(staged, ec);
+            return false;
+        }
+        while (in) {
+            in.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+            const std::streamsize got = in.gcount();
+            if (got <= 0)
+                break;
+            out.write(chunk.data(), got);
+            done += static_cast<uint64_t>(got);
+            ui.progress(total ? static_cast<int>(done * 100 / total) : 100);
+        }
+        out.close();
+        if (!out) {
+            LOG_ERROR("Installer: write failed for '{}'", target.string());
+            fs::remove_all(staged, ec);
+            return false;
+        }
+    }
+    if (ec) {
+        LOG_ERROR("Installer: folder copy failed: {}", ec.message());
+        fs::remove_all(staged, ec);
+        return false;
+    }
+    fs::remove_all(destination, ec);
+    fs::rename(staged, destination, ec);
+    if (ec) {
+        LOG_ERROR("Installer: cannot move '{}' into place: {}", staged.string(), ec.message());
+        return false;
+    }
+    fsdevCommitDevice("sdmc");
+    return true;
+}
+
 // A dump already in ux0/app is decrypted in place; anything else is copied in.
 static void install_folder(EmuEnvState &emuenv, InstallerUI &ui, const fs::path &folder) {
     ui.step("Folder: " + folder.filename().string());
@@ -788,9 +849,26 @@ static void install_folder(EmuEnvState &emuenv, InstallerUI &ui, const fs::path 
                 ui.done("Nothing to install.");
                 return;
             }
-            ok = install_contents(emuenv, folder) > 0;
-            if (!ok)
-                ui.note("FAILED (see the log)");
+            const fs::path work_bin = folder / "sce_sys/package/work.bin";
+            if (is_app && fs::is_regular_file(work_bin, ec)) {
+                emuenv.app_info = info;
+                ui.step("Decrypting: " + label);
+                ok = decrypt_install_nonpdrm_from(emuenv, work_bin, folder, app_dir,
+                    [&](float pct) { ui.progress(static_cast<int>(pct * 100.f)); });
+                if (!ok)
+                    ui.note("FAILED: NoNpDrm decryption failed - see the log");
+            } else if (is_app && fs::exists(folder / "sce_pfs", ec)) {
+                ui.note("FAILED: encrypted dump without sce_sys/package/work.bin");
+            } else if (is_app) {
+                ui.step("Copying: " + label);
+                ok = copy_tree_with_progress(folder, app_dir, ui);
+                if (!ok)
+                    ui.note("FAILED: could not copy the folder - see the log");
+            } else {
+                ok = install_contents(emuenv, folder) > 0;
+                if (!ok)
+                    ui.note("FAILED (see the log)");
+            }
         }
     } catch (const std::exception &e) {
         LOG_ERROR("install_folder('{}') threw: {}", folder.string(), e.what());
