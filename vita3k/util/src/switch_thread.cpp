@@ -30,9 +30,10 @@ constexpr int32_t GUEST_PRIORITY_LOWEST = 56;
 constexpr int32_t VITA_PRIORITY_HIGHEST = 64;
 constexpr int32_t VITA_PRIORITY_LOWEST = 191;
 
-// The app cores' preemption priority, the one level Horizon round-robins. Host
-// workers with no deadline sit here: below every guest thread, sharing fairly.
-constexpr int32_t BACKGROUND_PRIORITY = 59;
+// Core 3 uses priority 63 for preemptive multithreading (cores 0..2 use 59).
+// Workers allowed on every core must use the lower class so they cannot starve
+// Horizon when the scheduler places them on core 3.
+constexpr int32_t BACKGROUND_PRIORITY = 63;
 
 } // namespace
 

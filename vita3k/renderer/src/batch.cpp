@@ -216,7 +216,9 @@ void reset_command_list(CommandList &command_list) {
 }
 
 static void render_loop(renderer::State &state, DisplayState &display, GxmState &gxm, MemState &mem, Config &config) {
-    switch_pin_to_hardware_priority("render thread", 47);
+    // Rendering is sustained work, so use core 3's preemptive priority rather
+    // than the higher priorities reserved for short hardware helper threads.
+    switch_pin_to_hardware_priority("render thread", 63);
 
     if (state.precompile_requested) {
         // Compiling the shader cache is CPU bound and only ever draws a progress
