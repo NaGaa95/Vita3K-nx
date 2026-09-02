@@ -36,6 +36,7 @@
 #include <unistd.h>
 #endif
 
+#include <algorithm>
 #include <cstring>
 
 TRACY_MODULE_NAME(SceAppUtil);
@@ -161,8 +162,14 @@ EXPORT(int, sceAppUtilBgdlGetStatus) {
     return UNIMPLEMENTED();
 }
 
+static std::string bounded_string(const SceChar8 *data, size_t size) {
+    const auto end = std::find(data, data + size, '\0');
+    return { data, end };
+}
+
 static bool is_addcont_exist(EmuEnvState &emuenv, const SceChar8 *path) {
-    const auto drm_content_id_path{ emuenv.vita_fs_path / "ux0" / emuenv.io.device_paths.addcont0 / reinterpret_cast<const char *>(path) };
+    const auto dir_name = bounded_string(path, SCE_APPUTIL_NP_DRM_ADDCONT_ID_SIZE);
+    const auto drm_content_id_path{ emuenv.vita_fs_path / "ux0" / emuenv.io.device_paths.addcont0 / dir_name };
     // Non-throwing: the Switch sdmc: fsdev reports an error for a missing or
     // empty directory rather than answering, and the throwing overloads abort.
     boost::system::error_code ec;
