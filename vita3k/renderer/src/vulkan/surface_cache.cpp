@@ -835,17 +835,26 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         raw_bits_cast = *raw_cast_supported;
     }
 
+    const auto linear_sibling = [](vk::Format fmt) {
+        return fmt == vk::Format::eR8G8B8A8Srgb ? vk::Format::eR8G8B8A8Unorm : fmt;
+    };
+    const bool is_typeless = bytes_per_pixel_requested != bytes_per_pixel_in_store;
     // Copy in the store gamma to preserve bytes; apply the requested gamma through the view.
+    // A typeless cast is written by the reinterpret compute pass, and sRGB images are not
+    // storage-capable on NVK, so its image is always linear and gamma lives in the view.
+    // A typeless view of a float store carries bit patterns, not colours: its gamma bit is
+    // ignored (Resistance / Black Ops rebuild halves from it and go dark if it is decoded).
+    const bool cast_keeps_gamma = is_typeless && is_rgba8(vk_format) && !store_is_f16(info.format);
     const vk::Format cast_view_format = raw_bits_cast ? vk::Format::eR16G16B16A16Unorm
-        : (bytes_per_pixel_requested != bytes_per_pixel_in_store)
-        ? (store_is_f16(info.format) ? unsigned_sibling(vk_format) : vk_format)
+        : is_typeless
+        ? (store_is_f16(info.format) ? unsigned_sibling(linear_sibling(vk_format)) : linear_sibling(vk_format))
         : ((is_rgba8(vk_format) && is_rgba8(info.texture.format)) ? info.texture.format : vk_format);
     const vk::Format cast_sampled_format = raw_bits_cast ? cast_view_format
-        : (bytes_per_pixel_requested != bytes_per_pixel_in_store)
-        ? cast_view_format
+        : is_typeless
+        ? (cast_keeps_gamma ? vk_format : cast_view_format)
         : vk_format;
-    const bool cast_needs_alt_gamma = (bytes_per_pixel_requested == bytes_per_pixel_in_store)
-        && is_rgba8(vk_format) && is_rgba8(info.texture.format);
+    const bool cast_needs_alt_gamma = is_rgba8(cast_view_format)
+        && (is_typeless ? cast_keeps_gamma : is_rgba8(info.texture.format));
 
     // TODO: this is true only for linear textures (and also kind of for tiled textures) (and in this case start_x = 0),
     // for swizzled textures this is different
