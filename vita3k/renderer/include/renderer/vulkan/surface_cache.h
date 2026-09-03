@@ -143,6 +143,14 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
 
     std::shared_ptr<bool> dirty = std::make_shared<bool>(false);
 
+#ifdef __SWITCH__
+    // Horizon has no resumable page faults, so the write trap never raises
+    // `dirty`. Compare a hash of what was synced out instead.
+    uint64_t synced_hash = 0;
+    uint64_t hash_checked_scene = 0;
+    bool synced_hash_valid = false;
+#endif
+
     ColorSurfaceCacheInfo() = default;
     ~ColorSurfaceCacheInfo();
 };
@@ -322,6 +330,9 @@ public:
 
     // Called after the render has been done
     void perform_post_surface_sync(const MemState &mem, ColorSurfaceCacheInfo *surface);
+#ifdef __SWITCH__
+    void perform_post_surface_sync_impl(const MemState &mem, ColorSurfaceCacheInfo *surface);
+#endif
 
     // destroy all framebuffers associated with render_target
     // (meaning their color or depth-stencil surface is not backed by memory)

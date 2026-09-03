@@ -36,6 +36,11 @@
 #include <util/log.h>
 #include <util/vector_utils.h>
 
+#ifdef __SWITCH__
+#define XXH_INLINE_ALL
+#include <xxhash.h>
+#endif
+
 extern "C" {
 #include <libswscale/swscale.h>
 }
@@ -150,6 +155,15 @@ static void pack_rgba8_to_r4g4b4a4(uint8_t *dst, const uint8_t *src, uint32_t pi
         }
     }
 }
+
+#ifdef __SWITCH__
+static uint64_t hash_synced_surface(const MemState &mem, const ColorSurfaceCacheInfo &info) {
+    const uint8_t *bytes = info.data.cast<const uint8_t>().get(mem);
+    if (!bytes || info.total_bytes == 0)
+        return 0;
+    return XXH3_64bits(bytes, info.total_bytes);
+}
+#endif
 
 static void protect_surface(MemState &mem, ColorSurfaceCacheInfo &info) {
     const bool trap_reads = info.tiling == SurfaceTiling::Linear;
@@ -570,6 +584,9 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
             if (info.data && *info.dirty)
                 protect_surface(mem, info);
             *info.dirty = false;
+#ifdef __SWITCH__
+            info.synced_hash_valid = false;
+#endif
 
             last_written_surface = &info;
 
@@ -727,6 +744,17 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
     if (!overlap)
         return std::nullopt;
 
+#ifdef __SWITCH__
+    {
+        ColorSurfaceCacheInfo &cached = *ite->second;
+        const uint64_t scene = reinterpret_cast<VKContext *>(state.context)->scene_timestamp;
+        if (cached.synced_hash_valid && !*cached.dirty && cached.hash_checked_scene != scene && state.mem) {
+            cached.hash_checked_scene = scene;
+            if (hash_synced_surface(*state.mem, cached) != cached.synced_hash)
+                *cached.dirty = true;
+        }
+    }
+#endif
     if (*ite->second->dirty)
         // Guest wrote to the surface backing memory since it was rendered, so GPU data is stale.
         return std::nullopt;
@@ -2394,7 +2422,19 @@ static void swizzle_text_T(T *pixels, uint32_t nb_pixel, ColorSurfaceCacheInfo *
     }
 }
 
+#ifdef __SWITCH__
 void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, ColorSurfaceCacheInfo *surface) {
+    perform_post_surface_sync_impl(mem, surface);
+    if (surface) {
+        surface->synced_hash = hash_synced_surface(mem, *surface);
+        surface->synced_hash_valid = true;
+    }
+}
+
+void VKSurfaceCache::perform_post_surface_sync_impl(const MemState &mem, ColorSurfaceCacheInfo *surface) {
+#else
+void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, ColorSurfaceCacheInfo *surface) {
+#endif
     if (surface == nullptr)
         return;
 
