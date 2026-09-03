@@ -175,6 +175,12 @@ void invalidate_jit_cache(CPUState &state, Address start, size_t length) {
 std::string disassemble(CPUState &state, uint64_t at, bool thumb, uint16_t *insn_size) {
     MemState &mem = *state.mem;
     const uint8_t *const code = Ptr<const uint8_t>(static_cast<Address>(at)).get(mem);
+    if (!code) {
+        // A guest branch through a null pointer lands here.
+        if (insn_size)
+            *insn_size = 0;
+        return "unmapped";
+    }
     const size_t buffer_size = GiB(4) - at;
     return disassemble(state.disasm, code, buffer_size, at, thumb, insn_size);
 }
