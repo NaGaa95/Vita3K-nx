@@ -138,6 +138,9 @@ static uint32_t switch_pool_alloc_run(uint32_t n) {
 
 // Return run [start, start+n) to the free set, coalescing with adjacent runs.
 static void switch_pool_free_run(uint32_t start, uint32_t n) {
+    // Coalescing changes `n` to the size of the combined run.  Only the pages
+    // passed by the caller transition from allocated to free, however.
+    const uint32_t newly_freed = n;
     auto it = g_switch_pool_runs.lower_bound(start);
     if (it != g_switch_pool_runs.begin()) {
         auto prev = std::prev(it);
@@ -153,7 +156,7 @@ static void switch_pool_free_run(uint32_t start, uint32_t n) {
         g_switch_pool_runs.erase(succ);
     }
     g_switch_pool_runs[start] = n;
-    g_switch_pool_free_pages += n;
+    g_switch_pool_free_pages += newly_freed;
 }
 
 // Permanently remove a single pool slot from the free set (splitting its run). Used
@@ -212,7 +215,11 @@ static bool switch_decommit_range(MemState &state, uint64_t start, uint64_t size
         }
         for (uint32_t k = 0; k < runlen; k++) {
             if (state.use_page_table)
-                state.page_table[gp0 + i + k] = state.memory.get();
+                // A null entry makes Dynarmic use the checked memory callback.
+                // state.memory is only a 768 MiB reservation on Switch, so using
+                // it as an identity entry for an unbacked 32-bit guest page makes
+                // the JIT issue an unrecoverable out-of-range host access.
+                state.page_table[gp0 + i + k] = nullptr;
             g_switch_guest_pool[gp0 + i + k] = -1;
             g_switch_pool_guest[pp + k] = -1;
         }
@@ -512,8 +519,14 @@ bool init(MemState &state, const bool use_page_table) {
 #endif
     if (state.use_page_table) {
         state.page_table = PageTable(new PagePtr[TOTAL_MEM_SIZE / KiB(4)]);
+#ifdef __SWITCH__
+        // Unbacked pages must take Dynarmic's callback path. Unlike the desktop
+        // reservation, state.memory covers only the low host backing pool here.
+        std::fill_n(state.page_table.get(), TOTAL_MEM_SIZE / KiB(4), nullptr);
+#else
         // Default: identity (host == state.memory + addr) for as-yet-uncommitted pages.
         std::fill_n(state.page_table.get(), TOTAL_MEM_SIZE / KiB(4), state.memory.get());
+#endif
     }
 
     const auto handler = [&state](uint8_t *addr, bool write) noexcept {
@@ -1035,10 +1048,17 @@ void add_external_mapping(MemState &mem, Address addr, uint32_t size, uint8_t *a
     }
 #endif
 
-    // set the first page table entry to the original value to be able to call protect_inner
+    // Set the first page-table entry to the flat-map value so protect_inner can
+    // operate on desktop. Protection is advisory/no-op on Switch; publishing the
+    // flat value there creates a race in which the JIT can access beyond its
+    // smaller host reservation.
+#ifndef __SWITCH__
     mem.page_table[addr / KiB(4)] = mem.memory.get();
+#endif
     protect_inner(mem, addr, size, MemPerm::None);
+#ifndef __SWITCH__
     mem.page_table[addr / KiB(4)] = page_table_entry;
+#endif
 
     const std::unique_lock<std::mutex> lock(mem.protect_mutex);
     MemExternalMapping mapping{ addr, size, original_entry };
