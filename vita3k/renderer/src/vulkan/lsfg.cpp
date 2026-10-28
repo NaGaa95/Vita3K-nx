@@ -5,6 +5,8 @@
 #include <renderer/vulkan/lsfg.h>
 #include <renderer/vulkan/state.h>
 
+#include <dialog/state.h>
+
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -244,6 +246,14 @@ void unregister_swapchain()
 
 vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
 {
+  bool dialog_running = false;
+  if (state.common_dialog)
+  {
+    std::lock_guard dialog_lock{state.common_dialog->mutex};
+    dialog_running = state.common_dialog->type != NO_DIALOG &&
+                     state.common_dialog->status == SCE_COMMON_DIALOG_STATUS_RUNNING;
+  }
+
   std::lock_guard lock{s_state.mutex};
 
   const VkQueue queue = static_cast<VkQueue>(state.general_queue);
@@ -255,6 +265,17 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
                           s_state.state == &state &&
                           raw_present_info.swapchainCount == 1 && raw_present_info.pSwapchains &&
                           raw_present_info.pSwapchains[0] == s_state.swapchain;
+
+  if (compatible && dialog_running)
+  {
+    DestroyRuntimeLocked();
+    s_state.initialization_attempted = false;
+    ResetRateTrackingLocked();
+    if (enabled)
+      s_state.status = "LSFG paused for system dialog";
+    return PresentNormally(state, present_info);
+  }
+
   std::uint64_t source_interval = 0;
   if (compatible && (!enabled || s_state.rate_decision != 0))
     source_interval = ObserveSourcePresentLocked();
