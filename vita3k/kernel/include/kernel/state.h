@@ -23,6 +23,9 @@
 #include <kernel/object_store.h>
 #include <kernel/sync_primitives.h>
 #include <kernel/types.h>
+#ifdef __SWITCH__
+#include <kernel/thread/host_threads.h>
+#endif
 #include <mem/allocator.h>
 #include <mem/block.h>
 #include <mem/ptr.h>
@@ -213,6 +216,9 @@ struct KernelState {
     SceKernelModuleInfo *find_module_by_addr(Address address);
 
 private:
+#ifdef __SWITCH__
+    HostThreads host_threads;
+#endif
     std::atomic<SceUID> next_uid{ 1 };
     bool threads_paused = false;
     bool threads_suspended = false;

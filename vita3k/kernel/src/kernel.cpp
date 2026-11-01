@@ -31,7 +31,6 @@
 #include <util/lock_and_find.h>
 #include <util/log.h>
 
-#include <SDL3/SDL_mutex.h>
 #include <SDL3/SDL_thread.h>
 
 int CorenumAllocator::new_corenum() {
@@ -56,7 +55,6 @@ struct ThreadParams {
     KernelState *kernel = nullptr;
     // Passed in rather than looked up, since the guest may delete the thread before it starts
     ThreadStatePtr thread;
-    SDL_Semaphore *host_may_destroy_params = nullptr;
 };
 
 namespace {
@@ -65,9 +63,10 @@ thread_local ThreadStatePtr current_thread;
 
 static int SDLCALL thread_function(void *data) {
     assert(data != nullptr);
-    ThreadParams params = *static_cast<const ThreadParams *>(data);
-    SDL_SignalSemaphore(params.host_may_destroy_params);
-    ThreadStatePtr thread = std::move(params.thread);
+    std::unique_ptr<ThreadParams> params(static_cast<ThreadParams *>(data));
+    KernelState *const kernel = params->kernel;
+    ThreadStatePtr thread = std::move(params->thread);
+    params.reset();
     switch_pin_to_app_cores("guest CPU thread");
     switch_apply_guest_thread_priority(thread->get_priority());
     switch_apply_guest_thread_affinity(thread->get_affinity_mask());
@@ -90,10 +89,10 @@ static int SDLCALL thread_function(void *data) {
     thread.reset();
 
     {
-        std::lock_guard<std::mutex> lock(params.kernel->mutex);
-        params.kernel->threads.erase(id);
-        params.kernel->corenum_allocator.free_corenum(processor_id);
-        params.kernel->thread_deleted_cond.notify_all();
+        std::lock_guard<std::mutex> lock(kernel->mutex);
+        kernel->threads.erase(id);
+        kernel->corenum_allocator.free_corenum(processor_id);
+        kernel->thread_deleted_cond.notify_all();
     }
 
     return r0;
@@ -183,15 +182,22 @@ ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<c
 }
 
 ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr, const SceKernelThreadOptParam *option) {
+#ifdef __SWITCH__
+    host_threads.reap();
+#endif
     const SceUID id = get_next_uid();
     int core_num = corenum_allocator.new_corenum();
+    const bool allocated_core = core_num >= 0;
     if (core_num < 0) {
         LOG_ERROR("Out of core number to allocate, use 0");
         core_num = 0;
     }
     CPUStatePtr cpu = init_cpu(cpu_opt, id, static_cast<std::size_t>(core_num), mem);
-    if (!cpu)
+    if (!cpu) {
+        if (allocated_core)
+            corenum_allocator.free_corenum(core_num);
         return nullptr;
+    }
     ThreadStatePtr thread = std::make_shared<ThreadState>(id, *this, mem, std::move(cpu), name, entry_point.address(), init_priority, affinity_mask, stack_size, attr, option);
 
     {
@@ -203,14 +209,26 @@ ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<c
             thread->suspend();
     }
 
-    ThreadParams params;
-    params.kernel = this;
-    params.thread = thread;
-
-    params.host_may_destroy_params = SDL_CreateSemaphore(0);
-    SDL_DetachThread(SDL_CreateThread(&thread_function, thread->name.c_str(), &params));
-    SDL_WaitSemaphore(params.host_may_destroy_params);
-    SDL_DestroySemaphore(params.host_may_destroy_params);
+    auto params = std::make_unique<ThreadParams>();
+    params->kernel = this;
+    params->thread = thread;
+    SDL_Thread *host = SDL_CreateThread(&thread_function, thread->name.c_str(), params.get());
+    if (!host) {
+        LOG_ERROR("Could not create host thread for '{}' ({}): {}", name, id, SDL_GetError());
+        const std::lock_guard<std::mutex> lock(mutex);
+        threads.erase(id);
+        if (allocated_core)
+            corenum_allocator.free_corenum(core_num);
+        thread_deleted_cond.notify_all();
+        return nullptr;
+    }
+    params.release();
+#ifdef __SWITCH__
+    // libnx has no pthread_detach; join finished threads to release their resources.
+    host_threads.add(host);
+#else
+    SDL_DetachThread(host);
+#endif
 
     return thread;
 }
@@ -241,6 +259,10 @@ void KernelState::process_exit() {
 
     std::unique_lock<std::mutex> lock(mutex);
     thread_deleted_cond.wait(lock, [this] { return threads.empty(); });
+    lock.unlock();
+#ifdef __SWITCH__
+    host_threads.reap(true);
+#endif
 }
 
 void KernelState::pause_threads() {

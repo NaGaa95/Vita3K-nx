@@ -27,6 +27,10 @@ add_library(
 	${SOURCE_LIST}
 )
 
+if(SWITCH)
+	target_sources(kernel PRIVATE include/kernel/thread/host_threads.h src/host_threads.cpp)
+endif()
+
 target_include_directories(kernel PUBLIC include ${CMAKE_CURRENT_SOURCE_DIR}/../emuenv/include)
 target_link_libraries(kernel PUBLIC rtc cpu mem util nids)
 target_link_libraries(kernel PRIVATE SDL3::SDL3 miniz vita-toolchain)
