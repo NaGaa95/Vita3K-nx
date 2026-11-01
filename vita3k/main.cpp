@@ -19,6 +19,7 @@
 #include "interface.h"
 
 #include <app/functions.h>
+#include <app/session_controller.h>
 #include <config/functions.h>
 #include <config/version.h>
 #include <emuenv/state.h>
@@ -27,20 +28,21 @@
 #include <gui-qt/log_widget.h>
 #include <gui-qt/main_window.h>
 #include <gui-qt/persistent_settings.h>
-#include <include/cpu.h>
-#include <include/environment.h>
 #include <io/state.h>
 #include <modules/module_parent.h>
 #include <packages/functions.h>
 #include <packages/license.h>
 #include <packages/pkg.h>
 #include <packages/sfo.h>
+#include <sdl-frontend/session.h>
 #include <shader/spirv_recompiler.h>
 #include <util/log.h>
 #include <util/string_utils.h>
+#include <util/sysinfo.h>
 
 #include <QApplication>
 #include <QMessageBox>
+#include <QSysInfo>
 
 #if USE_DISCORD
 #include <app/discord.h>
@@ -72,7 +74,6 @@ int main(int argc, char *argv[]) {
     qputenv("QT_MAC_NO_CONTAINER_LAYER", "1");
 #endif
 
-    QApplication app(argc, argv);
     QCoreApplication::setOrganizationName(QStringLiteral("Vita3K"));
     QCoreApplication::setApplicationName(QStringLiteral("Vita3K"));
 
@@ -96,7 +97,7 @@ int main(int argc, char *argv[]) {
     bool admin_priv = false;
 #ifdef _WIN32
     // https://stackoverflow.com/questions/8046097/how-to-check-if-a-process-has-the-administrative-rights
-    HANDLE hToken = NULL;
+    HANDLE hToken = nullptr;
     if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken)) {
         TOKEN_ELEVATION Elevation;
         DWORD cbSize = sizeof(TOKEN_ELEVATION);
@@ -145,7 +146,7 @@ int main(int argc, char *argv[]) {
             if (cfg.pkg_path.has_value() && cfg.pkg_zrif.has_value()) {
                 fs::create_directories(cfg.get_vita_fs_path());
                 LOG_INFO("Installing pkg from {} ", *cfg.pkg_path);
-                emuenv.cache_path = root_paths.get_cache_path().generic_path();
+                emuenv.cache_path = root_paths.get_cache_path();
                 emuenv.vita_fs_path = cfg.get_vita_fs_path();
                 auto pkg_path = fs_utils::utf8_to_path(*cfg.pkg_path);
                 install_pkg(pkg_path, emuenv, *cfg.pkg_zrif, [](float) {});
@@ -158,11 +159,16 @@ int main(int argc, char *argv[]) {
 
     fs::create_directories(cfg.get_vita_fs_path());
 
-    gui::i18n::apply_ui_language(app, cfg.user_lang, emuenv.static_assets_path);
+    // The SDL frontend runs without Qt, so it needs no display server
+    std::optional<QApplication> qt_app;
+    if (cfg.frontend == Frontend::qt) {
+        qt_app.emplace(argc, argv);
+        gui::i18n::apply_ui_language(*qt_app, cfg.user_lang, emuenv.static_assets_path);
+    }
 
 #ifdef _WIN32
     {
-        auto res = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+        auto res = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         LOG_ERROR_IF(res == S_FALSE, "Failed to initialize COM Library");
     }
 #endif
@@ -171,8 +177,6 @@ int main(int argc, char *argv[]) {
         if (logging::init(root_paths, false) != Success)
             return InitConfigFailed;
     } else {
-        std::atexit(SDL_Quit);
-
         // Joystick events on background thread
         SDL_SetHint(SDL_HINT_JOYSTICK_THREAD, "1");
         // Enable HIDAPI rumble for DS4/DS
@@ -181,16 +185,22 @@ int main(int argc, char *argv[]) {
         SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_SWITCH, "1");
         SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_JOY_CONS, "1");
 
-        if (!SDL_Init(SDL_INIT_AUDIO | SDL_INIT_GAMEPAD | SDL_INIT_HAPTIC | SDL_INIT_SENSOR | SDL_INIT_CAMERA)) {
-            LOG_ERROR("SDL initialisation failed: {}", SDL_GetError());
-            QMessageBox::critical(nullptr, "Error", "SDL initialisation failed.");
-            return SDLInitFailed;
+        // The SDL frontend initializes SDL for each session itself
+        if (qt_app) {
+            std::atexit(SDL_Quit);
+            if (!SDL_Init(SDL_INIT_AUDIO | SDL_INIT_GAMEPAD | SDL_INIT_HAPTIC | SDL_INIT_SENSOR)) {
+                LOG_ERROR("SDL initialisation failed: {}", SDL_GetError());
+                QMessageBox::critical(nullptr, "Error", "SDL initialisation failed.");
+                return SDLInitFailed;
+            }
+            if (!SDL_InitSubSystem(SDL_INIT_CAMERA))
+                LOG_WARN("SDL camera initialisation failed, continuing without it: {}", SDL_GetError());
         }
     }
 
     LOG_INFO("{}", window_title);
-    LOG_INFO("OS: {}", CppCommon::Environment::OSVersion());
-    LOG_INFO("CPU: {} | {} Threads | {} GHz", CppCommon::CPU::Architecture(), CppCommon::CPU::LogicalCores(), static_cast<float>(CppCommon::CPU::ClockSpeed()) / 1000.f);
+    LOG_INFO("OS: {}", QSysInfo::prettyProductName().toStdString());
+    LOG_INFO("CPU: {}", util::get_system_info());
     LOG_INFO("Available ram memory: {} MiB", SDL_GetSystemRAM());
 
     app::AppRunType run_type = app::AppRunType::Unknown;
@@ -198,13 +208,11 @@ int main(int argc, char *argv[]) {
         run_type = app::AppRunType::Extracted;
 
     if (!app::init(emuenv, cfg, root_paths)) {
-        QMessageBox::critical(nullptr, "Error", "Emulated environment initialization failed.");
+        LOG_ERROR("Emulated environment initialization failed.");
+        if (qt_app)
+            QMessageBox::critical(nullptr, "Error", "Emulated environment initialization failed.");
         return 1;
     }
-
-    if (emuenv.cfg.controller_binds.empty() || (emuenv.cfg.controller_binds.size() != 15)
-        || emuenv.cfg.controller_axis_binds.empty() || (emuenv.cfg.controller_axis_binds.size() != 6))
-        app::reset_controller_binding(emuenv);
 
     init_libraries(emuenv);
 
@@ -215,37 +223,37 @@ int main(int argc, char *argv[]) {
 
     app::load_users(emuenv);
 
-    if (cfg.content_path.has_value()) {
-        const auto extension = string_utils::tolower(cfg.content_path->extension().string());
+    if (emuenv.cfg.content_path.has_value()) {
+        const auto extension = string_utils::tolower(emuenv.cfg.content_path->extension().string());
         const auto is_archive = (extension == ".vpk") || (extension == ".zip");
-        const auto is_rif = (extension == ".rif") || (cfg.content_path->filename() == "work.bin");
-        const auto is_directory = fs::is_directory(*cfg.content_path);
+        const auto is_rif = (extension == ".rif") || (emuenv.cfg.content_path->filename() == "work.bin");
+        const auto is_directory = fs::is_directory(*emuenv.cfg.content_path);
 
         std::string boot_title_id;
 
         if (is_archive) {
-            LOG_INFO("Installing archive from CLI: {}", cfg.content_path->string());
-            std::vector<ContentInfo> contents_info = install_archive(emuenv, *cfg.content_path);
-            const auto content_index = std::find_if(contents_info.begin(), contents_info.end(), [](const ContentInfo &c) {
+            LOG_INFO("Installing archive from CLI: {}", emuenv.cfg.content_path->string());
+            std::vector<ContentInfo> contents_info = install_archive(emuenv, *emuenv.cfg.content_path);
+            const auto content_index = std::ranges::find_if(contents_info, [](const ContentInfo &c) {
                 return c.category == "gd";
             });
             if (content_index != contents_info.end() && content_index->state)
                 boot_title_id = content_index->title_id;
         } else if (is_directory) {
-            LOG_INFO("Installing contents from CLI: {}", cfg.content_path->string());
-            if (install_contents(emuenv, *cfg.content_path) == 1 && emuenv.app_info.app_category == "gd")
+            LOG_INFO("Installing contents from CLI: {}", emuenv.cfg.content_path->string());
+            if (install_contents(emuenv, *emuenv.cfg.content_path) == 1 && emuenv.app_info.app_category == "gd")
                 boot_title_id = emuenv.app_info.app_title_id;
         } else if (is_rif) {
-            LOG_INFO("Installing license from CLI: {}", cfg.content_path->string());
-            copy_license(emuenv, *cfg.content_path);
+            LOG_INFO("Installing license from CLI: {}", emuenv.cfg.content_path->string());
+            copy_license(emuenv, *emuenv.cfg.content_path);
         } else {
-            LOG_ERROR("File: [{}] is not a supported content type.", cfg.content_path->string());
+            LOG_ERROR("File: [{}] is not a supported content type.", emuenv.cfg.content_path->string());
         }
 
-        cfg.content_path.reset();
+        emuenv.cfg.content_path.reset();
 
         if (!boot_title_id.empty()) {
-            cfg.run_app_path = boot_title_id;
+            emuenv.cfg.run_app_path = boot_title_id;
             LOG_INFO("Content installed, will auto-boot: {}", boot_title_id);
         }
 
@@ -254,15 +262,28 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    if (emuenv.cfg.frontend == Frontend::sdl) {
+        if (!emuenv.cfg.run_app_path) {
+            LOG_ERROR("The SDL frontend needs an installed app to run, given with -r");
+            return 1;
+        }
+        app::AppSessionController session(emuenv);
+        const int exit_code = sdl_frontend::run(emuenv, session, AppLaunchRequest{ .app_path = *emuenv.cfg.run_app_path });
+#ifdef _WIN32
+        CoUninitialize();
+#endif
+        return exit_code;
+    }
+
     const QString gui_configs_dir = gui::utils::to_qt_path(emuenv.config_path / "gui-configs");
-    auto gui_settings = std::make_shared<GuiSettings>(gui_configs_dir);
+    auto gui_settings = std::make_shared<GuiSettings>(gui_configs_dir, emuenv.static_assets_path / "data" / "gui-configs" / "custom-themes");
     auto persistent_settings = std::make_shared<PersistentSettings>(gui_configs_dir);
 
     MainWindow mainwindow(emuenv, gui_settings, persistent_settings, admin_priv);
 
     mainwindow.show();
     if (mainwindow.prompt_startup_warnings())
-        app.exec();
+        qt_app->exec();
 
 #ifdef _WIN32
     CoUninitialize();

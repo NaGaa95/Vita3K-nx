@@ -126,8 +126,7 @@
       "displayName": "Linux AppImage with Ninja and Clang",
       "description": "Linux AppImage build using Ninja Multi-Config generator and Clang compiler",
       "cacheVariables": {
-        "CMAKE_INSTALL_PREFIX": "/usr",
-        "BUILD_APPIMAGE": true
+        "CMAKE_INSTALL_PREFIX": "/usr"
       }
     },
     {
@@ -145,8 +144,7 @@
       "description": "CI preset for Linux Clang AppImage builds",
       "cacheVariables": {
         "CMAKE_INSTALL_PREFIX": "/usr",
-        "BUILD_APPIMAGE": true,
-        "LINUXDEPLOY_COMMAND": "$env{VITA3K_LINUXDEPLOY_COMMAND}"
+        "CMAKE_INSTALL_LIBDIR": "lib"
       }
     },
     {
@@ -178,9 +176,16 @@
       "generator": "Ninja Multi-Config"
     },
     {
+      "name": "macos-xcode",
+      "inherits": "macos",
+      "displayName": "macOS with Xcode",
+      "description": "macOS native build using Xcode generator and default compiler",
+      "generator": "Xcode"
+    },
+    {
       "name": "ci-macos-x64",
       "inherits": "macos-ninja",
-      "description": "CI preset for macOS x86_64 builds",
+      "description": "CI preset for macOS x86_64 builds. Uses Ninja generator.",
       "cacheVariables": {
         "CMAKE_C_COMPILER_LAUNCHER": "ccache",
         "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
@@ -192,7 +197,7 @@
     {
       "name": "ci-macos-arm64",
       "inherits": "macos-ninja",
-      "description": "CI preset for macOS arm64 builds",
+      "description": "CI preset for macOS arm64 builds.  Uses Ninja generator.",
       "cacheVariables": {
         "CMAKE_C_COMPILER_LAUNCHER": "ccache",
         "CMAKE_CXX_COMPILER_LAUNCHER": "ccache",
@@ -200,13 +205,6 @@
         "FORCE_BUILD_OPENSSL_MAC": true,
         "VITA3K_FORCE_CUSTOM_BOOST": true
       }
-    },
-    {
-      "name": "macos-xcode",
-      "inherits": "macos",
-      "displayName": "macOS with Xcode",
-      "description": "Linux native build using Xcode generator and default compiler",
-      "generator": "Xcode"
     }
   ],
   "buildPresets": [

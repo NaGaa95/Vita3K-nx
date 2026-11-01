@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <functional>
 #include <iostream>
 #include <mutex>
@@ -52,6 +53,8 @@ static fs::path primary_log_path;
 static std::atomic<const char *> g_crash_breadcrumb{ nullptr };
 static bool file_logging_enabled = true;
 static std::once_flag s_async_logging_once;
+static std::once_flag s_terminate_handler_once;
+static std::terminate_handler s_previous_terminate = nullptr;
 
 static std::function<void(std::string, int)> s_log_callback;
 static std::mutex s_log_callback_mutex;
@@ -61,6 +64,27 @@ static void rebuild_default_logger();
 
 static void flush() {
     spdlog::details::registry::instance().flush_all();
+}
+
+static void terminate_handler() {
+    try {
+        auto eptr = std::current_exception();
+        if (eptr) {
+            std::rethrow_exception(eptr);
+        } else {
+            LOG_CRITICAL("Unhandled 'std::terminate()' call");
+        }
+    } catch (const std::exception &e) {
+        LOG_CRITICAL("Unhandled C++ exception. {}", e.what());
+    } catch (...) {
+        LOG_CRITICAL("Unhandled C++ exception. UNKNOWN");
+    }
+    if (const char *stage = g_crash_breadcrumb.load(std::memory_order_relaxed))
+        LOG_CRITICAL("Last recorded stage: {}", stage);
+    flush();
+    if (s_previous_terminate)
+        s_previous_terminate();
+    std::abort();
 }
 
 template <typename Mutex>
@@ -129,27 +153,11 @@ ExitCode init(const Root &root_paths, bool use_stdout) {
     spdlog::flush_on(spdlog::level::trace);
 #endif
 
-    register_log_exception_handler();
-
-    static std::terminate_handler old_terminate = nullptr;
-    old_terminate = std::set_terminate([]() {
-        try {
-            auto eptr = std::current_exception();
-            if (eptr) {
-                std::rethrow_exception(eptr);
-            } else {
-                LOG_CRITICAL("Unhandled 'std::terminate()' call");
-            }
-        } catch (const std::exception &e) {
-            LOG_CRITICAL("Unhandled C++ exception. {}", e.what());
-        } catch (...) {
-            LOG_CRITICAL("Unhandled C++ exception. UNKNOWN");
-        }
-        if (const char *stage = g_crash_breadcrumb.load(std::memory_order_relaxed))
-            LOG_CRITICAL("Last recorded stage: {}", stage);
-        flush();
-        if (old_terminate)
-            old_terminate();
+    std::call_once(s_terminate_handler_once, []() {
+        register_log_exception_handler();
+        // Publish the predecessor before making our handler callable.
+        s_previous_terminate = std::get_terminate();
+        std::set_terminate(terminate_handler);
     });
     return Success;
 }
@@ -166,7 +174,7 @@ ExitCode add_sink(const fs::path &log_path) {
 
     spdlog::sink_ptr file_sink;
     try {
-        file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_path.generic_path().native(), true);
+        file_sink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(log_path.native(), true);
     } catch (const spdlog::spdlog_ex &ex) {
         std::cerr << "File log initialization failed: " << ex.what() << std::endl;
         return InitConfigFailed;

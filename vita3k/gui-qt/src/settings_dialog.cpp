@@ -105,7 +105,7 @@ SettingsDialog::SettingsDialog(EmuEnvState &emuenv,
     setWindowFlag(Qt::WindowCloseButtonHint, true);
     setWindowFlag(Qt::WindowContextHelpButtonHint, false);
     setAttribute(Qt::WA_DeleteOnClose);
-    setWindowIcon(QIcon(QStringLiteral(":/Vita3K.png")));
+    setWindowIcon(QIcon(QStringLiteral(":/org.vita3k.vita3k.svg")));
     m_ui->tab_widget_settings->tabBar()->hide();
     m_ui->log_font_family->setEditable(true);
     m_ui->log_font_family->setInsertPolicy(QComboBox::NoInsert);
@@ -575,6 +575,7 @@ void SettingsDialog::load_config() {
     m_ui->log_uniforms->setChecked(m_config.log_uniforms);
     m_ui->color_surface_debug->setChecked(m_config.color_surface_debug);
     m_ui->validation_layer->setChecked(m_config.validation_layer);
+    m_ui->disable_mask_bit->setChecked(m_config.disable_mask_bit);
     m_ui->dump_elfs->setChecked(emuenv.kernel.debugger.dump_elfs);
 
 #ifdef TRACY_ENABLE
@@ -704,6 +705,7 @@ void SettingsDialog::build_desired_config(Config &desired) const {
     current.log_uniforms = m_ui->log_uniforms->isChecked();
     current.color_surface_debug = m_ui->color_surface_debug->isChecked();
     current.validation_layer = m_ui->validation_layer->isChecked();
+    current.disable_mask_bit = m_ui->disable_mask_bit->isChecked();
 
 #ifdef TRACY_ENABLE
     current.tracy_primitive_impl = m_ui->tracy_primitive_impl->isChecked();
@@ -731,7 +733,7 @@ bool SettingsDialog::prompt_restart_if_needed(const app::SettingsCommitResult &r
     }
 
     const auto has_setting = [](const std::vector<config::RestartRequiredSetting> &settings, config::RestartRequiredSetting setting) {
-        return std::find(settings.begin(), settings.end(), setting) != settings.end();
+        return std::ranges::contains(settings, setting);
     };
 
     std::vector<config::RestartRequiredSetting> newly_pending_restart_settings;
@@ -1214,6 +1216,7 @@ void SettingsDialog::setup_connections() {
         { m_ui->texture_export_format, tr("Texture Exporting Format"), m_tooltips->texture_export_format },
         { m_ui->shader_cache, tr("Enable Shader Cache"), m_tooltips->shader_cache },
         { m_ui->spirv_shader, tr("Use SPIR-V Shader"), m_tooltips->spirv_shader },
+        { m_ui->disable_mask_bit, tr("Disable Mask Bit Emulation"), m_tooltips->disable_mask_bit },
         { m_ui->fps_hack, tr("FPS Hack"), m_tooltips->fps_hack },
         // Audio
         { m_ui->audio_backend_box, tr("Audio Backend"), m_tooltips->audio_backend },
@@ -1430,11 +1433,10 @@ void SettingsDialog::mark_dirty() {
 }
 
 void SettingsDialog::set_pending_vita_fs_path(const fs::path &vita_fs_path) {
-    const fs::path normalized_vita_fs_path = vita_fs_path / "";
-    if (normalized_vita_fs_path.empty() || normalized_vita_fs_path == m_pending_vita_fs_path)
+    if (vita_fs_path.empty() || vita_fs_path == m_pending_vita_fs_path)
         return;
 
-    m_pending_vita_fs_path = normalized_vita_fs_path;
+    m_pending_vita_fs_path = vita_fs_path;
     update_current_emu_path_label();
     mark_dirty();
 }

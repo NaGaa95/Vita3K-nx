@@ -15,9 +15,10 @@ build
 # CMake user presets
 CMakeUserPresets.json
 compile_commands.json
-# AppImage builder
-appimage/linuxdeploy*.AppImage
 /.gdbinit
+
+# Locally downloaded AppImage tools
+/appimage/*.AppImage
 
 # generated linux metainfo.xml
 dist/linux/*.metainfo.xml
@@ -108,3 +109,9 @@ fastlane/readme.md
 /switch-launcher/fwd/hbl.elf
 /switch-launcher/romfs/emu/Vita3K.nro
 /switch-launcher/romfs/emu/Vita3K.sha256
+# Translations
+/template/
+/android/app/src/main/res/values-*/strings.xml
+
+# Python caches, from running tools/autotests with pytest directly
+__pycache__/

@@ -170,7 +170,7 @@ static std::string bounded_string(const SceChar8 *data, size_t size) {
 static bool is_addcont_exist(EmuEnvState &emuenv, const SceChar8 *path) {
     const auto dir_name = bounded_string(path, SCE_APPUTIL_NP_DRM_ADDCONT_ID_SIZE);
     const auto drm_content_id_path{ emuenv.vita_fs_path / "ux0" / emuenv.io.device_paths.addcont0 / dir_name };
-    boost::system::error_code ec;
+    std::error_code ec;
     if (!fs::exists(drm_content_id_path, ec))
         return false;
     // Horizon cannot open directories as files, as Boost's is_empty requires.
@@ -261,13 +261,17 @@ std::string construct_slotparam_path(const unsigned int data) {
 
 EXPORT(int, sceAppUtilSaveDataDataRemove, SceAppUtilSaveDataFileSlot *slot, SceAppUtilSaveDataRemoveItem *files, unsigned int fileNum, SceAppUtilMountPoint *mountPoint) {
     TRACY_FUNC(sceAppUtilSaveDataDataRemove, slot, files, fileNum, mountPoint);
+
+    if (slot && (slot->id >= SCE_APPUTIL_SAVEDATA_SLOT_MAX))
+        return RET_ERROR(SCE_APPUTIL_ERROR_PARAMETER);
+
     for (unsigned int i = 0; i < fileNum; i++) {
         const auto file = fs::path(construct_savedata0_path(files[i].dataPath.get(emuenv.mem)));
         // This is a guest path ("savedata0:/..."), which the host cannot stat. On
         // Horizon the leading device name resolves to a real fsdev device lookup
         // and the throwing overload aborts the emulator; everywhere else it just
         // reports false. Keep that answer, without the abort.
-        boost::system::error_code file_ec;
+        std::error_code file_ec;
         if (fs::is_regular_file(file, file_ec)) {
             remove_file(emuenv.io, file.string().c_str(), emuenv.vita_fs_path, export_name);
         } else
@@ -284,6 +288,9 @@ EXPORT(int, sceAppUtilSaveDataDataRemove, SceAppUtilSaveDataFileSlot *slot, SceA
 EXPORT(int, sceAppUtilSaveDataDataSave, SceAppUtilSaveDataFileSlot *slot, SceAppUtilSaveDataDataSaveItem *files, unsigned int fileNum, SceAppUtilMountPoint *mountPoint, SceSize *requiredSizeKiB) {
     TRACY_FUNC(sceAppUtilSaveDataDataSave, slot, files, fileNum, mountPoint, requiredSizeKiB);
     SceUID fd;
+
+    if (slot && (slot->id >= SCE_APPUTIL_SAVEDATA_SLOT_MAX))
+        return RET_ERROR(SCE_APPUTIL_ERROR_PARAMETER);
 
     if (requiredSizeKiB)
         // requiredSizeKiB must be set to 0 if there is enough space available
@@ -581,16 +588,30 @@ EXPORT(SceInt32, sceAppUtilSystemParamGetInt, SceSystemParamId paramId, SceInt32
 
 EXPORT(int, sceAppUtilSystemParamGetString, unsigned int paramId, SceChar8 *buf, SceSize bufSize) {
     TRACY_FUNC(sceAppUtilSystemParamGetString, paramId, buf, bufSize);
-    constexpr auto devname_len = SCE_SYSTEM_PARAM_USERNAME_MAXSIZE;
-    char devname[devname_len];
     switch (paramId) {
-    case SCE_SYSTEM_PARAM_ID_USER_NAME:
-        if (gethostname(devname, devname_len)) {
-            // fallback to User Name
-            std::strncpy(devname, emuenv.io.user_name.c_str(), sizeof(devname));
+    case SCE_SYSTEM_PARAM_ID_USER_NAME: {
+        if (bufSize == 0) {
+            return RET_ERROR(SCE_APPUTIL_ERROR_PARAMETER);
         }
-        std::strncpy(reinterpret_cast<char *>(buf), devname, sizeof(devname));
+        // copy user name into buf with size SCE_SYSTEM_PARAM_USERNAME_MAXSIZE or bufSize, whichever is smaller
+        const auto copySize = std::min(bufSize, static_cast<unsigned int>(SCE_SYSTEM_PARAM_USERNAME_MAXSIZE));
+        std::strncpy(reinterpret_cast<char *>(buf), emuenv.io.user_name.c_str(), copySize - 1);
+        buf[copySize - 1] = '\0';
+        // fallback to hostname
+        if (buf[0] == '\0') {
+            char devname[SCE_SYSTEM_PARAM_USERNAME_MAXSIZE];
+            if (gethostname(devname, SCE_SYSTEM_PARAM_USERNAME_MAXSIZE) == 0) {
+                std::strncpy(reinterpret_cast<char *>(buf), devname, copySize - 1);
+                buf[copySize - 1] = '\0';
+            }
+            // double fallback to "Vita3K"
+            if (buf[0] == '\0') {
+                std::strncpy(reinterpret_cast<char *>(buf), "Vita3K", copySize - 1);
+                buf[copySize - 1] = '\0';
+            }
+        }
         break;
+    }
     default:
         return RET_ERROR(SCE_APPUTIL_ERROR_PARAMETER);
     }

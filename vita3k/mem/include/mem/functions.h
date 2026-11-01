@@ -24,7 +24,7 @@
 
 struct MemState;
 
-typedef std::function<bool(uint8_t *addr, bool write)> AccessViolationHandler;
+using AccessViolationHandler = std::function<bool(uint8_t *addr, bool write)>;
 
 // Vita native memory bases. On Switch these high guest addresses are handled by
 // the page table (each guest page maps to an arbitrary low host page), so no

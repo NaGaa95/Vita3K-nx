@@ -21,7 +21,18 @@
 
 #include <util/fs.h>
 
+#include <cstdint>
 #include <optional>
+#include <string>
+#include <vector>
+
+// The frontend that runs the emulator
+enum class Frontend {
+    // The full Qt interface
+    qt,
+    // A plain SDL window that runs the app given on the command line and quits with it
+    sdl,
+};
 
 // Configuration File options
 struct Config {
@@ -38,12 +49,14 @@ struct Config {
     // Setting not present in the YAML file
     fs::path config_path = {};
     std::string app_args;
+    std::string launch_uri;
     std::string self_path;
     bool overwrite_config = true;
     bool load_config = false;
     bool fullscreen = false;
     bool console = false;
     bool load_app_list = false;
+    Frontend frontend = Frontend::qt;
 
     fs::path get_vita_fs_path() const {
         return fs_utils::utf8_to_path(vita_fs_path);
@@ -110,6 +123,7 @@ struct Config {
         bool shader_debug_dump = false;
         bool color_surface_debug = false;
         bool validation_layer = true;
+        bool disable_mask_bit = false;
         bool tracy_primitive_impl = false;
         std::vector<std::string> tracy_advanced_profiling_modules;
     };

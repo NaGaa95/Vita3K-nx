@@ -23,11 +23,14 @@
 #include <util/log.h>
 #include <util/string_utils.h>
 
+#include <algorithm>
+#include <cctype>
+
 Patches get_patches(fs::path &path, const std::string &titleid, const std::string &bin) {
     // Find a file in the path with the titleid
     Patches patches;
 
-    boost::system::error_code error;
+    std::error_code error;
     if (!fs::is_directory(path, error) || error)
         return patches;
 
@@ -41,7 +44,9 @@ Patches get_patches(fs::path &path, const std::string &titleid, const std::strin
     for (; !error && entry != end; entry.increment(error)) {
         auto filename = fs_utils::path_to_utf8(entry->path().filename());
         // Just in case users decide to use lowercase filenames
-        std::transform(filename.begin(), filename.end(), filename.begin(), ::toupper);
+        std::ranges::transform(filename, filename.begin(), [](unsigned char c) {
+            return std::toupper(c);
+        });
 
         bool is_patchlist = filename.contains("PATCHLIST.TXT");
 
@@ -135,7 +140,7 @@ Patch parse_patch(const std::string &patch) {
             std::vector<uint32_t> arg_conv;
 
             arg_conv.reserve(args.size());
-            std::transform(args.begin(), args.end(), std::back_inserter(arg_conv), [](std::string &s) { return std::stoull(s, nullptr, 16); });
+            std::ranges::transform(args, std::back_inserter(arg_conv), [](std::string &s) { return std::stoull(s, nullptr, 16); });
 
             bytes = translate(inst, arg_conv);
 

@@ -135,7 +135,7 @@ TrophyCollectionDialog::TrophyCollectionDialog(EmuEnvState &emuenv,
     setWindowFlag(Qt::WindowCloseButtonHint, true);
     setWindowFlag(Qt::WindowContextHelpButtonHint, false);
     setAttribute(Qt::WA_DeleteOnClose);
-    setWindowIcon(QIcon(QStringLiteral(":/Vita3K.png")));
+    setWindowIcon(QIcon(QStringLiteral(":/org.vita3k.vita3k.svg")));
 
     m_app_model = new QStandardItemModel(0, AC_Count, this);
     m_app_model->setHorizontalHeaderLabels({ tr("Icon"), tr("App"), tr("Progress"), tr("Trophies") });
@@ -302,9 +302,8 @@ TrophyCollectionDialog::TrophyCollectionDialog(EmuEnvState &emuenv,
     });
 
     const auto wire_check = [&](QCheckBox *cb, bool &flag) {
-        connect(cb, &QCheckBox::toggled, this, [this, &flag](bool v) {
-            flag = v;
-            apply_filter();
+        connect(cb, &QCheckBox::toggled, this, [filter_proxy, &flag](bool v) {
+            filter_proxy->set_filter_flag(flag, v);
         });
     };
     wire_check(cb_locked, filter_proxy->show_locked);
@@ -380,7 +379,7 @@ std::unique_ptr<TrophyAppData> TrophyCollectionDialog::load_app_data_entry(const
 void TrophyCollectionDialog::populate_app_table() {
     m_app_model->removeRows(0, m_app_model->rowCount());
 
-    std::sort(m_db.begin(), m_db.end(), [](const auto &a, const auto &b) {
+    std::ranges::sort(m_db, [](const auto &a, const auto &b) {
         return QString::fromStdString(a->title).toLower() < QString::fromStdString(b->title).toLower();
     });
 
@@ -457,7 +456,6 @@ void TrophyCollectionDialog::populate_trophy_table(int app_idx) {
     adjust_trophy_icon_column();
     if (!m_has_saved_trophy_header_state)
         initialize_trophy_column_layout();
-    apply_filter();
 }
 
 void TrophyCollectionDialog::load_icon_async(QStandardItemModel *model, int column, const QSize &icon_size, int row, const QString &path) {
@@ -486,11 +484,6 @@ void TrophyCollectionDialog::load_app_icon_async(int row, const QString &path) {
 
 void TrophyCollectionDialog::load_trophy_icon_async(int row, const QString &path) {
     load_icon_async(m_trophy_model, TC_Icon, m_trophy_icon_size, row, path);
-}
-
-void TrophyCollectionDialog::apply_filter() {
-    auto *proxy = static_cast<TrophyFilterProxy *>(m_trophy_proxy);
-    proxy->invalidate();
 }
 
 void TrophyCollectionDialog::adjust_trophy_icon_column() {

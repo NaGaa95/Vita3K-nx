@@ -43,37 +43,35 @@
 
 struct ThreadState;
 struct MemState;
-struct SDL_Thread;
 
 struct CodecEngineBlock;
 
 struct KernelModule {
     SceKernelModuleInfo info;
-    Ptr<const uint8_t> info_segment_address;
-    uint32_t info_offset;
 #ifdef __SWITCH__
     Block job_drain_code;
 #endif
+    Ptr<const uint8_t> info_segment_address;
+    uint32_t info_offset;
 };
-typedef std::shared_ptr<KernelModule> SceKernelModulePtr;
+using SceKernelModulePtr = std::shared_ptr<KernelModule>;
 
-typedef std::shared_ptr<ThreadState> ThreadStatePtr;
-typedef std::map<SceUID, CodecEngineBlock> CodecEngineBlocks;
-typedef std::map<SceUID, Ptr<Ptr<void>>> SlotToAddress;
-typedef std::map<SceUID, ThreadStatePtr> ThreadStatePtrs;
-typedef std::map<SceUID, SceKernelModulePtr> SceKernelModuleInfoPtrs;
-typedef std::map<SceUID, CallbackPtr> CallbackPtrs;
-typedef unordered_map_fast<uint32_t, Address> ExportNids;
+using ThreadStatePtr = std::shared_ptr<ThreadState>;
+using CodecEngineBlocks = std::map<SceUID, CodecEngineBlock>;
+using SlotToAddress = std::map<SceUID, Ptr<Ptr<void>>>;
+using ThreadStatePtrs = std::map<SceUID, ThreadStatePtr>;
+using SceKernelModuleInfoPtrs = std::map<SceUID, SceKernelModulePtr>;
+using ExportNids = unordered_map_fast<uint32_t, Address>;
 // A NID hashes the function name alone, so same-named exports from different libraries collide.
-typedef unordered_map_fast<uint64_t, Address> LibExportNids;
+using LibExportNids = unordered_map_fast<uint64_t, Address>;
 // The plain NID entry outlives taiHEN and HLE redirects, so its owner is tracked apart from its address.
-typedef unordered_map_fast<uint32_t, uint32_t> ExportNidOwners;
+using ExportNidOwners = unordered_map_fast<uint32_t, uint32_t>;
 constexpr uint64_t lib_export_key(uint32_t library_nid, uint32_t nid) {
     return (static_cast<uint64_t>(library_nid) << 32) | nid;
 }
 
-typedef std::map<Address, uint32_t> NotFoundVars;
-typedef std::function<void(CPUState &cpu, uint32_t nid, SceUID thread_id)> CallImportFunc;
+using NotFoundVars = std::map<Address, uint32_t>;
+using CallImportFunc = std::function<void(CPUState &cpu, uint32_t nid, SceUID thread_id)>;
 
 struct CodecEngineBlock {
     uint32_t size;
@@ -104,20 +102,19 @@ struct FuncBindingInfo {
     uint32_t library_nid;
 };
 
-typedef std::multimap<uint32_t, VarBindingInfo> VarBindingInfos;
-typedef std::multimap<uint32_t, FuncBindingInfo> FuncBindingInfos;
+using VarBindingInfos = std::multimap<uint32_t, VarBindingInfo>;
+using FuncBindingInfos = std::multimap<uint32_t, FuncBindingInfo>;
 
-typedef std::map<uint32_t, uint32_t> ModuleUidByNid;
+using ModuleUidByNid = std::map<uint32_t, uint32_t>;
 
 struct KernelState {
     KernelState();
 
     std::mutex mutex;
-    CodecEngineBlocks codec_blocks;
-
     bool accurate_thread_scheduling = false;
     bool preempt_on_wake = false;
     int preempt_on_wake_us = 1000;
+    CodecEngineBlocks codec_blocks;
 
     Ptr<const void> tls_address = Ptr<const void>(0);
     unsigned int tls_psize = 0;
@@ -128,17 +125,8 @@ struct KernelState {
     Ptr<const void> thread_event_end = Ptr<const void>(0);
     Address thread_event_end_arg = 0;
 
-    SimpleEventPtrs simple_events;
-    TimerPtrs timers;
-    SemaphorePtrs semaphores;
-    CondvarPtrs condvars;
-    CondvarPtrs lwcondvars;
-    MutexPtrs mutexes;
-    MutexPtrs lwmutexes; // also Mutexes for now
-    RWLockPtrs rwlocks;
-    EventFlagPtrs eventflags;
-    MsgPipePtrs msgpipes;
-    CallbackPtrs callbacks;
+    // Thread manager objects other than threads, by UID
+    KernelObjects objects;
 
     ThreadStatePtrs threads;
     void *jni_env;
@@ -169,6 +157,8 @@ struct KernelState {
 
     uint64_t start_tick;
     SceRtcTick base_tick;
+    // Returns the process time at a time of the host clock that timers count with
+    uint64_t process_time_at(uint64_t clock_time) const;
     Ptr<SceProcessParam> process_param;
     Ptr<void> client_vtable = Ptr<void>(0);
     Ptr<Address> shellsvc_client = Ptr<Address>(0);
@@ -189,14 +179,27 @@ struct KernelState {
     void deinit(MemState &mem);
     void load_process_param(MemState &mem, Ptr<uint32_t> ptr);
     ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point = Ptr<const void>(0));
-    ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option);
+    // Creates a dormant thread with these creation arguments, attr without THREAD_ATTR_USER, or returns null
+    ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr, const SceKernelThreadOptParam *option);
 
     ThreadStatePtr get_thread(SceUID thread_id);
+
+    // Creates a callback owned by thread and returns its UID.
+    SceUID create_callback(const ThreadStatePtr &thread, const char *name, Ptr<SceKernelCallbackFunction> func, Ptr<void> common);
+    // Deletes the callback with this UID for the thread deleter, so it never runs again. Returns false
+    // if there is none.
+    bool delete_callback(SceUID id, SceUID deleter);
     Ptr<Ptr<void>> get_thread_tls_addr(MemState &mem, SceUID thread_id, int key);
 
-    bool is_threads_paused() { return threads_paused.load(std::memory_order_acquire); }
+    bool is_threads_paused() {
+        const std::lock_guard<std::mutex> lock(mutex);
+        return threads_paused;
+    }
     void pause_threads();
     void resume_threads();
+    // Stops every thread for the debugger, and the threads created until the resume start stopped
+    void suspend_threads();
+    void resume_suspended_threads();
 
     // Kill all guest threads and block until they have exited. Must only be called from a host thread.
     void process_exit();
@@ -210,11 +213,7 @@ struct KernelState {
     SceKernelModuleInfo *find_module_by_addr(Address address);
 
 private:
-    void reap_host_threads(bool wait_all);
-
     std::atomic<SceUID> next_uid{ 1 };
-    std::map<SceUID, ThreadStatus> paused_threads_status;
-    std::atomic<bool> threads_paused{ false };
-    std::mutex host_threads_mutex;
-    std::vector<std::pair<SceUID, SDL_Thread *>> host_threads;
+    bool threads_paused = false;
+    bool threads_suspended = false;
 };

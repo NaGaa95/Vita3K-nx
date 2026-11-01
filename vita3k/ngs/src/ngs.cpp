@@ -54,7 +54,7 @@ void VoiceInputManager::init(const uint32_t granularity, const uint16_t total_in
 
 void VoiceInputManager::reset_inputs() {
     for (auto &input : inputs) {
-        std::fill(input.begin(), input.end(), 0);
+        std::ranges::fill(input, 0);
     }
 }
 

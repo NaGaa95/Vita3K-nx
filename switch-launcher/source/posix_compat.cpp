@@ -58,7 +58,7 @@ extern "C" ssize_t readv(int fd, const struct iovec* vectors, int count)
   return total;
 }
 
-extern "C" ssize_t writev(int fd, const struct iovec* vectors, int count)
+extern "C" ssize_t __wrap_writev(int fd, const struct iovec* vectors, int count)
 {
   if (!validateVectors(vectors, count))
     return -1;

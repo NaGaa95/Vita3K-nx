@@ -212,17 +212,28 @@ void DebugWidget::refresh_current_tab() {
 
 static QString thread_status_string(ThreadStatus status) {
     switch (status) {
-    case ThreadStatus::run:
+    case ThreadStatus::running:
         return QStringLiteral("Running");
-    case ThreadStatus::wait:
+    case ThreadStatus::waiting:
         return QStringLiteral("Waiting");
     case ThreadStatus::dormant:
         return QStringLiteral("Dormant");
-    case ThreadStatus::suspend:
+    case ThreadStatus::deleted:
+        return QStringLiteral("Deleted");
+    case ThreadStatus::suspended:
         return QStringLiteral("Suspended");
     default:
         return QStringLiteral("Unknown");
     }
+}
+
+// Returns the name and UID of a mutex's owner thread, or only its UID once the thread is gone
+static QString owner_string(KernelState &kernel, SceUID owner_id) {
+    if (!owner_id)
+        return DebugWidget::tr("not owned");
+    const QString uid = QStringLiteral("0x%1").arg(owner_id, 8, 16, QLatin1Char('0')).toUpper();
+    const ThreadStatePtr owner = kernel.get_thread(owner_id);
+    return owner ? QStringLiteral("%1 (%2)").arg(QString::fromStdString(owner->name), uid) : uid;
 }
 
 void DebugWidget::refresh_threads() {
@@ -235,7 +246,7 @@ void DebugWidget::refresh_threads() {
         item->setData(0, Qt::UserRole, static_cast<uint>(id));
         item->setText(0, QStringLiteral("0x%1").arg(id, 8, 16, QLatin1Char('0')).toUpper());
         item->setText(1, QString::fromStdString(th->name));
-        item->setText(2, thread_status_string(th->status));
+        item->setText(2, thread_status_string(th->get_status()));
         item->setText(3, QStringLiteral("0x%1").arg(th->stack.get(), 8, 16, QLatin1Char('0')).toUpper());
     }
 }
@@ -243,91 +254,91 @@ void DebugWidget::refresh_threads() {
 void DebugWidget::refresh_mutexes() {
     m_mutexes_tree->clear();
 
-    const std::lock_guard<std::mutex> lock(emuenv.kernel.mutex);
-
-    for (const auto &[id, mutex] : emuenv.kernel.mutexes) {
+    emuenv.kernel.objects.for_each<HeavyMutex>([&](const HeavyMutex &mutex) {
+        SceKernelMutexInfo info;
+        if (mutex.info(info) != SCE_KERNEL_OK)
+            return;
         auto *item = new QTreeWidgetItem(m_mutexes_tree);
-        item->setText(0, QStringLiteral("0x%1").arg(id, 8, 16, QLatin1Char('0')).toUpper());
-        item->setText(1, QString::fromUtf8(mutex->name));
-        item->setText(2, QString::number(mutex->lock_count));
-        item->setText(3, QString::number(mutex->attr));
-        item->setText(4, QString::number(mutex->waiting_threads ? mutex->waiting_threads->size() : 0));
-        item->setText(5, mutex->owner ? QString::fromStdString(mutex->owner->name) : tr("not owned"));
-    }
+        item->setText(0, QStringLiteral("0x%1").arg(mutex.uid, 8, 16, QLatin1Char('0')).toUpper());
+        item->setText(1, QString::fromStdString(mutex.name));
+        item->setText(2, QString::number(info.currentCount));
+        item->setText(3, QString::number(mutex.attr));
+        item->setText(4, QString::number(info.numWaitThreads));
+        item->setText(5, owner_string(emuenv.kernel, info.currentOwnerId));
+    });
 }
 
 void DebugWidget::refresh_lw_mutexes() {
     m_lw_mutexes_tree->clear();
 
-    const std::lock_guard<std::mutex> lock(emuenv.kernel.mutex);
-
-    for (const auto &[id, mutex] : emuenv.kernel.lwmutexes) {
+    emuenv.kernel.objects.for_each<LwMutex>([&](const LwMutex &mutex) {
+        SceKernelLwMutexInfo info;
+        if (mutex.info(info) != SCE_KERNEL_OK)
+            return;
         auto *item = new QTreeWidgetItem(m_lw_mutexes_tree);
-        item->setText(0, QStringLiteral("0x%1").arg(id, 8, 16, QLatin1Char('0')).toUpper());
-        item->setText(1, QString::fromUtf8(mutex->name));
-        item->setText(2, QString::number(mutex->lock_count));
-        item->setText(3, QString::number(mutex->attr));
-        item->setText(4, QString::number(mutex->waiting_threads ? mutex->waiting_threads->size() : 0));
-        item->setText(5, mutex->owner ? QString::fromStdString(mutex->owner->name) : tr("not owned"));
-    }
+        item->setText(0, QStringLiteral("0x%1").arg(mutex.uid, 8, 16, QLatin1Char('0')).toUpper());
+        item->setText(1, QString::fromStdString(mutex.name));
+        item->setText(2, QString::number(info.currentCount));
+        item->setText(3, QString::number(mutex.attr));
+        item->setText(4, QString::number(info.numWaitThreads));
+        item->setText(5, owner_string(emuenv.kernel, info.currentOwnerId));
+    });
 }
 
 void DebugWidget::refresh_condvars() {
     m_condvars_tree->clear();
 
-    const std::lock_guard<std::mutex> lock(emuenv.kernel.mutex);
-
-    for (const auto &[id, cv] : emuenv.kernel.condvars) {
+    emuenv.kernel.objects.for_each<HeavyCond>([&](const Condvar &cv) {
         auto *item = new QTreeWidgetItem(m_condvars_tree);
-        item->setText(0, QStringLiteral("0x%1").arg(id, 8, 16, QLatin1Char('0')).toUpper());
-        item->setText(1, QString::fromUtf8(cv->name));
-        item->setText(2, QString::number(cv->attr));
-        item->setText(3, QString::number(cv->waiting_threads ? cv->waiting_threads->size() : 0));
-    }
+        item->setText(0, QStringLiteral("0x%1").arg(cv.uid, 8, 16, QLatin1Char('0')).toUpper());
+        item->setText(1, QString::fromStdString(cv.name));
+        item->setText(2, QString::number(cv.attr));
+        item->setText(3, QString::number(cv.num_waiters()));
+    });
 }
 
 void DebugWidget::refresh_lw_condvars() {
     m_lw_condvars_tree->clear();
 
-    const std::lock_guard<std::mutex> lock(emuenv.kernel.mutex);
-
-    for (const auto &[id, cv] : emuenv.kernel.lwcondvars) {
+    emuenv.kernel.objects.for_each<LwCond>([&](const Condvar &cv) {
         auto *item = new QTreeWidgetItem(m_lw_condvars_tree);
-        item->setText(0, QStringLiteral("0x%1").arg(id, 8, 16, QLatin1Char('0')).toUpper());
-        item->setText(1, QString::fromUtf8(cv->name));
-        item->setText(2, QString::number(cv->attr));
-        item->setText(3, QString::number(cv->waiting_threads ? cv->waiting_threads->size() : 0));
-    }
+        item->setText(0, QStringLiteral("0x%1").arg(cv.uid, 8, 16, QLatin1Char('0')).toUpper());
+        item->setText(1, QString::fromStdString(cv.name));
+        item->setText(2, QString::number(cv.attr));
+        item->setText(3, QString::number(cv.num_waiters()));
+    });
 }
 
 void DebugWidget::refresh_semaphores() {
     m_semaphores_tree->clear();
 
-    const std::lock_guard<std::mutex> lock(emuenv.kernel.mutex);
-
-    for (const auto &[id, sema] : emuenv.kernel.semaphores) {
+    emuenv.kernel.objects.for_each<Semaphore>([&](const Semaphore &sema) {
+        SceKernelSemaInfo info;
+        if (sema.info(info) != SCE_KERNEL_OK)
+            return;
         auto *item = new QTreeWidgetItem(m_semaphores_tree);
-        item->setText(0, QStringLiteral("0x%1").arg(id, 8, 16, QLatin1Char('0')).toUpper());
-        item->setText(1, QString::fromUtf8(sema->name));
-        item->setText(2, QStringLiteral("%1 / %2").arg(sema->val).arg(sema->max));
-        item->setText(3, QString::number(sema->max));
-        item->setText(4, QString::number(sema->waiting_threads ? sema->waiting_threads->size() : 0));
-    }
+        item->setText(0, QStringLiteral("0x%1").arg(sema.uid, 8, 16, QLatin1Char('0')).toUpper());
+        item->setText(1, QString::fromStdString(sema.name));
+        item->setText(2, QStringLiteral("%1 / %2").arg(info.currentCount).arg(info.maxCount));
+        item->setText(3, QString::number(info.maxCount));
+        item->setText(4, QString::number(info.numWaitThreads));
+    });
 }
 
 void DebugWidget::refresh_event_flags() {
     m_event_flags_tree->clear();
 
-    const std::lock_guard<std::mutex> lock(emuenv.kernel.mutex);
-
-    for (const auto &[id, ef] : emuenv.kernel.eventflags) {
+    emuenv.kernel.objects.for_each<EventFlag>([&](const EventFlag &ef) {
+        SceKernelEventFlagInfo info;
+        if (ef.info(info) != SCE_KERNEL_OK)
+            return;
         auto *item = new QTreeWidgetItem(m_event_flags_tree);
-        item->setText(0, QStringLiteral("0x%1").arg(id, 8, 16, QLatin1Char('0')).toUpper());
-        item->setText(1, QString::fromUtf8(ef->name));
-        item->setText(2, QStringLiteral("0x%1").arg(static_cast<uint>(ef->flags), 8, 16, QLatin1Char('0')).toUpper());
-        item->setText(3, QString::number(ef->attr));
-        item->setText(4, QString::number(ef->waiting_threads ? ef->waiting_threads->size() : 0));
-    }
+        item->setText(0, QStringLiteral("0x%1").arg(ef.uid, 8, 16, QLatin1Char('0')).toUpper());
+        item->setText(1, QString::fromStdString(ef.name));
+        item->setText(2, QStringLiteral("0x%1").arg(static_cast<uint>(info.currentPattern), 8, 16, QLatin1Char('0')).toUpper());
+        item->setText(3, QString::number(ef.attr));
+        item->setText(4, QString::number(info.numWaitThreads));
+    });
 }
 
 static const QStringList alloc_blacklist = {
@@ -390,7 +401,7 @@ void DebugWidget::on_thread_double_clicked(QTreeWidgetItem *item, int /*column*/
     };
 
     form->addRow(tr("Name:"), new QLabel(QString::fromStdString(thread->name), dlg));
-    form->addRow(tr("Status:"), new QLabel(thread_status_string(thread->status), dlg));
+    form->addRow(tr("Status:"), new QLabel(thread_status_string(thread->get_status()), dlg));
     form->addRow(tr("PC:"), new QLabel(make_hex(pc), dlg));
     form->addRow(tr("SP:"), new QLabel(make_hex(sp), dlg));
     form->addRow(tr("LR:"), new QLabel(make_hex(lr), dlg));

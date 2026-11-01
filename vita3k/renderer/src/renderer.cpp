@@ -15,6 +15,7 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <cstdint>
 #include <renderer/functions.h>
 #include <renderer/state.h>
 #include <renderer/types.h>
@@ -42,6 +43,22 @@ void State::set_fsr_sharpness(float sharpness) {
     fsr_sharpness.store(std::isfinite(sharpness) ? std::clamp(sharpness, 0.0f, 2.0f) : 0.2f, std::memory_order_relaxed);
 }
 
+// The higher on this list the higher the priority of input
+constexpr auto overlay_input_priorities = std::to_array<std::string_view>({
+    "pause_overlay",
+    "common_dialog",
+});
+
+constexpr static int get_overlay_input_priority(std::string_view key) {
+    for (size_t i = 0; i < overlay_input_priorities.size(); ++i) {
+        if (overlay_input_priorities[i] == key)
+            return static_cast<uint32_t>(i);
+    }
+    assert(false && "Overlay input priority not found");
+    return UINT32_MAX; // Not found
+}
+
+#ifdef __SWITCH__
 void State::update_overlays() {
     if (!overlay_manager)
         return;
@@ -80,7 +97,7 @@ void State::update_overlays() {
 #endif
     }
 
-    if (perf_overlay.enabled && perf_overlay.fps > 0) {
+    if (perf_overlay.enabled && perf_overlay.has_data) {
         auto perf = overlay_manager->get<overlay::perf_overlay>();
         if (!perf)
             perf = overlay_manager->create<overlay::perf_overlay>();
@@ -109,7 +126,7 @@ void State::update_overlays() {
                 && common_dialog->type != TROPHY_SETUP_DIALOG) {
                 if (just_created || dlg->input_loop_exited()) {
                     dlg->reset_input_loop();
-                    overlay_manager->attach_thread_input("common_dialog", dlg);
+                    overlay_manager->attach_thread_input("common_dialog", dlg, get_overlay_input_priority("common_dialog"));
                 }
             }
         } else {
@@ -118,6 +135,107 @@ void State::update_overlays() {
         }
     }
 }
+#else
+void State::update_overlays() {
+    if (!overlay_manager)
+        return;
+
+    if (show_compile_shaders) {
+        const auto now = std::chrono::steady_clock::now();
+        const uint32_t newly_compiled = shaders_count_compiled;
+        if (newly_compiled > 0) {
+            m_shaders_compiled_count += newly_compiled;
+            shaders_count_compiled = 0;
+            m_shaders_compiled_time = now;
+
+            auto notice = overlay_manager->get<overlay::shader_compile_notice>();
+            if (!notice)
+                notice = overlay_manager->create<overlay::shader_compile_notice>();
+            notice->update_count(m_shaders_compiled_count, current_backend == Backend::Vulkan);
+        } else if (m_shaders_compiled_count > 0) {
+            auto notice = overlay_manager->get<overlay::shader_compile_notice>();
+            if (notice && notice->should_hide()) {
+                overlay_manager->remove<overlay::shader_compile_notice>();
+                m_shaders_compiled_count = 0;
+            }
+        }
+    }
+
+    // Performance overlay
+    {
+        if (perf_overlay.enabled && perf_overlay.has_data) {
+            auto perf = overlay_manager->get<overlay::perf_overlay>();
+            if (!perf)
+                perf = overlay_manager->create<overlay::perf_overlay>();
+
+            perf->set_position(static_cast<overlay::screen_quadrant>(perf_overlay.position));
+            perf->set_detail_level(static_cast<overlay::perf_detail_level>(perf_overlay.detail));
+            perf->set_fps_data(perf_overlay.fps, perf_overlay.avg_fps, perf_overlay.min_fps,
+                perf_overlay.max_fps, perf_overlay.ms_per_frame,
+                perf_overlay.fps_values.data(), perf_overlay.fps_values_count,
+                perf_overlay.current_fps_offset);
+        } else {
+            auto perf = overlay_manager->get<overlay::perf_overlay>();
+            if (perf)
+                overlay_manager->remove<overlay::perf_overlay>();
+        }
+    }
+
+    // Pause overlay
+    const bool is_paused = paused.load(std::memory_order_relaxed);
+    overlay_manager->set_paused(is_paused);
+    if (is_paused) {
+        bool just_created = false;
+        auto pause_overlay = overlay_manager->get<overlay::pause_overlay>();
+        if (!pause_overlay) {
+            if (!app_session_controller.has_value()) {
+                LOG_ERROR_ONCE("Pause overlay requested while app session controller is unavailable.");
+                return;
+            }
+
+            auto &session_controller = app_session_controller.value().get();
+            pause_overlay = overlay_manager->create<overlay::pause_overlay>(session_controller);
+            just_created = true;
+        }
+        if (pause_overlay->poll_dialog(*common_dialog, sys_date_format, sys_button)) {
+            if ((just_created || pause_overlay->input_loop_exited())) {
+                pause_overlay->reset_input_loop();
+                constexpr auto priority = get_overlay_input_priority("pause_overlay");
+                overlay_manager->attach_thread_input("pause_overlay", pause_overlay, priority);
+            }
+        }
+    } else {
+        auto pause_overlay = overlay_manager->get<overlay::pause_overlay>();
+        if (pause_overlay) {
+            overlay_manager->remove<overlay::pause_overlay>();
+        }
+    }
+
+    // Common dialog
+    if (!is_paused) {
+        auto dlg = overlay_manager->get<overlay::common_dialog_overlay>();
+        if (common_dialog && common_dialog->type != NO_DIALOG && common_dialog->status == SCE_COMMON_DIALOG_STATUS_RUNNING) {
+            bool just_created = false;
+            if (!dlg) {
+                dlg = overlay_manager->create<overlay::common_dialog_overlay>();
+                just_created = true;
+            }
+            if (dlg->poll_dialog(*common_dialog, sys_date_format, sys_button)
+                && common_dialog->type != TROPHY_SETUP_DIALOG) {
+                if ((just_created || dlg->input_loop_exited())) {
+                    dlg->reset_input_loop();
+                    constexpr auto priority = get_overlay_input_priority("common_dialog");
+                    overlay_manager->attach_thread_input("common_dialog", dlg, priority);
+                }
+            }
+        } else {
+            if (dlg) {
+                overlay_manager->remove<overlay::common_dialog_overlay>();
+            }
+        }
+    }
+}
+#endif
 
 void State::init_overlay_font_dirs() {
     overlay::fontmgr::set_system_lang(sys_lang);

@@ -21,6 +21,8 @@
 // These HLE implementations provide equivalent functionality using
 // Vita3K's memory system.
 
+#include "../SceSysmem/SceSysmemForDriver.h"
+
 #include <module/module.h>
 
 #include <cpu/functions.h>
@@ -102,7 +104,7 @@ EXPORT(int, kuKernelMemProtect, Ptr<void> addr, SceSize len, uint32_t prot) {
     }
 
     LOG_DEBUG("kuKernelMemProtect: addr={} len={} prot=0x{:02X} -> perm={}",
-        log_hex(addr.address()), len, prot, (int)perm);
+        log_hex(addr.address()), len, prot, static_cast<int>(perm));
     return 0;
 }
 
@@ -133,18 +135,11 @@ EXPORT(SceUID, kuKernelMemReserve, Ptr<Ptr<void>> addr, SceSize size, SceKernelM
     // Store the allocated address back
     *addr.get(mem) = Ptr<void>(allocated_addr);
 
-    // Track as a vm_block
-    const SceUID uid = state->get_next_uid();
-    auto block = std::make_shared<KernelMemBlock>();
-    block->type = memBlockType;
-    block->mappedBase = Ptr<void>(allocated_addr);
-    block->mappedSize = size;
-    block->size = sizeof(SceKernelMemBlockInfo);
-    std::strncpy(block->name, "kubridge_reserve", KERNELOBJECT_MAX_NAME_LENGTH);
-    state->vm_blocks.emplace(uid, block);
+    // Track it like any other memory block
+    const SceUID uid = add_block(*state, "kubridge_reserve", memBlockType, allocated_addr, size);
 
     LOG_DEBUG("kuKernelMemReserve: addr=0x{:08X} size={} type=0x{:08X} uid=0x{:08X}",
-        allocated_addr, size, (uint32_t)memBlockType, uid);
+        allocated_addr, size, static_cast<uint32_t>(memBlockType), uid);
     return uid;
 }
 
@@ -165,14 +160,16 @@ EXPORT(int, kuKernelMemCommit, Ptr<void> addr, SceSize len, uint32_t prot, Ptr<K
             const auto block = state->vm_blocks.find(opt->baseBlock);
             if (block == state->vm_blocks.end())
                 return RET_ERROR(SCE_KERNEL_ERROR_INVALID_UID);
-            const Address base = block->second->mappedBase.address() + opt->baseOffset;
+            if (opt->baseOffset > block->second.size || len > block->second.size - opt->baseOffset)
+                return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
+            const Address base = block->second.addr + opt->baseOffset;
             if (!add_page_alias(emuenv.mem, addr.address(), base, len)) {
                 LOG_ERROR("kuKernelMemCommit: could not mirror 0x{:08X} onto 0x{:08X} (len={})",
                     addr.address(), base, len);
                 return RET_ERROR(SCE_KERNEL_ERROR_INVALID_ARGUMENT);
             }
             LOG_DEBUG("kuKernelMemCommit: mirrored 0x{:08X} -> 0x{:08X}+0x{:X} len={}",
-                addr.address(), block->second->mappedBase.address(), opt->baseOffset, len);
+                addr.address(), block->second.addr, opt->baseOffset, len);
 #else
             LOG_WARN("kuKernelMemCommit: baseBlock mirrors not yet implemented (baseBlock=0x{:08X} offset=0x{:08X})",
                 opt->baseBlock, opt->baseOffset);
@@ -192,7 +189,7 @@ EXPORT(int, kuKernelMemCommit, Ptr<void> addr, SceSize len, uint32_t prot, Ptr<K
     }
 
     LOG_DEBUG("kuKernelMemCommit: addr={} len={} prot=0x{:02X} -> perm={}",
-        log_hex(va), len, prot, (int)perm);
+        log_hex(va), len, prot, static_cast<int>(perm));
     return 0;
 }
 

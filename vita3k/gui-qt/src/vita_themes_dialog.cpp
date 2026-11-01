@@ -1029,7 +1029,7 @@ void VitaThemesDialog::delete_selected_theme() {
     const QString deleting_theme_id = to_qstring(theme->theme_id);
     const auto applied_selection = m_theme_manager.applied_vita_theme_selection();
     const bool was_active = applied_selection && applied_selection->theme_id == deleting_theme_id;
-    boost::system::error_code error_code;
+    std::error_code error_code;
     fs::remove_all(theme->installed_path, error_code);
     if (error_code) {
         QMessageBox::warning(
@@ -1095,7 +1095,7 @@ QString VitaThemesDialog::resolve_preview_background_id(
         const auto matches = [&background_id](const gui::VitaThemeBackgroundOption &option) {
             return background_id == to_qstring(option.id);
         };
-        if (std::find_if(theme.background_options.begin(), theme.background_options.end(), matches) != theme.background_options.end())
+        if (std::ranges::any_of(theme.background_options, matches))
             return background_id;
     }
 

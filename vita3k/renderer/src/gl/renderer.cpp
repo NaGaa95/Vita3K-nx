@@ -230,7 +230,6 @@ bool create(std::unique_ptr<State> &state, const Config &config) {
     const char *gl_shading_language_version = reinterpret_cast<const char *>(glGetString(GL_SHADING_LANGUAGE_VERSION));
     gl_shading_language_version = gl_shading_language_version ? gl_shading_language_version : "Unknown";
 
-
     LOG_INFO("GPU = {}", state->get_gpu_name());
     LOG_INFO("GL_VERSION = {}", gl_version);
     LOG_INFO("GL_SHADING_LANGUAGE_VERSION = {}", gl_shading_language_version);
@@ -290,7 +289,6 @@ bool create(std::unique_ptr<State> &state, const Config &config) {
         glad_glClearTexImage = reinterpret_cast<PFNGLCLEARTEXIMAGEPROC>(s_frame->get_proc_address("glClearTexImage"));
     gl_state.features.support_get_texture_sub_image = support_get_texture_sub_image && glad_glGetTextureSubImage;
 
-
     if (gl_state.features.direct_fragcolor) {
         LOG_INFO("Your GPU supports direct access to last fragment color. Your performance with programmable blending games will be optimized.");
     } else if (gl_state.features.support_shader_interlock) {
@@ -303,13 +301,17 @@ bool create(std::unique_ptr<State> &state, const Config &config) {
         LOG_WARN("Consider updating your graphics drivers or upgrading your GPU.");
     }
 
-    // always enabled in the opengl renderer
-#if defined(__ANDROID__)
+#ifdef __ANDROID__
     gl_state.features.use_mask_bit = false;
 #elif defined(__SWITCH__)
     gl_state.features.use_mask_bit = switch_mask_bit_enabled();
 #else
-    gl_state.features.use_mask_bit = true;
+    // Some AMD integrated GPUs return zero from imageLoad() on the mask texture after
+    // sync_mask() cleared it with glClearTexImage (fast clear metadata is not resolved
+    // for read-only image bindings), which turns the whole frame black.
+    gl_state.features.use_mask_bit = !config.current_config.disable_mask_bit;
+    if (config.current_config.disable_mask_bit)
+        LOG_WARN("Mask bit emulation is disabled by the settings");
 #endif
 
     gl_state.features.preserve_f16_nan_as_u16 = true;
@@ -358,7 +360,7 @@ void GLState::late_init(const Config &cfg, const std::string_view game_id, MemSt
     // clear the size threshold for that, which froze an FMV on its first frame.
     texture_cache.init(false, texture_folder(), game_id);
 #else
-    texture_cache.init(true, texture_folder(), game_id);
+    texture_cache.init(cfg.hashless_texture_cache, texture_folder(), game_id);
 #endif
 }
 
@@ -497,7 +499,6 @@ void set_context(GLState &state, GLContext &context, const MemState &mem, const 
     context.self_sampling_indices.clear();
 
     glBindFramebuffer(GL_FRAMEBUFFER, context.current_framebuffer);
-
 
     if (context.record.region_clip_mode != SCE_GXM_REGION_CLIP_NONE) {
         glDisable(GL_SCISSOR_TEST);
@@ -663,7 +664,7 @@ static void post_process_pixels_data(GLState &renderer, std::uint32_t *pixels, s
                 const size_t first_pixel_offset_in_linear = (j * stride) + hori_tile * 32;
 
                 memcpy(buffer.data() + first_pixel_offset_in_tile * bytes_per_pixel,
-                    (const char *)(pixels) + first_pixel_offset_in_linear * bytes_per_pixel, 32 * bytes_per_pixel);
+                    reinterpret_cast<const char *>(pixels) + first_pixel_offset_in_linear * bytes_per_pixel, 32 * bytes_per_pixel);
             }
         }
         memcpy(pixels, buffer.data(), buffer.size());
@@ -757,7 +758,8 @@ void get_surface_data(GLState &renderer, GLContext &context, uint32_t *pixels, S
     uint32_t height = surface.height;
 
     const float res_multiplier = gxm::get_base_format(format) == SCE_GXM_COLOR_BASE_FORMAT_U2F10F10F10
-        ? renderer.res_multiplier : static_cast<int>(renderer.res_multiplier);
+        ? renderer.res_multiplier
+        : static_cast<int>(renderer.res_multiplier);
     if (res_multiplier == 1) {
         glPixelStorei(GL_PACK_ROW_LENGTH, static_cast<GLint>(surface.strideInPixels));
     } else {
@@ -893,11 +895,7 @@ void GLState::render_frame(DisplayState &display, const GxmState &gxm, MemState 
 
         glBindTexture(GL_TEXTURE_2D, last_texture);
 
-
-
         screen_renderer.render(vp_pos, vp_size, need_uv ? uvs : nullptr, static_cast<GLuint>(surface_handle), texture_size, default_fbo);
-
-
     }
 
     update_overlays();

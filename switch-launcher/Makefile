@@ -54,9 +54,16 @@ EMU_HASH_BUNDLED := $(CURDIR)/romfs/emu/Vita3K.sha256
 #---------------------------------------------------------------------------------
 ARCH	:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
-PKGS	:=	sdl2 SDL2_ttf SDL2_image libcurl
+SWITCH_VULKAN_SDK ?= $(VITA3K_SWITCH_VULKAN_SDK)
+ifeq ($(strip $(SWITCH_VULKAN_SDK)),)
+PKG_CONFIG := $(PREFIX)pkg-config
+else
+PKG_CONFIG := PKG_CONFIG_PATH= PKG_CONFIG_SYSROOT_DIR= PKG_CONFIG_LIBDIR="$(SWITCH_VULKAN_SDK)/lib/pkgconfig:$(PORTLIBS)/lib/pkgconfig" pkg-config
+endif
 
-CFLAGS	:=	`$(PREFIX)pkg-config --cflags $(PKGS)` -Wall -Wextra -O3 -flto=auto -DNDEBUG -ffunction-sections \
+PKGS	:=	sdl2 SDL2_ttf SDL2_image libcurl egl
+
+CFLAGS	:=	`$(PKG_CONFIG) --cflags $(PKGS)` -Wall -Wextra -O3 -flto=auto -DNDEBUG -ffunction-sections \
 			-fno-ident -ffile-prefix-map=$(CURDIR)=. -fmacro-prefix-map=$(CURDIR)=. \
 			$(ARCH) -DVITA3K_NX_VERSION='"$(APP_VERSION)"' $(DEFINES)
 CFLAGS	+=	$(INCLUDE) -D__SWITCH__ -D_GNU_SOURCE -D_LARGEFILE64_SOURCE -D_FILE_OFFSET_BITS=64
@@ -65,16 +72,16 @@ CXXFLAGS	:= $(CFLAGS) -std=gnu++17
 
 ASFLAGS	:=	$(ARCH)
 LDFLAGS	=	-specs=$(DEVKITPRO)/libnx/switch.specs $(ARCH) -Wl,-Map,$(notdir $*.map) \
-			-flto=auto -Wl,--gc-sections -Wl,--build-id=none
+			-flto=auto -Wl,--gc-sections -Wl,--build-id=none -Wl,--wrap=writev
 
 # SDL2_image (covers) + libcurl (SteamGridDB) + turbojpeg (forwarder NACP icons).
 # Keep the storage archives ahead of their system-library dependencies and in
 # the same order as the CMake interface target: libsmb2, libusbhsfs, then the
 # NTFS-3G portlib libusbhsfs links against.
-LIBS	:=	$(STORAGE_LIBS) `$(PREFIX)pkg-config --libs $(PKGS)` -lturbojpeg -lz -lGLESv2 -lnx
+LIBS	:=	$(STORAGE_LIBS) -Wl,--start-group `$(PKG_CONFIG) --static --libs $(PKGS)` -lturbojpeg -lz -lGLESv2 -lnx -Wl,--end-group
 
 #---------------------------------------------------------------------------------
-LIBDIRS	:= $(PORTLIBS) $(LIBNX)
+LIBDIRS	:= $(SWITCH_VULKAN_SDK) $(PORTLIBS) $(LIBNX)
 
 #---------------------------------------------------------------------------------
 ifneq ($(BUILD),$(notdir $(CURDIR)))
@@ -243,7 +250,7 @@ $(OUTPUT).nro	:	$(TOPDIR)/$(strip $(ROMFS))/emu/Vita3K.nro \
 		$(TOPDIR)/$(strip $(ROMFS))/emu/Vita3K.sha256
 endif
 
-$(OUTPUT).elf	:	$(OFILES) $(STORAGE_LIBS)
+$(OUTPUT).elf	:	$(OFILES) $(STORAGE_LIBS) $(if $(strip $(SWITCH_VULKAN_SDK)),$(wildcard $(SWITCH_VULKAN_SDK)/lib/*.a))
 
 # Version changes affect compiled user agents/updater metadata and the generated NACP.
 $(OFILES_SRC) $(OUTPUT).nacp : $(TOPDIR)/version.mk

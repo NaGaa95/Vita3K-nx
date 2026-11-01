@@ -40,13 +40,13 @@ protected:
         memset(Ptr<uint8_t>(scratch).get(mem), 0, scratch_size);
 
         directory = fs::temp_directory_path() / "vita3k-cheat-tests";
-        boost::system::error_code error;
+        std::error_code error;
         fs::remove_all(directory, error);
         fs::create_directories(directory);
     }
 
     void TearDown() override {
-        boost::system::error_code error;
+        std::error_code error;
         fs::remove_all(directory, error);
 
         deinit_mem(mem);

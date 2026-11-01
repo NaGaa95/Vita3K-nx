@@ -35,7 +35,9 @@
 #include <gui-qt/live_area_widget.h>
 #include <gui-qt/log_widget.h>
 #include <gui-qt/main_window.h>
+#include <gui-qt/patch_manager_dialog.h>
 #include <gui-qt/persistent_settings.h>
+#include <gui-qt/physical_key_qt.h>
 #include <gui-qt/pkg_install_dialog.h>
 #include <gui-qt/qt_utils.h>
 #include <gui-qt/settings_dialog.h>
@@ -88,6 +90,7 @@
 #include <QDropEvent>
 #include <QFileInfo>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
@@ -95,6 +98,7 @@
 #include <QOpenGLContext>
 #include <QPainter>
 #include <QPushButton>
+#include <QShowEvent>
 #include <QSlider>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -186,10 +190,7 @@ void MainWindow::register_auxiliary_window(QWidget *window) {
 }
 
 void MainWindow::prune_auxiliary_windows() {
-    m_auxiliary_windows.erase(
-        std::remove_if(m_auxiliary_windows.begin(), m_auxiliary_windows.end(),
-            [](const QPointer<QWidget> &window) { return window.isNull(); }),
-        m_auxiliary_windows.end());
+    std::erase_if(m_auxiliary_windows, [](const QPointer<QWidget> &window) { return window.isNull(); });
 }
 
 bool MainWindow::close_auxiliary_windows() {
@@ -229,6 +230,10 @@ void MainWindow::closeEvent(QCloseEvent *event) {
 
         auto *dont_show_again = new QCheckBox(tr("Don't show this again"), &box);
         box.setCheckBox(dont_show_again);
+
+        box.winId();
+        if (auto *handle = box.windowHandle())
+            handle->setTransientParent(m_game_window);
 
         if (box.exec() != QMessageBox::Yes) {
             event->ignore();
@@ -377,8 +382,14 @@ void MainWindow::initialize() {
     m_ui->setupUi(this);
     setObjectName(QStringLiteral("main_window"));
 
+    // Keep the pause/resume toolbar and menu actions in sync with pause requests that
+    // don't originate from this window (e.g. the in-game pause overlay).
+    m_app_session.set_pause_state_changed_callback([this] {
+        QMetaObject::invokeMethod(this, &MainWindow::refresh_emulation_actions, Qt::QueuedConnection);
+    });
+
     this->resize(1280, 720);
-    this->setWindowIcon(QIcon(":/Vita3K.png"));
+    this->setWindowIcon(QIcon(":/org.vita3k.vita3k.svg"));
     this->setWindowTitle(QString::fromStdString(window_title));
 
     emuenv.compat.log_compat_warn = emuenv.cfg.log_compat_warn;
@@ -436,10 +447,15 @@ void MainWindow::initialize() {
     connect(m_ui->vita_themes_action, &QAction::triggered,
         this, &MainWindow::open_vita_themes);
 
+    connect(m_ui->patch_manager_action, &QAction::triggered, this, [this] {
+        auto *dlg = new PatchManagerDialog(emuenv, this);
+        connect(dlg, &QDialog::finished, dlg, &QObject::deleteLater);
+        dlg->exec();
+    });
+
     connect(m_ui->user_management_action, &QAction::triggered,
         this, &MainWindow::open_user_management);
 
-    connect(m_ui->settings_core_action, &QAction::triggered, this, [this] { open_settings(static_cast<int>(SettingsTab::Core)); });
     connect(m_ui->settings_cpu_action, &QAction::triggered, this, [this] { open_settings(static_cast<int>(SettingsTab::CPU)); });
     connect(m_ui->settings_gpu_action, &QAction::triggered, this, [this] { open_settings(static_cast<int>(SettingsTab::Graphics)); });
     connect(m_ui->settings_audio_action, &QAction::triggered, this, [this] { open_settings(static_cast<int>(SettingsTab::Audio)); });
@@ -448,6 +464,7 @@ void MainWindow::initialize() {
     connect(m_ui->settings_emulator_action, &QAction::triggered, this, [this] { open_settings(static_cast<int>(SettingsTab::Emulator)); });
     connect(m_ui->settings_gui_action, &QAction::triggered, this, [this] { open_settings(static_cast<int>(SettingsTab::Interface)); });
     connect(m_ui->settings_network_action, &QAction::triggered, this, [this] { open_settings(static_cast<int>(SettingsTab::Network)); });
+    connect(m_ui->settings_advanced_action, &QAction::triggered, this, [this] { open_settings(static_cast<int>(SettingsTab::Advanced)); });
     connect(m_ui->settings_debug_action, &QAction::triggered, this, [this] { open_settings(static_cast<int>(SettingsTab::Debug)); });
 
     connect(m_ui->install_firmware_action, &QAction::triggered,
@@ -458,6 +475,7 @@ void MainWindow::initialize() {
         this, &MainWindow::on_install_zip_triggered);
     connect(m_ui->install_license_action, &QAction::triggered,
         this, &MainWindow::on_install_license_triggered);
+    connect(m_ui->exit_action, &QAction::triggered, this, &QWidget::close);
 
     connect(m_ui->debug_threads_action, &QAction::triggered, this, [this] { open_debug_widget(DebugWidget::Threads); });
     connect(m_ui->debug_mutexes_action, &QAction::triggered, this, [this] { open_debug_widget(DebugWidget::Mutexes); });
@@ -931,7 +949,7 @@ std::optional<AppLaunchRequest> MainWindow::boot_game_once(const AppLaunchReques
     if (m_theme_manager)
         m_theme_manager->set_vita_theme_bgm_blocked(true);
 
-    bool launch_fullscreen = emuenv.cfg.boot_apps_full_screen;
+    bool launch_fullscreen = emuenv.cfg.boot_apps_full_screen || emuenv.cfg.fullscreen;
     if (m_game_container) {
         launch_fullscreen = m_game_container->visibility() == QWindow::FullScreen;
     }
@@ -1030,6 +1048,9 @@ std::optional<AppLaunchRequest> MainWindow::boot_game_once(const AppLaunchReques
 
     connect(m_kb_filter, &CtrlKeyboardFilter::screenshot_requested,
         this, [this]() { take_screenshot(emuenv); });
+
+    connect(m_kb_filter, &CtrlKeyboardFilter::exit_requested,
+        m_game_window, &QWindow::close, Qt::QueuedConnection);
 
     if (auto next_request = take_pending_app_launch_request()) {
         on_game_closed();
@@ -1245,7 +1266,28 @@ void MainWindow::on_live_area_closed() {
     }
 }
 
+void MainWindow::showEvent(QShowEvent *event) {
+    QMainWindow::showEvent(event);
+    if (auto *handle = windowHandle())
+        handle->installEventFilter(this);
+}
+
 bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (event->type() == QEvent::KeyPress && (watched == windowHandle() || watched == m_live_area_widget)) {
+        const auto *ke = static_cast<QKeyEvent *>(event);
+        const auto *focus = QApplication::focusWidget();
+        const bool typing = watched == windowHandle() && focus && focus->testAttribute(Qt::WA_InputMethodEnabled);
+        const auto key = physical_key_from_qt_event(*ke);
+        if (!ke->isAutoRepeat() && !typing && key != input::PhysicalKeyCode::Unbound
+            && (key == emuenv.cfg.keyboard_gui_exit || key == emuenv.cfg.keyboard_gui_exit_alt)) {
+            if (m_game_container)
+                QMetaObject::invokeMethod(m_game_container, &QWindow::close, Qt::QueuedConnection);
+            else
+                QMetaObject::invokeMethod(this, &QWidget::close, Qt::QueuedConnection);
+            return true;
+        }
+    }
+
     if (watched == m_live_area_widget) {
         if (event->type() == QEvent::Close) {
             event->ignore();
@@ -1298,6 +1340,7 @@ void MainWindow::pump_sdl_events() {
         case SDL_EVENT_FINGER_DOWN:
         case SDL_EVENT_FINGER_MOTION:
         case SDL_EVENT_FINGER_UP:
+        case SDL_EVENT_FINGER_CANCELED:
             handle_touch_event(emuenv.touch, event.tfinger);
             break;
 
@@ -1314,6 +1357,12 @@ void MainWindow::pump_sdl_events() {
         default:
             break;
         }
+    }
+
+    // Stop requested by overlay/ingame
+    if (m_app_session.stop_requested()) {
+        on_game_closed();
+        m_app_session.reset_stop_request();
     }
 }
 

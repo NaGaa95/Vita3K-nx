@@ -24,6 +24,7 @@
 enum class VitaIoDevice : int {
     addcont0 = 0,
     app0,
+    cache0,
     host0,
     gro0,
     grw0,
@@ -56,6 +57,7 @@ enum class VitaIoDevice : int {
 BOOST_DESCRIBE_ENUM(VitaIoDevice,
     addcont0,
     app0,
+    cache0,
     host0,
     grw0,
     imc0,

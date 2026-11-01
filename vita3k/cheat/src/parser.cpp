@@ -274,7 +274,7 @@ fs::path save_cheat_file(const CheatFile &file, const fs::path &cheats_dir) {
     fs::path destination = file.path;
     if (!cheats_dir.empty()) {
         const fs::path candidate = cheats_dir / file.path.filename();
-        boost::system::error_code error;
+        std::error_code error;
         if (!fs::equivalent(candidate, file.path, error))
             destination = candidate;
     }

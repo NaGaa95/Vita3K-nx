@@ -31,7 +31,7 @@ namespace shader {
 static constexpr int COLOR_ATTACHMENT_TEXTURE_SLOT_IMAGE = 0;
 static constexpr int MASK_TEXTURE_SLOT_IMAGE = 1;
 static constexpr int COLOR_ATTACHMENT_RAW_TEXTURE_SLOT_IMAGE = 3;
-static constexpr uint32_t CURRENT_VERSION = 58;
+static constexpr uint32_t CURRENT_VERSION = 62;
 // fragment shader using the rendering surface as a storage image (because of shader interlock) have a line
 // layout (constant_id = GAMMA_CORRECTION_SPECIALIZATIO_ID) const bool is_srgb = false;
 // Setting this constant to true performs gamma correction in the shader
@@ -55,6 +55,7 @@ struct Hints {
     // color format of the surface, used for the opengl renderer when the GPU does not support features.support_unknown_format
     // I'm asking for the format instead of the base format as the swizzle might be used in future updates for surfaces with only 1 or 2 components
     SceGxmColorFormat color_format;
+    bool masked_framebuffer_fetch = false;
 
     // we need to have the texture formats of the sampled textures in two cases:
     // - when doing dependent texture queries with unknown format we need to know the format
@@ -76,6 +77,9 @@ void spirv_disasm_print(const usse::SpirvCode &spirv_binary, std::string *spirv_
 // the returned object will only have its glsl or spirv field non-empty depending on the target
 GeneratedShader convert_gxp(const SceGxmProgram &program, const std::string &shader_hash, const FeatureState &features, const Target target, const Hints &hints, bool maskupdate = false,
     bool force_shader_debug = false, const std::function<bool(const std::string &ext, const std::string &dump)> &dumper = nullptr);
+
+usse::SpirvCode create_mask_test_shader();
+usse::SpirvCode create_visibility_reduce_shader();
 
 void convert_gxp_to_glsl_from_filepath(const std::string &shader_filepath_utf8);
 

@@ -289,7 +289,7 @@ bool parseStatusLine(const std::string &line, std::string &httpVer, int &statusC
 bool parseHeaders(std::string &headersRaw, HeadersMapType &headersOut) {
     char *ptr = strtok(headersRaw.data(), "\r\n");
     // use while loop to check ptr is not null
-    while (ptr != NULL) {
+    while (ptr != nullptr) {
         auto line = std::string_view(ptr);
 
         if (line.find(':') == std::string::npos)
@@ -361,7 +361,7 @@ std::string get_web_response(const std::string &url) {
 
     std::string response_string;
     const auto writeFunc = +[](void *ptr, size_t size, size_t nmemb, std::string *data) {
-        data->append((char *)ptr, size * nmemb);
+        data->append(reinterpret_cast<char *>(ptr), size * nmemb);
         return size * nmemb;
     };
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeFunc);
@@ -412,7 +412,7 @@ std::vector<AssignedAddr> get_all_assigned_addrs() {
     UINT i;
     ULONG ulOutBufLen = sizeof(IP_ADAPTER_INFO);
     pAdapterInfo = (IP_ADAPTER_INFO *)malloc(sizeof(IP_ADAPTER_INFO));
-    if (pAdapterInfo == NULL) {
+    if (pAdapterInfo == nullptr) {
         LOG_CRITICAL("Error allocating memory needed to call GetAdaptersinfo");
         return ret_addrs();
     }
@@ -420,7 +420,7 @@ std::vector<AssignedAddr> get_all_assigned_addrs() {
     if (GetAdaptersInfo(pAdapterInfo, &ulOutBufLen) == ERROR_BUFFER_OVERFLOW) {
         free(pAdapterInfo);
         pAdapterInfo = (IP_ADAPTER_INFO *)malloc(ulOutBufLen);
-        if (pAdapterInfo == NULL) {
+        if (pAdapterInfo == nullptr) {
             LOG_CRITICAL("Error allocating memory needed to call GetAdaptersinfo");
             return ret_addrs();
         }
@@ -465,13 +465,13 @@ std::vector<AssignedAddr> get_all_assigned_addrs() {
         nifmExit();
     }
 #else
-    struct ifaddrs *ifAddrStruct = NULL;
-    struct ifaddrs *ifa = NULL;
-    void *tmpAddrPtr = NULL;
+    struct ifaddrs *ifAddrStruct = nullptr;
+    struct ifaddrs *ifa = nullptr;
+    void *tmpAddrPtr = nullptr;
 
     getifaddrs(&ifAddrStruct);
 
-    for (ifa = ifAddrStruct; ifa != NULL; ifa = ifa->ifa_next) {
+    for (ifa = ifAddrStruct; ifa != nullptr; ifa = ifa->ifa_next) {
         if (!ifa->ifa_addr)
             continue;
         if ((ifa->ifa_flags & IFF_LOOPBACK) != 0)
@@ -488,7 +488,7 @@ std::vector<AssignedAddr> get_all_assigned_addrs() {
                 out_addrs.push_back({ ifa->ifa_name, addressBuffer, netMaskAddrStr });
             }
     }
-    if (ifAddrStruct != NULL)
+    if (ifAddrStruct != nullptr)
         freeifaddrs(ifAddrStruct);
 #endif
     return ret_addrs();

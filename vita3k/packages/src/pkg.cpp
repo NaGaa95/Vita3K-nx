@@ -49,7 +49,7 @@
 static void ctr_init(uint8_t *counter, uint8_t *iv, uint64_t n) {
     for (int i = 15; i >= 0; i--) {
         n = n + iv[i];
-        counter[i] = (uint8_t)n;
+        counter[i] = static_cast<uint8_t>(n);
         n >>= 8;
     }
 }
@@ -103,9 +103,9 @@ static fs::path transaction_sibling(const fs::path &final_path, const char *suff
 // exist yet is the normal case for a first install, so the file_status has to be
 // the discriminator: only status_error is a genuine failure to inspect the path.
 static bool path_exists_checked(const fs::path &path, const char *description, bool &exists) {
-    boost::system::error_code fs_error;
+    std::error_code fs_error;
     const fs::file_status status = fs::status(path, fs_error);
-    if (status.type() == fs::status_error) {
+    if (fs_error && fs_error != std::errc::no_such_file_or_directory) {
         LOG_ERROR("Failed to inspect {} '{}': {}", description, path, fs_error.message());
         return false;
     }
@@ -114,7 +114,7 @@ static bool path_exists_checked(const fs::path &path, const char *description, b
 }
 
 static bool remove_path_checked(const fs::path &path, const char *description) {
-    boost::system::error_code fs_error;
+    std::error_code fs_error;
     fs::remove_all(path, fs_error);
     if (fs_error) {
         LOG_ERROR("Failed to remove {} '{}': {}", description, path, fs_error.message());
@@ -126,7 +126,7 @@ static bool remove_path_checked(const fs::path &path, const char *description) {
 // Recover either side of an interrupted same-directory swap and clear only the
 // transaction-owned staging directory. The live path is never removed here.
 static bool prepare_staged_replace(const fs::path &final_path, const fs::path &staged_path, const fs::path &backup_path) {
-    boost::system::error_code fs_error;
+    std::error_code fs_error;
     fs::create_directories(final_path.parent_path(), fs_error);
     if (fs_error) {
         LOG_ERROR("Failed to create install parent '{}': {}", final_path.parent_path(), fs_error.message());
@@ -154,7 +154,7 @@ static bool prepare_staged_replace(const fs::path &final_path, const fs::path &s
 }
 
 static bool commit_staged_replace(const fs::path &final_path, const fs::path &staged_path, const fs::path &backup_path) {
-    boost::system::error_code fs_error;
+    std::error_code fs_error;
     if (!fs::is_directory(staged_path, fs_error) || fs_error) {
         LOG_ERROR("Install staging directory '{}' is missing or unreadable{}{}", staged_path,
             fs_error ? ": " : "", fs_error ? fs_error.message() : "");
@@ -178,7 +178,7 @@ static bool commit_staged_replace(const fs::path &final_path, const fs::path &st
     if (fs_error) {
         const std::string install_error = fs_error.message();
         if (moved_existing) {
-            boost::system::error_code restore_error;
+            std::error_code restore_error;
             fs::rename(backup_path, final_path, restore_error);
             if (restore_error)
                 LOG_CRITICAL("Failed to restore install '{}' after replacement failure: {}", final_path, restore_error.message());
@@ -202,7 +202,7 @@ bool decrypt_install_nonpdrm(EmuEnvState &emuenv, const fs::path &drmlicpath, co
     if (!prepare_staged_replace(title_path, title_id_dst, backup_path))
         return false;
 
-    fs::ifstream binfile(drmlicpath, std::ios::in | std::ios::binary | std::ios::ate);
+    std::ifstream binfile(drmlicpath, std::ios::in | std::ios::binary | std::ios::ate);
     if (!binfile) {
         LOG_ERROR("Failed to open NoNpDrm license '{}'", drmlicpath);
         return false;
@@ -243,7 +243,7 @@ bool decrypt_install_nonpdrm_from(EmuEnvState &emuenv, const fs::path &drmlicpat
     if (!prepare_staged_replace(title_path, title_id_dst, backup_path))
         return false;
 
-    fs::ifstream binfile(drmlicpath, std::ios::in | std::ios::binary | std::ios::ate);
+    std::ifstream binfile(drmlicpath, std::ios::in | std::ios::binary | std::ios::ate);
     if (!binfile) {
         LOG_ERROR("Failed to open NoNpDrm license '{}'", drmlicpath);
         return false;
@@ -447,7 +447,17 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         LOG_ERROR("Failed to read or parse the pkg SFO");
         return false;
     }
-    sfo::get_param_info(emuenv.app_info, sfo_buffer, emuenv.cfg.sys_lang);
+    if (!sfo::get_param_info(emuenv.app_info, sfo_buffer, emuenv.cfg.sys_lang)) {
+        LOG_ERROR("The param.sfo in {} is not readable, not installing it", fs_utils::path_to_utf8(pkg_path));
+        return false;
+    }
+
+    const bool is_theme = type == PkgType::PKG_TYPE_VITA_THEME;
+    const std::string &dest_id = is_theme ? emuenv.app_info.app_content_id : emuenv.app_info.app_title_id;
+    if (dest_id.empty() || (type == PkgType::PKG_TYPE_VITA_DLC && emuenv.app_info.app_content_id.size() <= 20)) {
+        LOG_ERROR("The param.sfo in {} has no usable title or content ID, not installing it", fs_utils::path_to_utf8(pkg_path));
+        return false;
+    }
 
     if (!is_safe_path_component(emuenv.app_info.app_title_id)) {
         LOG_ERROR("The pkg contains an invalid title id");
@@ -593,7 +603,7 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         const bool is_directory = (byte_swap(entry.type) & 0xFF) == 4 || (byte_swap(entry.type) & 0xFF) == 18;
         const fs::path directory = is_directory ? output_path : output_path.parent_path();
         if (!prepared_directories.contains(directory)) {
-            boost::system::error_code fs_error;
+            std::error_code fs_error;
             fs::create_directories(directory, fs_error);
             if (fs_error) {
                 LOG_ERROR("Failed to create pkg directory '{}': {}", directory, fs_error.message());
@@ -603,7 +613,7 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         }
 
         if (!is_directory) {
-            fs::ofstream outfile(output_path, std::ios::out | std::ios::binary | std::ios::trunc);
+            std::ofstream outfile(output_path, std::ios::out | std::ios::binary | std::ios::trunc);
             if (!outfile.is_open()) {
                 LOG_ERROR("Failed to create pkg output file '{}'", output_path);
                 return false;
@@ -679,7 +689,7 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
     if (theme_without_keystone)
         LOG_INFO("Theme PFS decrypted successfully; accepting the expected missing-keystone result");
 
-    boost::system::error_code fs_error;
+    std::error_code fs_error;
     if (!fs::is_directory(title_id_dst, fs_error) || fs_error) {
         LOG_ERROR("Decrypted PKG output '{}' is missing or unreadable{}{}", title_id_dst,
             fs_error ? ": " : "", fs_error ? fs_error.message() : "");
@@ -808,7 +818,7 @@ std::string find_pkg_zrif(const fs::path &pkg_path, const fs::path &vita_fs_path
         return {};
 
     LOG_INFO("Found license file: {}", rif_path);
-    fs::ifstream binfile(rif_path, std::ios::in | std::ios::binary | std::ios::ate);
+    std::ifstream binfile(rif_path, std::ios::in | std::ios::binary | std::ios::ate);
     if (!binfile)
         return {};
 

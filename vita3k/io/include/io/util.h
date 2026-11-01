@@ -24,7 +24,7 @@
 #include <io/types.h>
 #include <util/fs.h>
 
-typedef uint8_t TtyType;
+using TtyType = uint8_t;
 
 inline constexpr TtyType TTY_UNKNOWN = 0b00;
 inline constexpr TtyType TTY_IN = 0b01;
@@ -86,11 +86,6 @@ public:
 
     int get_access_mode() const {
         return file_info.access_mode;
-    }
-
-    // Returning type depends of system
-    auto get_char_path() const {
-        return file_info.sys_loc.generic_path().native().c_str();
     }
 
     // Modify IO parameters

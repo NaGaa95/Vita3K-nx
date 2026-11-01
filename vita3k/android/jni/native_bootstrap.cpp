@@ -27,9 +27,13 @@
 #include <modules/module_parent.h>
 #include <renderer/functions.h>
 #include <util/log.h>
+#include <util/sysinfo.h>
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
+#include <fmt/format.h>
+
+#include <sys/system_properties.h>
 
 #include <filesystem>
 #include <span>
@@ -50,17 +54,28 @@ std::string format_app_version() {
     return version;
 }
 
+std::string get_system_property(const char *key) {
+    char value[PROP_VALUE_MAX] = {};
+    __system_property_get(key, value);
+    return value;
+}
+
+std::string get_os_version() {
+    return fmt::format("Android {} (API {})", get_system_property("ro.build.version.release"),
+        get_system_property("ro.build.version.sdk"));
+}
+
 bool initialize_session(const fs::path &storage_path, Root &root_paths, std::unique_ptr<EmuEnvState> &emuenv) {
     try {
-        const fs::path vita_path = storage_path / "vita" / "";
+        const fs::path vita_path = storage_path / "vita";
 
         root_paths.set_static_assets_path({});
         root_paths.set_vita_fs_path(vita_path);
         root_paths.set_log_path(storage_path);
         root_paths.set_config_path(storage_path);
         root_paths.set_shared_path(storage_path);
-        root_paths.set_cache_path(storage_path / "cache" / "");
-        root_paths.set_patch_path(storage_path / "patch" / "");
+        root_paths.set_cache_path(storage_path / "cache");
+        root_paths.set_patch_path(storage_path / "patch");
 
         if (!fs::exists(root_paths.get_vita_fs_path()))
             fs::create_directories(root_paths.get_vita_fs_path());
@@ -76,6 +91,10 @@ bool initialize_session(const fs::path &storage_path, Root &root_paths, std::uni
             return false;
 
         LOG_INFO("{}", window_title);
+        LOG_INFO("OS: {}", get_os_version());
+        LOG_INFO("Device: {} {}", get_system_property("ro.product.manufacturer"), get_system_property("ro.product.model"));
+        LOG_INFO("CPU: {}", util::get_system_info());
+        LOG_INFO("Available ram memory: {} MiB", SDL_GetSystemRAM());
 
         emuenv = std::make_unique<EmuEnvState>();
 
@@ -97,11 +116,6 @@ bool initialize_session(const fs::path &storage_path, Root &root_paths, std::uni
         }
 
         emuenv->vulkan_device_info = std::make_unique<renderer::VulkanDeviceInfo>(renderer::enumerate_vulkan_devices());
-
-        if (emuenv->cfg.controller_binds.empty() || emuenv->cfg.controller_binds.size() != 15
-            || emuenv->cfg.controller_axis_binds.empty() || emuenv->cfg.controller_axis_binds.size() != 6) {
-            app::reset_controller_binding(*emuenv);
-        }
 
         init_libraries(*emuenv);
 
@@ -168,7 +182,7 @@ Java_org_vita3k_emulator_NativeLib_init(JNIEnv *env, jclass, jstring storage_pat
     }
 
     const std::string storage = jstring_to_string(env, storage_path_str);
-    const fs::path storage_path = fs::path(storage) / "";
+    const fs::path storage_path = fs::path(storage);
     Root root_paths;
     std::unique_ptr<EmuEnvState> emuenv;
     if (!initialize_session(storage_path, root_paths, emuenv))

@@ -158,10 +158,10 @@ static void extract_pup_files(const fs::path &pup, const fs::path &output) {
             fseek(infile, offset, SEEK_SET);
             char hdr[HEADER_LENGTH];
             fread(hdr, HEADER_LENGTH, 1, infile);
-            filename = make_filename((unsigned char *)hdr, filetype);
+            filename = make_filename(reinterpret_cast<unsigned char *>(hdr), filetype);
         }
 
-        fs::ofstream outfile(output / filename, std::ios::binary);
+        std::ofstream outfile(output / filename, std::ios::binary);
         fseek(infile, offset, SEEK_SET);
         std::vector<char> buffer(length);
         fread(buffer.data(), length, 1, infile);
@@ -191,10 +191,10 @@ static void decrypt_segments(std::ifstream &infile, const fs::path &outdir, cons
     const auto input = std::vector<uint8_t>(std::istreambuf_iterator<char>(infile), std::istreambuf_iterator<char>());
     const auto scesegs = get_segments(input.data(), sce_hdr, SCE_KEYS, sysver, selftype);
     for (const auto &sceseg : scesegs) {
-        fs::ofstream outfile(outdir / fs_utils::path_concat(filename, ".seg02"), std::ios::binary);
+        std::ofstream outfile(outdir / fs_utils::path_concat(filename, ".seg02"), std::ios::binary);
         infile.seekg(sceseg.offset);
         std::vector<unsigned char> encrypted_data(sceseg.size);
-        infile.read((char *)encrypted_data.data(), sceseg.size);
+        infile.read(reinterpret_cast<char *>(encrypted_data.data()), sceseg.size);
 
         std::vector<unsigned char> decrypted_data(sceseg.size);
         EVP_DecryptInit_ex(cipher_ctx, cipher, nullptr, reinterpret_cast<const unsigned char *>(sceseg.key.c_str()), reinterpret_cast<const unsigned char *>(sceseg.iv.c_str()));
@@ -206,7 +206,7 @@ static void decrypt_segments(std::ifstream &infile, const fs::path &outdir, cons
             const std::string decompressed_data = decompress_segments(decrypted_data, sceseg.size);
             outfile.write(decompressed_data.c_str(), decompressed_data.size());
         } else {
-            outfile.write((char *)decrypted_data.data(), sceseg.size);
+            outfile.write(reinterpret_cast<char *>(decrypted_data.data()), sceseg.size);
         }
         outfile.close();
     }
@@ -219,14 +219,14 @@ static void join_files(const fs::path &path, const std::string &filename, const 
     std::vector<fs::path> files;
 
     for (auto &p : fs::directory_iterator(path)) {
-        if (p.path().filename().string().substr(0, 4) == filename) {
+        if (p.path().filename().string().starts_with(filename)) {
             files.push_back(p.path());
         }
     }
 
-    std::sort(files.begin(), files.end());
+    std::ranges::sort(files);
 
-    fs::ofstream fileout(output, std::ios::binary);
+    std::ofstream fileout(output, std::ios::binary);
     for (const auto &file : files) {
         std::vector<char> buffer(0);
         fs_utils::read_data(file, buffer);
@@ -246,7 +246,7 @@ static void decrypt_pup_packages(const fs::path &src, const fs::path &dest, KeyS
 
     for (const auto &filename : pkgfiles) {
         const fs::path &filepath = src / filename;
-        fs::ifstream infile(filepath, std::ios::binary);
+        std::ifstream infile(filepath, std::ios::binary);
         decrypt_segments(infile, dest, filename, SCE_KEYS);
         infile.close();
     }
@@ -301,7 +301,7 @@ std::string install_pup(const fs::path &vita_fs_path, const fs::path &pup_path, 
 
     // get firmware version
     std::string fw_version;
-    fs::ifstream versionFile(pup_dest / "version.txt");
+    std::ifstream versionFile(pup_dest / "version.txt");
     if (versionFile.is_open()) {
         std::getline(versionFile, fw_version);
         versionFile.close();

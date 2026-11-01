@@ -29,6 +29,7 @@
 #include <condition_variable>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -41,6 +42,10 @@ struct Config;
 
 namespace overlay {
 class display_manager;
+}
+
+namespace app {
+class AppSessionController;
 }
 
 enum struct MappingMethod : int {
@@ -58,6 +63,8 @@ struct PerformanceOverlayState {
     int position = 0;
     int detail = 0;
 
+    // Set once the first measurement is in; fps itself rounds to 0 during heavy loads.
+    bool has_data = false;
     uint32_t fps = 0;
     uint32_t avg_fps = 0;
     uint32_t min_fps = 0;
@@ -153,6 +160,7 @@ struct State {
     std::chrono::steady_clock::time_point m_shaders_compiled_time{};
 
     std::atomic<bool> paused{ false };
+    std::optional<std::reference_wrapper<app::AppSessionController>> app_session_controller;
 
     // Non-owning pointer to dialog state for native common dialog overlays.
     DialogState *common_dialog = nullptr;

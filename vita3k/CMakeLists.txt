@@ -145,6 +145,9 @@ add_subdirectory(overlay)
 add_subdirectory(regmgr)
 add_subdirectory(renderer)
 add_subdirectory(rtc)
+if(NOT SWITCH)
+	add_subdirectory(sdl-frontend)
+endif()
 add_subdirectory(shader)
 add_subdirectory(threads)
 add_subdirectory(touch)
@@ -177,14 +180,11 @@ if(ANDROID)
 	if(CMAKE_BUILD_TYPE STREQUAL "Release")
 		# we need to exclude all symbols except SDL
 		set(LIBS_TO_EXCLUDE
-			"libboost_atomic.a"
 			"libboost_container.a"
 			"libboost_date_time.a"
 			"libboost_exception.a"
-			"libboost_filesystem.a"
 			"libboost_program_options.a"
 			"libboost_regex.a"
-			"libboost_system.a"
 			"libssl.a"
 			"libfmt.a"
 			"libcrypto.a"
@@ -239,7 +239,10 @@ if(WIN32)
 	target_sources(vita3k PRIVATE util/src/vc_runtime_checker.cpp)
 endif()
 
-target_link_libraries(vita3k PRIVATE app audio cheat compat config cppcommon ctrl dialog display ime lang gdbstub gxm io miniz modules motion np packages patch renderer shader touch util psvpfsparser)
+target_link_libraries(vita3k PRIVATE app audio cheat compat config ctrl dialog display ime lang gdbstub gxm io miniz modules motion np packages patch renderer shader touch util psvpfsparser)
+if(NOT SWITCH)
+	target_link_libraries(vita3k PRIVATE sdl-frontend)
+endif()
 if(NOT ANDROID AND NOT SWITCH)
 	target_link_libraries(vita3k PRIVATE gui-qt)
 endif()
@@ -288,6 +291,7 @@ if(NOT ANDROID AND NOT SWITCH)
 		"${CMAKE_SOURCE_DIR}/i18n/qt/*.ts")
 	set(VITA3K_QT_QM_DIR "${CMAKE_BINARY_DIR}/qt_translations")
 	set(VITA3K_QT_QM_FILES "")
+	file(MAKE_DIRECTORY "${VITA3K_QT_QM_DIR}")
 
 	foreach(ts_file IN LISTS VITA3K_QT_TS_FILES)
 		get_filename_component(ts_name "${ts_file}" NAME_WE)
@@ -305,15 +309,16 @@ if(NOT ANDROID AND NOT SWITCH)
 	add_dependencies(vita3k qt_app_translations)
 
 	add_custom_target(update_qt_translations
+		COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_SOURCE_DIR}/template"
 		COMMAND $<TARGET_FILE:Qt6::lupdate>
 			-no-obsolete
 			-recursive
 			"${CMAKE_CURRENT_SOURCE_DIR}/main.cpp"
 			"${CMAKE_CURRENT_SOURCE_DIR}/gui-qt/src"
 			"${CMAKE_CURRENT_SOURCE_DIR}/gui-qt/include"
-			-ts "${CMAKE_SOURCE_DIR}/i18n/qt/vita3k_en.ts"
+			-ts "${CMAKE_SOURCE_DIR}/template/vita3k_template.ts"
 		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-		COMMENT "Updating Qt translation source file")
+		COMMENT "Generating the Qt translation template")
 endif()
 
 set_target_properties(vita3k PROPERTIES OUTPUT_NAME Vita3K)
@@ -326,23 +331,92 @@ if(NOT ANDROID)
 endif()
 
 if(APPLE)
-	add_custom_command(
-		OUTPUT Vita3K.icns
-		COMMAND mkdir -p Vita3K.iconset
-		COMMAND sips -z 16 16     "${CMAKE_CURRENT_SOURCE_DIR}/Vita3K.png" --out Vita3K.iconset/icon_16x16.png
-		COMMAND sips -z 32 32     "${CMAKE_CURRENT_SOURCE_DIR}/Vita3K.png" --out Vita3K.iconset/icon_16x16@2x.png
-		COMMAND sips -z 32 32     "${CMAKE_CURRENT_SOURCE_DIR}/Vita3K.png" --out Vita3K.iconset/icon_32x32.png
-		COMMAND sips -z 64 64     "${CMAKE_CURRENT_SOURCE_DIR}/Vita3K.png" --out Vita3K.iconset/icon_32x32@2x.png
-		COMMAND sips -z 128 128   "${CMAKE_CURRENT_SOURCE_DIR}/Vita3K.png" --out Vita3K.iconset/icon_128x128.png
-		COMMAND sips -z 256 256   "${CMAKE_CURRENT_SOURCE_DIR}/Vita3K.png" --out Vita3K.iconset/icon_128x128@2x.png
-		COMMAND sips -z 256 256   "${CMAKE_CURRENT_SOURCE_DIR}/Vita3K.png" --out Vita3K.iconset/icon_256x256.png
-		COMMAND sips -z 512 512   "${CMAKE_CURRENT_SOURCE_DIR}/Vita3K.png" --out Vita3K.iconset/icon_256x256@2x.png
-		COMMAND sips -z 512 512   "${CMAKE_CURRENT_SOURCE_DIR}/Vita3K.png" --out Vita3K.iconset/icon_512x512.png
-		COMMAND cp "${CMAKE_CURRENT_SOURCE_DIR}/Vita3K.png" Vita3K.iconset/icon_512x512@2x.png
-		COMMAND iconutil -c icns Vita3K.iconset
-		COMMAND rm -r Vita3K.iconset
-		DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Vita3K.png")
-	set_source_files_properties(Vita3K.icns PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+	set(VITA3K_APPLE_ICON "${CMAKE_SOURCE_DIR}/dist/image/Vita3K.icon")
+	set(VITA3K_ICON_SVG "${CMAKE_CURRENT_SOURCE_DIR}/${VITA3K_APP_ID}.svg")
+	set(MAC_ICON_OUT "${CMAKE_CURRENT_BINARY_DIR}/app_icon")
+
+	if(NOT XCODE_VERSION)
+		execute_process(
+			COMMAND xcodebuild -version
+			OUTPUT_VARIABLE xcodebuild_version
+			OUTPUT_STRIP_TRAILING_WHITESPACE
+			ERROR_QUIET)
+		if(xcodebuild_version MATCHES "Xcode ([0-9]+(\\.[0-9]+)+)")
+			set(XCODE_VERSION ${CMAKE_MATCH_1})
+		endif()
+	endif()
+
+	if(XCODE_VERSION VERSION_GREATER_EQUAL "26.0")
+		if(CMAKE_GENERATOR STREQUAL "Xcode")
+			# If Xcode generator AND have Xcode 26 or greater, have Xcode compile the icon
+			target_sources(vita3k PRIVATE "${VITA3K_APPLE_ICON}")
+			set_source_files_properties("${VITA3K_APPLE_ICON}" PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
+			set_target_properties(vita3k PROPERTIES
+				XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME "Vita3K"
+				XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS "YES")
+		else()
+			# If not xcode generator but we have the required xcode, invoke actool manually to make an Assets.car + Vita3K.icns
+			file(GLOB_RECURSE VITA3K_ICON_DEPS LIST_DIRECTORIES true CONFIGURE_DEPENDS "${VITA3K_APPLE_ICON}/*")
+			add_custom_command(
+				OUTPUT "${MAC_ICON_OUT}/Assets.car" "${MAC_ICON_OUT}/Vita3K.icns"
+				COMMAND ${CMAKE_COMMAND} -E make_directory "${MAC_ICON_OUT}"
+				COMMAND actool "${VITA3K_APPLE_ICON}"
+					--compile "${MAC_ICON_OUT}"
+					--app-icon Vita3K
+					--include-all-app-icons
+					--platform macosx
+					--target-device mac
+					--minimum-deployment-target "${CMAKE_OSX_DEPLOYMENT_TARGET}"
+					--output-partial-info-plist "${MAC_ICON_OUT}/partial.plist" # plist unused but actool won't compile the icon without it
+				DEPENDS "${VITA3K_APPLE_ICON}" ${VITA3K_ICON_DEPS}
+				COMMENT "Compiling Vita3K.icon with actool"
+				VERBATIM)
+			set_source_files_properties(
+				"${MAC_ICON_OUT}/Assets.car" "${MAC_ICON_OUT}/Vita3K.icns"
+				PROPERTIES GENERATED TRUE MACOSX_PACKAGE_LOCATION "Resources")
+			target_sources(vita3k PRIVATE "${MAC_ICON_OUT}/Assets.car" "${MAC_ICON_OUT}/Vita3K.icns")
+			set(MACOSX_BUNDLE_ICON_FILE "Vita3K")
+
+			# cmake writes the Info.plist as read only so undo it, set CFBundleIconName, redo it
+			# CFBundleIconName is the new *OS key for dynamic/Liquid Glass icons. Xcode does this automatically
+			add_custom_command(TARGET vita3k POST_BUILD
+				COMMAND chmod u+w "$<TARGET_FILE_DIR:vita3k>/../Info.plist"
+				COMMAND plutil -replace CFBundleIconName -string "Vita3K" "$<TARGET_FILE_DIR:vita3k>/../Info.plist"
+				COMMAND chmod u-w "$<TARGET_FILE_DIR:vita3k>/../Info.plist"
+				COMMENT "Setting CFBundleIconName for Assets.car icon"
+				VERBATIM)
+		endif()
+	else()
+		# Otherwise if Xcode tools are less than 26, generate an .icns from the svg so at least there's something
+		set(VITA3K_ICONSET "${MAC_ICON_OUT}/Vita3K.iconset")
+		set(VITA3K_ICON_1024 "${MAC_ICON_OUT}/icon_1024.png")
+		set(VITA3K_ICNS "${MAC_ICON_OUT}/Vita3K.icns")
+
+		set(VITA3K_ICON_CMDS "")
+		foreach(size 16 32 128 256 512)
+			math(EXPR size2x "${size} * 2")
+			list(APPEND VITA3K_ICON_CMDS	# builds a command list
+				COMMAND sips -z ${size} ${size} "${VITA3K_ICON_1024}"
+					--out "${VITA3K_ICONSET}/icon_${size}x${size}.png"
+				COMMAND sips -z ${size2x} ${size2x} "${VITA3K_ICON_1024}"
+					--out "${VITA3K_ICONSET}/icon_${size}x${size}@2x.png")
+		endforeach()
+
+		add_custom_command(
+			OUTPUT "${VITA3K_ICNS}"
+			COMMAND ${CMAKE_COMMAND} -E make_directory "${VITA3K_ICONSET}"
+			# sips can only convert from svg on macos 13+ which is our minimum version target anyhow
+			COMMAND sips -s format png -z 1024 1024 "${VITA3K_ICON_SVG}" --out "${VITA3K_ICON_1024}"
+			${VITA3K_ICON_CMDS}	# executes commands list
+			COMMAND iconutil -c icns -o "${VITA3K_ICNS}" "${VITA3K_ICONSET}"
+			DEPENDS "${VITA3K_ICON_SVG}"
+			COMMENT "Manually building ${VITA3K_APP_ID}.svg into Vita3K.icns"
+			VERBATIM)
+		set_source_files_properties("${VITA3K_ICNS}" PROPERTIES
+			GENERATED TRUE MACOSX_PACKAGE_LOCATION "Resources")
+		target_sources(vita3k PRIVATE "${VITA3K_ICNS}")
+		set(MACOSX_BUNDLE_ICON_FILE "Vita3K")
+	endif()
 
 	add_custom_command(
 		TARGET vita3k
@@ -365,8 +439,6 @@ if(APPLE)
 		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${discord_dylib}" "$<TARGET_FILE_DIR:vita3k>/../Resources")
 	endif()
 	set_target_properties(vita3k PROPERTIES LINK_FLAGS "-rpath @loader_path/../Frameworks/ -rpath @loader_path/../Resources/ -ld64")
-	target_sources(vita3k PRIVATE Vita3K.icns)
-	set(MACOSX_BUNDLE_ICON_FILE Vita3K.icns)
 	set(MACOSX_BUNDLE_GUI_IDENTIFIER "com.github.Vita3K.Vita3K")
 	set(MACOSX_BUNDLE_BUNDLE_NAME "Vita3K")
 
@@ -387,78 +459,43 @@ if(APPLE)
 elseif(LINUX)
 	include("${CMAKE_SOURCE_DIR}/cmake/generate_metainfo.cmake")
 	set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-rpath='$ORIGIN'")
-	if(BUILD_APPIMAGE)
-		set(APPDIR "${CMAKE_BINARY_DIR}/AppImage")
-		add_custom_command(
-			TARGET vita3k
-			POST_BUILD
-			COMMAND ${CMAKE_COMMAND} -E make_directory "${APPDIR}/usr/share/${VITA3K_APP_NAME}"
-			COMMAND ${CMAKE_COMMAND} -E make_directory "${APPDIR}/usr/share/metainfo"
-			COMMAND ${CMAKE_COMMAND} -E make_directory "${APPDIR}/usr/share/doc/${VITA3K_APP_NAME}"
-			COMMAND ${CMAKE_COMMAND} -E make_directory "${APPDIR}/usr/share/licenses/${VITA3K_APP_NAME}"
-			COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_SOURCE_DIR}/data" "${APPDIR}/usr/share/${VITA3K_APP_NAME}/"
-			COMMAND ${CMAKE_COMMAND} -E copy_directory "${VITA3K_QT_QM_DIR}" "${APPDIR}/usr/share/${VITA3K_APP_NAME}/translations"
-			COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/shaders-builtin" "${APPDIR}/usr/share/${VITA3K_APP_NAME}/shaders-builtin"
-			COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/icons" "${APPDIR}/usr/share/VITA3K_APP_NAME/icons"
-			COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/COPYING.txt" "${APPDIR}/usr/share/licenses/${VITA3K_APP_NAME}/"
-			COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/README.md" "${APPDIR}/usr/share/doc/${VITA3K_APP_NAME}/"
-			COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_SOURCE_DIR}/dist/linux/${VITA3K_APP_ID}.metainfo.xml" "${APPDIR}/usr/share/metainfo/"
-		)
-		set(LINUXDEPLOY_WRAPPER "${CMAKE_SOURCE_DIR}/dist/linux/build.sh")
-		set(DISCORD_LIB_APPIMAGE "")
-		if(USE_DISCORD_RICH_PRESENCE)
-			set(DISCORD_LIB_APPIMAGE "-l \"${CMAKE_BINARY_DIR}/external/discord_game_sdk/lib/x86_64/libdiscord_game_sdk.so\"")
-		endif()
-		add_custom_command(
-			TARGET vita3k
-			POST_BUILD
-			COMMAND ${LINUXDEPLOY_WRAPPER} ${LINUXDEPLOY_COMMAND} --appdir="${APPDIR}"
-				-e "$<TARGET_FILE:vita3k>" --icon-filename="${VITA3K_APP_ID}"
-				-i "${CMAKE_SOURCE_DIR}/dist/image/${VITA3K_APP_ID}.svg"
-				-d "${CMAKE_SOURCE_DIR}/dist/linux/${VITA3K_APP_ID}.desktop"
-				--custom-apprun="${CMAKE_SOURCE_DIR}/dist/linux/apprun.sh" --plugin qt --output=appimage ${DISCORD_LIB_APPIMAGE}
-			COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_BINARY_DIR}/*.AppImage*" "$<TARGET_FILE_DIR:vita3k>/"
-			COMMAND ${CMAKE_COMMAND} -E rm "${CMAKE_CURRENT_BINARY_DIR}/*.AppImage*"
-		)
-	else()
-		include(GNUInstallDirs)
-		install(TARGETS vita3k BUNDLE RUNTIME
-			PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ)
-		install(DIRECTORY
-			${CMAKE_CURRENT_SOURCE_DIR}/shaders-builtin
-			${CMAKE_CURRENT_SOURCE_DIR}/icons
-			${CMAKE_SOURCE_DIR}/data
-			DESTINATION "${CMAKE_INSTALL_DATADIR}/Vita3K/")
-		install(FILES
-			${VITA3K_QT_QM_FILES}
-			DESTINATION "${CMAKE_INSTALL_DATADIR}/Vita3K/translations/")
-		install(FILES
-			"${CMAKE_SOURCE_DIR}/dist/image/${VITA3K_APP_ID}.svg"
-			PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ
-			DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps/")
-		install(FILES
-			"${CMAKE_SOURCE_DIR}/dist/linux/${VITA3K_APP_ID}.metainfo.xml"
-			PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ
-			DESTINATION "${CMAKE_INSTALL_DATADIR}/metainfo/")
-		install(FILES
-			"${CMAKE_SOURCE_DIR}/dist/linux/${VITA3K_APP_ID}.desktop"
-			PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ
-			DESTINATION "${CMAKE_INSTALL_DATADIR}/applications/")
-		install(FILES
-			"${CMAKE_SOURCE_DIR}/COPYING.txt"
-			PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ
-			DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/${VITA3K_APP_NAME}/"
-			RENAME "LICENSE")
-		install(FILES
-			"${CMAKE_SOURCE_DIR}/README.md"
-			PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ
-			DESTINATION "${CMAKE_INSTALL_DOCDIR}/")
+	include(GNUInstallDirs)
+	install(TARGETS vita3k BUNDLE RUNTIME
+		PERMISSIONS OWNER_EXECUTE OWNER_WRITE OWNER_READ GROUP_EXECUTE GROUP_READ WORLD_EXECUTE WORLD_READ)
+	install(DIRECTORY
+		${CMAKE_CURRENT_SOURCE_DIR}/shaders-builtin
+		${CMAKE_CURRENT_SOURCE_DIR}/icons
+		${CMAKE_SOURCE_DIR}/data
+		DESTINATION "${CMAKE_INSTALL_DATADIR}/Vita3K/")
+	install(DIRECTORY
+		"${VITA3K_QT_QM_DIR}/"
+		DESTINATION "${CMAKE_INSTALL_DATADIR}/Vita3K/translations/")
+	install(FILES
+		"${CMAKE_CURRENT_SOURCE_DIR}/${VITA3K_APP_ID}.svg"
+		PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ
+		DESTINATION "${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps/")
+	install(FILES
+		"${CMAKE_SOURCE_DIR}/dist/linux/${VITA3K_APP_ID}.metainfo.xml"
+		PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ
+		DESTINATION "${CMAKE_INSTALL_DATADIR}/metainfo/")
+	install(FILES
+		"${CMAKE_SOURCE_DIR}/dist/linux/${VITA3K_APP_ID}.desktop"
+		PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ
+		DESTINATION "${CMAKE_INSTALL_DATADIR}/applications/")
+	install(FILES
+		"${CMAKE_SOURCE_DIR}/COPYING.txt"
+		PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ
+		DESTINATION "${CMAKE_INSTALL_DATADIR}/licenses/${VITA3K_APP_NAME}/"
+		RENAME "LICENSE")
+	install(FILES
+		"${CMAKE_SOURCE_DIR}/README.md"
+		PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ
+		DESTINATION "${CMAKE_INSTALL_DOCDIR}/")
 
-		if(USE_DISCORD_RICH_PRESENCE AND ARCHITECTURE STREQUAL "x86_64")
-			install(LIBRARY
-				${CMAKE_BINARY_DIR}/external/discord_game_sdk/lib/x86_64/libdiscord_game_sdk.so
-				PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ)
-		endif()
+	if(USE_DISCORD_RICH_PRESENCE AND ARCHITECTURE STREQUAL "x86_64")
+		install(LIBRARY
+			${CMAKE_BINARY_DIR}/external/discord_game_sdk/lib/x86_64/libdiscord_game_sdk.so
+			PERMISSIONS OWNER_WRITE OWNER_READ GROUP_READ WORLD_READ)
 	endif()
 	add_custom_command(
 		TARGET vita3k
@@ -470,7 +507,7 @@ elseif(LINUX)
 		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/COPYING.txt" "$<TARGET_FILE_DIR:vita3k>/COPYING.txt"
 		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/README.md" "$<TARGET_FILE_DIR:vita3k>/README.md"
 		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/dist/linux/${VITA3K_APP_ID}.metainfo.xml" "$<TARGET_FILE_DIR:vita3k>/${VITA3K_APP_ID}.metainfo.xml"
-		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/dist/image/${VITA3K_APP_ID}.svg" "$<TARGET_FILE_DIR:vita3k>/${VITA3K_APP_ID}.svg"
+		COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_SOURCE_DIR}/${VITA3K_APP_ID}.svg" "$<TARGET_FILE_DIR:vita3k>/${VITA3K_APP_ID}.svg"
 	)
 	if(USE_DISCORD_RICH_PRESENCE)
 		add_custom_command(

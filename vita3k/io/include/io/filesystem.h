@@ -31,7 +31,7 @@
 #include <array>
 #endif
 
-typedef std::shared_ptr<FILE> FilePtr;
+using FilePtr = std::shared_ptr<FILE>;
 
 #ifdef __SWITCH__
 struct SharedFile {
@@ -68,14 +68,14 @@ SharedFilePtr open_shared_file(const fs::path &path, int flags);
 const wchar_t *translate_open_mode(const int flags);
 
 inline FilePtr create_shared_file(const fs::path &path, const int open_mode) {
-    const auto file = _wfopen(path.generic_path().wstring().c_str(), translate_open_mode(open_mode));
+    const auto file = _wfopen(path.generic_wstring().c_str(), translate_open_mode(open_mode));
     return file ? FilePtr(file, std::fclose) : FilePtr();
 }
 
-typedef std::shared_ptr<_WDIR> DirPtr;
+using DirPtr = std::shared_ptr<_WDIR>;
 
 inline DirPtr create_shared_dir(const fs::path &path) {
-    return DirPtr(_wopendir(path.generic_path().wstring().c_str()), _wclosedir);
+    return DirPtr(_wopendir(path.generic_wstring().c_str()), _wclosedir);
 }
 
 inline std::string get_file_in_dir(const _wdirent *file) {
@@ -89,7 +89,7 @@ inline _wdirent *get_system_dir_ptr(const DirPtr &dir) {
 const char *translate_open_mode(const int flags);
 
 inline FilePtr create_shared_file(const fs::path &path, const int open_mode) {
-    const auto file = fopen(path.generic_path().string().c_str(), translate_open_mode(open_mode));
+    const auto file = fopen(path.generic_string().c_str(), translate_open_mode(open_mode));
 #ifdef __SWITCH__
     // fsdev reports no st_blksize, so newlib leaves stdio nearly unbuffered and
     // every small guest read becomes a full FS-service IPC round trip. Give
@@ -100,10 +100,10 @@ inline FilePtr create_shared_file(const fs::path &path, const int open_mode) {
     return file ? FilePtr(file, std::fclose) : FilePtr();
 }
 
-typedef std::shared_ptr<DIR> DirPtr;
+using DirPtr = std::shared_ptr<DIR>;
 
 inline DirPtr create_shared_dir(const fs::path &path) {
-    return DirPtr(opendir(path.generic_path().string().c_str()), closedir);
+    return DirPtr(opendir(path.generic_string().c_str()), closedir);
 }
 
 inline std::string get_file_in_dir(dirent *file) {

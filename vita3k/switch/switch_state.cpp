@@ -106,9 +106,7 @@ void preemption_watchdog(EmuEnvState &emuenv) {
             // spinning one, so only translated code qualifies. A thread the
             // kernel has asked to suspend looks identical too - status run, no
             // imports - until it reaches the boundary where it parks.
-            if (thread->status.load(std::memory_order_relaxed) != ThreadStatus::run
-                || thread->current_import_nid.load(std::memory_order_relaxed) != 0
-                || thread->is_suspend_requested()) {
+            if (!thread->can_preempt()) {
                 watched.quanta = 0;
                 continue;
             }

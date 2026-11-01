@@ -36,6 +36,7 @@ enum class RestartRequiredSetting : uint8_t {
     MemoryMapping = 6,
     AudioBackend = 7,
     ValidationLayer = 8,
+    DisableMaskBit = 12,
     SpirvShader = 9,
     FullPrecision = 10,
     AccurateThreadScheduling = 11,

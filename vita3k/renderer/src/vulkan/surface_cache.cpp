@@ -32,6 +32,7 @@
 
 #include <vulkan/vulkan_format_traits.hpp>
 
+#include <array>
 #include <util/align.h>
 #include <util/log.h>
 #include <util/vector_utils.h>
@@ -121,37 +122,30 @@ static void barrier_render_to_transfer_read(vk::CommandBuffer cmd_buffer, vk::Im
         vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlags(), {}, {}, barrier);
 }
 
-// R4G4B4A4_UNORM_PACK16 stores R in bits 12..15 and A in bits 0..3.
-static uint32_t r4g4b4a4_shift(vk::ComponentSwizzle component) {
-    switch (component) {
-    case vk::ComponentSwizzle::eR:
-        return 12;
-    case vk::ComponentSwizzle::eG:
-        return 8;
-    case vk::ComponentSwizzle::eB:
-        return 4;
-    default:
-        return 0;
+static void pack_rgba8_to_u4u4u4u4(uint8_t *dst, const uint8_t *src, uint32_t pixel_stride, const vk::Rect2D &region, const vk::ComponentMapping &swizzle) {
+    const auto mapping = vkutil::color_to_texture_swizzle(swizzle, vkutil::rgba_mapping);
+    const std::array components{ mapping.r, mapping.g, mapping.b, mapping.a };
+    std::array<uint32_t, 4> channels;
+    for (size_t i = 0; i < channels.size(); ++i) {
+        if (components[i] < vk::ComponentSwizzle::eR || components[i] > vk::ComponentSwizzle::eA) {
+            LOG_ERROR("Unsupported RGBA4444 surface swizzle: {}, {}, {}, {}",
+                vk::to_string(swizzle.r), vk::to_string(swizzle.g), vk::to_string(swizzle.b), vk::to_string(swizzle.a));
+            return;
+        }
+        channels[i] = static_cast<uint32_t>(components[i]) - static_cast<uint32_t>(vk::ComponentSwizzle::eR);
     }
-}
 
-static void pack_rgba8_to_r4g4b4a4(uint8_t *dst, const uint8_t *src, uint32_t pixel_stride, uint32_t width, uint32_t height, const vk::ComponentMapping &swizzle) {
-    const uint32_t shift_r = r4g4b4a4_shift(swizzle.r);
-    const uint32_t shift_g = r4g4b4a4_shift(swizzle.g);
-    const uint32_t shift_b = r4g4b4a4_shift(swizzle.b);
-    const uint32_t shift_a = r4g4b4a4_shift(swizzle.a);
+    for (uint32_t y = region.offset.y; y < region.offset.y + region.extent.height; ++y) {
+        uint8_t *dst_row = dst + static_cast<size_t>(y) * pixel_stride * sizeof(uint16_t);
+        const uint8_t *src_row = src + static_cast<size_t>(y) * pixel_stride * 4;
 
-    for (uint32_t y = 0; y < height; y++) {
-        uint16_t *dst_row = reinterpret_cast<uint16_t *>(dst + y * pixel_stride * sizeof(uint16_t));
-        const uint8_t *src_row = src + y * pixel_stride * 4;
-
-        for (uint32_t x = 0; x < width; x++) {
-            const uint32_t r = unorm8_to_unorm4(src_row[x * 4 + 0]);
-            const uint32_t g = unorm8_to_unorm4(src_row[x * 4 + 1]);
-            const uint32_t b = unorm8_to_unorm4(src_row[x * 4 + 2]);
-            const uint32_t a = unorm8_to_unorm4(src_row[x * 4 + 3]);
-
-            dst_row[x] = static_cast<uint16_t>((r << shift_r) | (g << shift_g) | (b << shift_b) | (a << shift_a));
+        for (uint32_t x = region.offset.x; x < region.offset.x + region.extent.width; ++x) {
+            const uint8_t r = unorm8_to_unorm4(src_row[x * 4 + channels[0]]);
+            const uint8_t g = unorm8_to_unorm4(src_row[x * 4 + channels[1]]);
+            const uint8_t b = unorm8_to_unorm4(src_row[x * 4 + channels[2]]);
+            const uint8_t a = unorm8_to_unorm4(src_row[x * 4 + channels[3]]);
+            const uint16_t packed = static_cast<uint16_t>((r << 12) | (g << 8) | (b << 4) | a);
+            memcpy(dst_row + x * sizeof(packed), &packed, sizeof(packed));
         }
     }
 }
@@ -164,6 +158,31 @@ static uint64_t hash_synced_surface(const MemState &mem, const ColorSurfaceCache
     return XXH3_64bits(bytes, info.total_bytes);
 }
 #endif
+static vk::ImageView retrieve_surface_gamma_view(vk::Device device, ColorSurfaceCacheInfo &surface) {
+    if (!surface.gamma_view) {
+        const vk::ImageViewUsageCreateInfo usage_info{
+            .usage = vk::ImageUsageFlagBits::eColorAttachment | vk::ImageUsageFlagBits::eInputAttachment
+        };
+        const vk::ImageViewCreateInfo view_info{
+            .pNext = &usage_info,
+            .image = surface.texture.image,
+            .viewType = vk::ImageViewType::e2D,
+            .format = vk::Format::eR8G8B8A8Srgb,
+            .components = vkutil::default_comp_mapping,
+            .subresourceRange = vkutil::color_subresource_range
+        };
+        surface.gamma_view = device.createImageView(view_info);
+    }
+    return surface.gamma_view;
+}
+
+static void ensure_surface_sync_buffer(vkutil::Buffer &buffer, vkutil::DestroyQueue &destroy_queue, vk::DeviceSize required_size) {
+    if (!buffer.buffer || buffer.size < required_size) {
+        destroy_queue.add_buffer(buffer);
+        buffer = vkutil::Buffer(required_size);
+        buffer.init_buffer(vk::BufferUsageFlagBits::eTransferDst, vkutil::vma_mapped_alloc_cached);
+    }
+}
 
 static void protect_surface(MemState &mem, ColorSurfaceCacheInfo &info) {
     const bool trap_reads = info.tiling == SurfaceTiling::Linear;
@@ -233,6 +252,14 @@ void VKSurfaceCache::destroy_surface(ColorSurfaceCacheInfo &info) {
     }
     info.casted_textures.clear();
 
+    if (info.gamma_view) {
+        destroy_framebuffers(info.gamma_view);
+        destroy_queue.add(info.gamma_view);
+    }
+    if (info.blit_image) {
+        destroy_queue.add_image(*info.blit_image);
+        info.blit_image.reset();
+    }
     destroy_queue.add(info.alternate_view);
     destroy_queue.add(info.storage_view);
     destroy_queue.add(info.reinterpret_store_view);
@@ -418,6 +445,10 @@ void VKSurfaceCache::cleanup() {
             state.device.destroy(info.alternate_view);
             info.alternate_view = nullptr;
         }
+        if (info.gamma_view) {
+            state.device.destroy(info.gamma_view);
+            info.gamma_view = nullptr;
+        }
 
         if (info.storage_view) {
             state.device.destroy(info.storage_view);
@@ -536,7 +567,8 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
     overlap = (overlap && (ite->first + ite->second->total_bytes) > address);
 
     const SceGxmColorBaseFormat base_format = gxm::get_base_format(color->colorFormat);
-    vk::Format vk_format = color::translate_surface_format(base_format);
+    vk::Format vk_format = color::translate_surface_format(base_format,
+        state.support_native_rgba4_surface, state.features.support_shader_interlock);
 
     SurfaceTiling tiling;
     if (color->surfaceType == SCE_GXM_COLOR_SURFACE_LINEAR)
@@ -601,7 +633,9 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
             state.pipeline_cache.can_use_deferred_compilation = context->frame_timestamp - info.last_frame_rendered < big_delay_between_frames;
             info.last_frame_rendered = context->frame_timestamp;
 
-            if (vk_format == info.texture.format) {
+            if (state.features.support_shader_interlock && vk_format == vk::Format::eR8G8B8A8Srgb) {
+                return { retrieve_surface_gamma_view(state.device, info), &info.texture, info.raw_image.get(), info.storage_view ? info.storage_view : info.texture.view };
+            } else if (vk_format == info.texture.format) {
                 return { info.texture.view, &info.texture, info.raw_image.get(), info.storage_view ? info.storage_view : info.texture.view };
             } else {
                 // using both srgb/linear
@@ -656,7 +690,9 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
     vkutil::Image &image = info_added.texture;
     image.width = width;
     image.height = height;
-    image.format = vk_format;
+    image.format = state.features.support_shader_interlock && vk_format == vk::Format::eR8G8B8A8Srgb
+        ? vk::Format::eR8G8B8A8Unorm
+        : vk_format;
     image.layout = vkutil::ImageLayout::Undefined;
 
     // we might have to create a non-srgb/linear view later if this surface is used for presentation
@@ -721,6 +757,8 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
     // it's not impossible that this surface will be rendered once and only used after, so do not skip any shader on it
     state.pipeline_cache.can_use_deferred_compilation = false;
 
+    if (state.features.support_shader_interlock && vk_format == vk::Format::eR8G8B8A8Srgb)
+        return { retrieve_surface_gamma_view(state.device, info_added), &info_added.texture, info_added.raw_image.get(), info_added.storage_view ? info_added.storage_view : info_added.texture.view };
     return { info_added.texture.view, &info_added.texture, info_added.raw_image.get(),
         info_added.storage_view ? info_added.storage_view : info_added.texture.view };
 }
@@ -799,7 +837,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
         return std::nullopt;
 
     const vk::ComponentMapping swizzle = texture::translate_swizzle(gxm::get_format(texture));
-    vk::Format vk_format = color::translate_surface_format(base_format);
+    vk::Format vk_format = color::translate_surface_format(base_format, state.support_native_rgba4_surface, state.features.support_shader_interlock);
 
     const bool is_srgb = texture.gamma_mode != 0;
     if (is_srgb) {
@@ -812,9 +850,12 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
 
     ColorSurfaceCacheInfo &info = *ite->second;
 
-    if ((base_format == SCE_GXM_COLOR_BASE_FORMAT_U8U8U8 || info.format == SCE_GXM_COLOR_BASE_FORMAT_U8U8U8)
+    const bool expanded_rgba4 = surface_is_repacked_u4u4u4u4(info)
+        || (base_format == SCE_GXM_COLOR_BASE_FORMAT_U4U4U4U4 && vk_format != vk::Format::eR4G4B4A4UnormPack16);
+    if ((base_format == SCE_GXM_COLOR_BASE_FORMAT_U8U8U8 || info.format == SCE_GXM_COLOR_BASE_FORMAT_U8U8U8
+            || expanded_rgba4)
         && base_format != info.format)
-        // don't even try to match u8u8u8 with something else
+        // Expanded surfaces cannot be reinterpreted as a different guest format.
         return std::nullopt;
 
     // Check if we can use this surface
@@ -933,7 +974,12 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
     color_surface_queue.set_as_mru(&info);
 
     const vk::ImageView color_handle_view = reinterpret_cast<VKContext *>(state.context)->current_color_view;
-    const bool is_same_image = (color_handle_view == info.texture.view) || (color_handle_view == info.alternate_view);
+    const bool is_same_image = (color_handle_view == info.texture.view) || (color_handle_view == info.alternate_view)
+        || (info.gamma_view && color_handle_view == info.gamma_view);
+
+    const vk::ImageViewUsageCreateInfo sampled_usage{
+        .usage = vk::ImageUsageFlagBits::eSampled
+    };
 
     if (state.features.use_texture_viewport && base_format == info.format) {
         // use a texture viewport
@@ -957,6 +1003,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
             vk::ComponentMapping resulting_mapping = vkutil::color_to_texture_swizzle(info.swizzle, swizzle);
 
             vk::ImageViewCreateInfo view_info{
+                .pNext = state.features.support_shader_interlock && vk_format == vk::Format::eR8G8B8A8Srgb ? &sampled_usage : nullptr,
                 .image = info.texture.image,
                 .viewType = vk::ImageViewType::e2D,
                 .format = vk_format,
@@ -1290,6 +1337,7 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
             vk::ComponentMapping resulting_mapping = vkutil::color_to_texture_swizzle(info.swizzle, swizzle);
 
             vk::ImageViewCreateInfo view_info{
+                .pNext = state.features.support_shader_interlock && vk_format == vk::Format::eR8G8B8A8Srgb ? &sampled_usage : nullptr,
                 .image = info.texture.image,
                 .viewType = vk::ImageViewType::e2D,
                 .format = vk_format,
@@ -2243,7 +2291,8 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
 
     // this works for surface swizzles
     bool is_swizzle_identity = last_written_surface->swizzle.r == vk::ComponentSwizzle::eR;
-    if (!is_swizzle_identity && !format_support_swizzle(last_written_surface->format)) {
+    if (!is_swizzle_identity && !format_support_swizzle(last_written_surface->format)
+        && !surface_is_repacked_u4u4u4u4(*last_written_surface)) {
         LOG_WARN_ONCE("Surface sync with swizzle not support on {}", vk::to_string(last_written_surface->texture.format));
 
         is_swizzle_identity = true;
@@ -2340,12 +2389,8 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
 
         vkutil::Buffer &copy_buffer = *last_written_surface->copy_buffer;
 
-        if (!copy_buffer.buffer) {
-            // Size for the wider host format, before guest-format packing.
-            copy_buffer.size = static_cast<vk::DeviceSize>(pixel_stride) * last_written_surface->original_height
-                * vk::blockSize(last_written_surface->texture.format);
-            copy_buffer.init_buffer(vk::BufferUsageFlagBits::eTransferDst, vkutil::vma_mapped_alloc_cached);
-        }
+        const vk::DeviceSize required_size = static_cast<vk::DeviceSize>(pixel_stride) * last_written_surface->original_height * vk::blockSize(last_written_surface->texture.format);
+        ensure_surface_sync_buffer(copy_buffer, state.frame().destroy_queue, required_size);
 
         buffer = copy_buffer.buffer;
         offset = 0;
@@ -2451,6 +2496,9 @@ static void swizzle_text_T(T *pixels, uint32_t nb_pixel, ColorSurfaceCacheInfo *
         case vk::ComponentSwizzle::eG:
             // ARGB
             swizzle_text_T_4<T, 2>(pixels, nb_pixel);
+            break;
+        default:
+            // RGBA, nothing to swap
             break;
         }
     }
@@ -2622,7 +2670,8 @@ void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, ColorSurface
 
     if (surface_is_repacked_u4u4u4u4(*surface)) {
         surface->copy_buffer->invalidate(0, VK_WHOLE_SIZE);
-        pack_rgba8_to_r4g4b4a4(pixels, static_cast<const uint8_t *>(surface->copy_buffer->mapped_data), pixel_stride, surface->original_width, surface->original_height, surface->swizzle);
+        const vk::Rect2D region{ { 0, 0 }, { surface->original_width, surface->original_height } };
+        pack_rgba8_to_u4u4u4u4(pixels, static_cast<const uint8_t *>(surface->copy_buffer->mapped_data), pixel_stride, region, surface->swizzle);
         return;
     }
 
@@ -2634,7 +2683,7 @@ void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, ColorSurface
         if (!surface->sws_context) {
             const AVPixelFormat dst_fmt = is_swizzle_identity ? AV_PIX_FMT_RGB24 : AV_PIX_FMT_BGR24;
             surface->sws_context = sws_getContext(surface->original_width, surface->original_height, AV_PIX_FMT_RGB0, surface->original_width, surface->original_height, dst_fmt, 0, nullptr, nullptr, nullptr);
-            assert(surface->sws_context != NULL);
+            assert(surface->sws_context != nullptr);
         }
 
         int src_stride = pixel_stride * 4;

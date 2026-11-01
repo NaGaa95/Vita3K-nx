@@ -24,6 +24,8 @@
 
 #include <map>
 #include <mutex>
+#include <optional>
+#include <unordered_map>
 #include <vector>
 
 struct SceNpServiceStateCallback {
@@ -33,7 +35,7 @@ struct SceNpServiceStateCallback {
     uint32_t last_state = 0;
 };
 
-typedef std::map<int, SceNpServiceStateCallback> np_callbacks;
+using np_callbacks = std::map<int, SceNpServiceStateCallback>;
 
 struct NpTrophyUnlockCallbackData {
     std::string np_com_id;
@@ -87,6 +89,19 @@ struct NpMatching2State {
     std::vector<SceNpMatching2ContextEvent> pending;
 };
 
+struct NpTusRequest {
+    SceInt32 title_context_id = 0;
+    std::optional<SceInt32> result;
+};
+
+struct NpTusState {
+    bool inited = false;
+    std::mutex access_mutex;
+    // Simulated handles and immediate TSS failures; no PSN authentication or storage.
+    std::unordered_map<SceUID, bool> title_contexts;
+    std::unordered_map<SceUID, NpTusRequest> requests;
+};
+
 struct NpState {
     bool inited = false;
     np_callbacks cbs;
@@ -94,5 +109,6 @@ struct NpState {
 
     NpTrophyState trophy_state;
     NpMatching2State matching2;
+    NpTusState tus_state;
     np::CommunicationID comm_id;
 };

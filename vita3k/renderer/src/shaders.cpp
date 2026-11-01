@@ -68,9 +68,9 @@ public:
         std::lock_guard lock(mutex);
         auto &directory = directories[path.parent_path()];
         if (!directory.scanned) {
-            boost::system::error_code ec;
+            std::error_code ec;
             fs::directory_iterator entry(path.parent_path(), ec), end;
-            if (ec == boost::system::errc::no_such_file_or_directory) {
+            if (ec == std::errc::no_such_file_or_directory) {
                 directory.complete = true;
             } else if (!ec) {
                 for (; entry != end && !ec; entry.increment(ec))
@@ -91,7 +91,7 @@ public:
         if (directory.prepared)
             return true;
 
-        boost::system::error_code ec;
+        std::error_code ec;
         const bool created = fs::create_directories(path, ec);
         if (ec) {
             LOG_WARN("Failed to create directory {}: {}", path, ec.message());
@@ -125,7 +125,7 @@ static bool create_directories_noexcept(const fs::path &path) {
 #ifdef __SWITCH__
     return shader_cache_index.prepare(path);
 #else
-    boost::system::error_code ec;
+    std::error_code ec;
     fs::create_directories(path, ec);
     if (ec) {
         LOG_WARN("Failed to create directory {}: {}", path, ec.message());
@@ -139,7 +139,7 @@ static void remove_all_noexcept(const fs::path &path) {
 #ifdef __SWITCH__
     shader_cache_index.invalidate(path);
 #endif
-    boost::system::error_code ec;
+    std::error_code ec;
     fs::remove_all(path, ec);
     if (ec)
         LOG_WARN("Failed to remove stale shader path {}: {}", path, ec.message());
@@ -152,7 +152,7 @@ bool get_shaders_cache_hashs(State &renderer) {
     const std::string hash_file_name = fmt::format("hashs-{}.dat", (renderer.current_backend == Backend::OpenGL) ? "gl" : "vk");
 
     const auto hash_path = renderer.shaders_path / hash_file_name;
-    fs::ifstream shaders_hashs(hash_path, std::ios::in | std::ios::binary);
+    std::ifstream shaders_hashs(hash_path, std::ios::in | std::ios::binary);
     if (!shaders_hashs.is_open())
         return false;
 
@@ -240,7 +240,7 @@ void save_shaders_cache_hashs(State &renderer, std::vector<ShadersHash> &shaders
     if (!create_directories_noexcept(renderer.shaders_path))
         return;
     std::string hash_file_name = fmt::format("hashs-{}.dat", (renderer.current_backend == Backend::OpenGL) ? "gl" : "vk");
-    fs::ofstream shaders_hashs(renderer.shaders_path / hash_file_name, std::ios::out | std::ios::binary);
+    std::ofstream shaders_hashs(renderer.shaders_path / hash_file_name, std::ios::out | std::ios::binary);
 
     if (shaders_hashs.is_open()) {
         const auto data = serialize_shader_hashes(renderer, shaders_cache_hashs);
@@ -256,7 +256,7 @@ static R load_shader_generic(const fs::path &shader_path) {
         return {};
     }
 #endif
-    fs::ifstream file(shader_path, std::ios::binary | std::ios::ate);
+    std::ifstream file(shader_path, std::ios::binary | std::ios::ate);
     if (!file)
         return {};
 
@@ -275,7 +275,7 @@ static R load_shader_generic(const fs::path &shader_path) {
 
 static void save_shader_data(const fs::path &path, const void *data, size_t size) {
 #ifdef __SWITCH__
-    fs::ofstream file(path, std::ios::binary);
+    std::ofstream file(path, std::ios::binary);
     file.write(static_cast<const char *>(data), size);
     file.close();
     const bool success = !file.fail();

@@ -248,7 +248,7 @@ EXPORT(int32_t, sceAvPlayerAddSource, SceUID player_handle, Ptr<const char> path
 
         // Create temp media file
         const auto temp_file_path = emuenv.cache_path / "temp_vita_media.mp4";
-        fs::ofstream temp_file(temp_file_path, std::ios::out | std::ios::binary);
+        std::ofstream temp_file(temp_file_path, std::ios::out | std::ios::binary);
 
         const Address buf = alloc(emuenv.mem, KiB(512), "AvPlayer buffer");
         const auto buf_ptr = Ptr<char>(buf).get(emuenv.mem);
@@ -258,7 +258,7 @@ EXPORT(int32_t, sceAvPlayerAddSource, SceUID player_handle, Ptr<const char> path
         auto remaining = file_size;
         uint32_t offset = 0;
         while (remaining) {
-            const auto buf_size = std::min((uint32_t)KiB(512), remaining);
+            const auto buf_size = std::min(static_cast<uint32_t>(KiB(512)), remaining);
             // zero in 5 parameter means high dword of uint64_t parameter. see previous todo
             thread->run_callback(player_info->file_manager.read_file.address(), { player_info->file_manager.user_data, buf, offset, 0, buf_size });
             temp_file.write(buf_ptr, buf_size);
@@ -339,7 +339,7 @@ EXPORT(bool, sceAvPlayerGetAudioData, SceUID player_handle, SceAvPlayerFrameInfo
         if (data.empty())
             return false;
 
-        buffer = get_buffer(player_info, MediaType::AUDIO, emuenv.mem, (uint32_t)data.size() * sizeof(int16_t), false);
+        buffer = get_buffer(player_info, MediaType::AUDIO, emuenv.mem, static_cast<uint32_t>(data.size()) * sizeof(int16_t), false);
         std::memcpy(buffer.get(emuenv.mem), data.data(), data.size() * sizeof(int16_t));
     }
 

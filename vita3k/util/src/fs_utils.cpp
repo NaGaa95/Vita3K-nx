@@ -20,14 +20,35 @@
 
 #include <SDL3/SDL_iostream.h>
 
+#include <chrono>
+
 namespace fs_utils {
 
 fs::path construct_file_name(const fs::path &base_path, const fs::path &folder_path, const fs::path &file_name, const fs::path &extension) {
-    fs::path full_file_path{ base_path / folder_path / file_name };
+    // std's operator/ replaces on a rooted rhs and adds a separator for an empty one, unlike Boost
+    fs::path full_file_path{ base_path };
+    for (const auto &part : { folder_path.relative_path(), file_name.relative_path() }) {
+        if (!part.empty())
+            full_file_path /= part;
+    }
     if (!extension.empty())
         full_file_path.replace_extension(extension);
 
-    return full_file_path.generic_path();
+    return generic_path(full_file_path);
+}
+
+fs::path generic_path(const fs::path &path) {
+    return path.generic_string<fs::path::value_type>();
+}
+
+std::time_t to_time_t(const fs::file_time_type time) {
+    // MSVC's file_clock only has to_utc, and libc++ lacks clock_cast
+#ifdef _MSVC_STL_VERSION
+    const auto sys_time = std::chrono::clock_cast<std::chrono::system_clock>(time);
+#else
+    const auto sys_time = fs::file_time_type::clock::to_sys(time);
+#endif
+    return std::chrono::system_clock::to_time_t(std::chrono::time_point_cast<std::chrono::system_clock::duration>(sys_time));
 }
 
 std::string path_to_utf8(const fs::path &path) {
@@ -50,12 +71,13 @@ fs::path path_concat(const fs::path &path1, const fs::path &path2) {
     return fs::path{ path1.native() + path2.native() };
 }
 
-void dump_data(const fs::path &path, const void *data, const std::streamsize size) {
-    fs::ofstream of{ path, fs::ofstream::binary };
-    if (!of.fail()) {
-        of.write(static_cast<const char *>(data), size);
-        of.close();
-    }
+bool dump_data(const fs::path &path, const void *data, const std::streamsize size) {
+    std::ofstream of{ path, std::ofstream::binary };
+    if (of.fail())
+        return false;
+    of.write(static_cast<const char *>(data), size);
+    of.close();
+    return !of.fail();
 }
 template <typename T>
 static bool read_data(const fs::path &path, std::vector<T> &data) {
@@ -116,8 +138,8 @@ bool copy_directory_contents(const fs::path &src_path, const fs::path &dst_path,
                 fs::create_directories(output_path.parent_path());
 #ifdef __SWITCH__
                 {
-                    fs::ifstream in(src.path(), std::ios::in | std::ios::binary);
-                    fs::ofstream out(output_path, std::ios::out | std::ios::binary | std::ios::trunc);
+                    std::ifstream in(src.path(), std::ios::in | std::ios::binary);
+                    std::ofstream out(output_path, std::ios::out | std::ios::binary | std::ios::trunc);
                     if (!in.is_open() || !out.is_open())
                         return false;
                     while (in) {

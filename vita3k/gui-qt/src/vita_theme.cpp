@@ -36,7 +36,7 @@ namespace gui {
 namespace {
 
 std::string lowercase_copy(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(), [](const unsigned char ch) {
+    std::ranges::transform(value, value.begin(), [](const unsigned char ch) {
         return static_cast<char>(std::tolower(ch));
     });
     return value;
@@ -44,7 +44,7 @@ std::string lowercase_copy(std::string value) {
 
 std::string normalize_locale(std::string locale) {
     locale = string_utils::trim_copy(locale);
-    std::replace(locale.begin(), locale.end(), '_', '-');
+    std::ranges::replace(locale, '_', '-');
     return lowercase_copy(std::move(locale));
 }
 
@@ -224,7 +224,7 @@ std::string stylesheet_path_url(const fs::path &path, const fs::path &vita_fs_pa
     }
 
     std::string normalized = fs_utils::path_to_utf8(normalized_path);
-    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    std::ranges::replace(normalized, '\\', '/');
     return normalized;
 }
 
@@ -243,10 +243,6 @@ std::string join_stylesheet_path_urls(const std::vector<fs::path> &paths, const 
     return joined;
 }
 
-struct ThemeTemplateContext {
-    std::unordered_map<std::string, std::string> strings;
-};
-
 std::optional<std::string> load_vita_theme_stylesheet_template() {
     static const std::optional<std::string> stylesheet_template = []() -> std::optional<std::string> {
         QFile file(QStringLiteral(":/themes/vita/generated.qss.in"));
@@ -260,6 +256,10 @@ std::optional<std::string> load_vita_theme_stylesheet_template() {
 
     return stylesheet_template;
 }
+
+struct ThemeTemplateContext {
+    std::unordered_map<std::string, std::string> strings;
+};
 
 std::optional<std::string> render_template_token(
     const ThemeTemplateContext &context,
@@ -333,9 +333,9 @@ void collect_directory_metrics(const fs::path &root, std::uintmax_t &total_size,
     if (!fs::exists(root))
         return;
 
-    boost::system::error_code error_code;
+    std::error_code error_code;
     if (const auto root_time = fs::last_write_time(root, error_code); !error_code)
-        latest_write_time = std::max(latest_write_time, root_time);
+        latest_write_time = std::max(latest_write_time, fs_utils::to_time_t(root_time));
 
     fs::recursive_directory_iterator end;
     for (fs::recursive_directory_iterator it(root, error_code); !error_code && it != end; it.increment(error_code)) {
@@ -347,7 +347,7 @@ void collect_directory_metrics(const fs::path &root, std::uintmax_t &total_size,
         }
 
         if (const auto write_time = fs::last_write_time(current, error_code); !error_code)
-            latest_write_time = std::max(latest_write_time, write_time);
+            latest_write_time = std::max(latest_write_time, fs_utils::to_time_t(write_time));
         error_code.clear();
     }
 }
@@ -361,7 +361,7 @@ const VitaThemeBackgroundOption *find_background_option(
     if (background_option_id.empty())
         return &theme.background_options.front();
 
-    const auto it = std::find_if(theme.background_options.begin(), theme.background_options.end(),
+    const auto it = std::ranges::find_if(theme.background_options,
         [&background_option_id](const VitaThemeBackgroundOption &option) {
             return option.id == background_option_id;
         });
@@ -847,7 +847,7 @@ std::vector<VitaThemeInfo> enumerate_installed_vita_themes(
             theme_paths.push_back(it->path());
     }
 
-    std::sort(theme_paths.begin(), theme_paths.end(), [](const fs::path &lhs, const fs::path &rhs) {
+    std::ranges::sort(theme_paths, [](const fs::path &lhs, const fs::path &rhs) {
         return fs_utils::path_to_utf8(lhs.filename()) < fs_utils::path_to_utf8(rhs.filename());
     });
 
@@ -894,7 +894,7 @@ std::optional<fs::path> synthesize_vita_theme_qss(
         cycle_enabled,
         vita_fs_path);
 
-    boost::system::error_code error_code;
+    std::error_code error_code;
     fs::create_directories(output_directory, error_code);
     if (error_code) {
         LOG_ERROR("Failed to create Vita theme output directory {}: {}",
@@ -903,7 +903,7 @@ std::optional<fs::path> synthesize_vita_theme_qss(
         return std::nullopt;
     }
 
-    fs::ofstream output(qss_path, fs::ofstream::binary | fs::ofstream::trunc);
+    std::ofstream output(qss_path, std::ofstream::binary | std::ofstream::trunc);
     if (!output) {
         LOG_ERROR("Failed to open generated Vita theme stylesheet path {}", qss_path);
         return std::nullopt;

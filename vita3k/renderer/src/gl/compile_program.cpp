@@ -181,7 +181,7 @@ static SharedGLObject compile_shader(const fs::path &shader_cache_path, const st
 }
 
 static std::vector<ShadersHash>::iterator get_shaders_hash_index(std::vector<ShadersHash> &shaders_cache_hashs, const Sha256Hash &frag_hash, const Sha256Hash &vert_hash) {
-    const auto shader_hash_index = std::find_if(shaders_cache_hashs.begin(), shaders_cache_hashs.end(), [&](const ShadersHash &h) {
+    const auto shader_hash_index = std::ranges::find_if(shaders_cache_hashs, [&](const ShadersHash &h) {
         return (h.frag == frag_hash) && (h.vert == vert_hash);
     });
 
@@ -194,7 +194,7 @@ void pre_compile_program(GLState &renderer, const ShadersHash &hash) {
     const std::string shader_version = renderer.shader_version + (renderer.use_spirv ? "spv" : "");
     const fs::path frag_name = renderer.shaders_path / fmt::format("{}-{}.{}", shader_version, frag_hash_hex, renderer.use_spirv ? "spv" : "frag");
     const fs::path vert_name = renderer.shaders_path / fmt::format("{}-{}.{}", shader_version, vert_hash_hex, renderer.use_spirv ? "spv" : "vert");
-    boost::system::error_code ec;
+    std::error_code ec;
     const bool frag_exists = fs::is_regular_file(frag_name, ec) && !ec;
     ec.clear();
     const bool vert_exists = fs::is_regular_file(vert_name, ec) && !ec;

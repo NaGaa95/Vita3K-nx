@@ -374,7 +374,7 @@ void ArchiveInstallDialog::run_install(const std::vector<fs::path> &archives) {
             }
 
             auto *summary = new QLabel(this);
-            const int success_count = std::count_if(results.begin(), results.end(), [](const ArchiveInstallResult &r) { return r.success; });
+            const int success_count = std::ranges::count_if(results, [](const ArchiveInstallResult &r) { return r.success; });
             const int failure_count = results.size() - success_count;
             summary->setText(
                 (failure_count == 0)
@@ -436,7 +436,7 @@ void ArchiveInstallDialog::run_install(const std::vector<fs::path> &archives) {
                             if (r.archive_full_path.empty() || !deleted.insert(r.archive_full_path).second)
                                 continue;
                             // fs::remove throws and crashes the app when the archive is locked so use the non throwing overload
-                            boost::system::error_code error;
+                            std::error_code error;
                             fs::remove(r.archive_full_path, error);
                             if (error)
                                 failed.push_back(r.archive_name);

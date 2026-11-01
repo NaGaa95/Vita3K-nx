@@ -46,7 +46,7 @@ constexpr uint32_t perf_frames_size = 20;
 bool has_installed_firmware_content(const fs::path &path) {
     // Non-throwing is_empty: on the Switch sdmc: fsdev, exists()/is_empty() can
     // disagree on a just-created directory; the throwing overload aborts init.
-    boost::system::error_code ec;
+    std::error_code ec;
     return fs::exists(path) && fs::is_directory(path) && !fs::is_empty(path, ec) && !ec;
 }
 
@@ -66,6 +66,7 @@ void reset_perf_metrics(EmuEnvState &emuenv) {
         return;
 
     auto &renderer = *emuenv.renderer;
+    renderer.perf_overlay.has_data = false;
     renderer.perf_overlay.fps = 0;
     renderer.perf_overlay.avg_fps = 0;
     renderer.perf_overlay.min_fps = 0;
@@ -210,11 +211,10 @@ bool ensure_current_user(EmuEnvState &emuenv) {
 }
 
 bool switch_emulator_path(EmuEnvState &emuenv, const fs::path &vita_fs_path) {
-    const fs::path normalized_vita_fs_path = vita_fs_path / "";
-    if (normalized_vita_fs_path.empty())
+    if (vita_fs_path.empty())
         return false;
 
-    emuenv.vita_fs_path = normalized_vita_fs_path;
+    emuenv.vita_fs_path = vita_fs_path;
     emuenv.cfg.set_vita_fs_path(emuenv.vita_fs_path);
 
     ::io_deinit(emuenv.io);
@@ -333,6 +333,7 @@ bool update_runtime_metrics(EmuEnvState &emuenv, LaunchRuntimeMetrics &metrics) 
         return true;
 
     auto &renderer = *emuenv.renderer;
+    renderer.perf_overlay.has_data = true;
     renderer.perf_overlay.fps = emuenv.fps;
     renderer.perf_overlay.avg_fps = emuenv.avg_fps;
     renderer.perf_overlay.min_fps = emuenv.min_fps;
@@ -357,6 +358,7 @@ void abort_game_launch(EmuEnvState &emuenv) {
     emuenv.license_title_id.clear();
     emuenv.self_name.clear();
     emuenv.self_path.clear();
+    emuenv.clear_launch_uri();
     emuenv.main_thread_id = 0;
     emuenv.app_info = {};
     emuenv.drop_inputs = false;

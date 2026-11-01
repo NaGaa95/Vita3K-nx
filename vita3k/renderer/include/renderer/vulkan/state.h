@@ -151,6 +151,7 @@ struct VKState : public renderer::State {
     bool support_standard_layout = false;
     bool support_rasterized_order_access = false;
     bool surface_sync_clamp_rt = true;
+    bool support_native_rgba4_surface = false;
     LinuxSurfaceType linux_surface_type = LinuxSurfaceType::Unknown;
 
 #ifdef __ANDROID__

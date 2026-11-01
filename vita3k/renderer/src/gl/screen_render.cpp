@@ -239,10 +239,14 @@ void ScreenRenderer::render(const SceFVector2 &viewport_pos, const SceFVector2 &
 #endif
 
     if (filter == Filter::FXAA) {
-        // FXAA must run at render resolution, or it operates on an already-upscaled (blurred) image.
+        // FXAA must run at the input (render) resolution, 1:1 with the source texture,
+        // otherwise it operates on an already upscaled (blurred) image.
+        // Pass 1: run FXAA into an intermediate FBO sized to the render resolution.
+        // Pass 2: blit that result to the screen with GL_NEAREST (no bilinear upscale).
         const int fxaa_w = static_cast<int>(texture_size.x);
         const int fxaa_h = static_cast<int>(texture_size.y);
 
+        // (Re)create the intermediate target when the render resolution changes.
         if (fxaa_w != m_fxaa_width || fxaa_h != m_fxaa_height) {
             if (!m_fxaa_fbo) {
                 glGenFramebuffers(1, &m_fxaa_fbo);
@@ -259,6 +263,7 @@ void ScreenRenderer::render(const SceFVector2 &viewport_pos, const SceFVector2 &
             glBindTexture(GL_TEXTURE_2D, texture);
         }
 
+        // Pass 1: FXAA at render resolution
         glBindFramebuffer(GL_FRAMEBUFFER, m_fxaa_fbo);
         glViewport(0, 0, fxaa_w, fxaa_h);
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
@@ -269,6 +274,7 @@ void ScreenRenderer::render(const SceFVector2 &viewport_pos, const SceFVector2 &
 
         glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
 
+        // Pass 2: nearest-blit to the screen (no bilinear)
         glBindFramebuffer(GL_READ_FRAMEBUFFER, m_fxaa_fbo);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, default_fbo);
         glBlitFramebuffer(
@@ -278,6 +284,7 @@ void ScreenRenderer::render(const SceFVector2 &viewport_pos, const SceFVector2 &
             static_cast<GLint>(viewport_pos.y + viewport_size.y),
             GL_COLOR_BUFFER_BIT, GL_NEAREST);
     } else {
+        // Bilinear / Nearest / Bicubic draw directly to the screen.
         glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     }
 

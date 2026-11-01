@@ -90,6 +90,8 @@ private:
     std::set<VkRenderPass> raw_attachment_passes;
     // render passes used along shader interlock
     std::map<vk::Format, vk::RenderPass> shader_interlock_pass;
+    vk::RenderPass mask_render_pass;
+    vk::ShaderModule mask_test_shader;
 
     struct ShaderEntry {
         vk::ShaderModule module;
@@ -106,6 +108,7 @@ private:
     std::condition_variable shaders_ready;
     // because of multithreading, we want the pointers to remain stable
     unordered_map_stable<Sha256Hash, ShaderEntry> shaders;
+    unordered_map_stable<Sha256Hash, ShaderEntry> masked_fetch_shaders;
     unordered_map_stable<uint64_t, PipelineEntry> pipelines;
 
     vk::ShaderModule load_shader_module(const Sha256Hash &hash, const SceGxmProgram *program = nullptr, const shader::Hints *hints = nullptr, bool maskupdate = false);
@@ -152,6 +155,7 @@ public:
     bool render_pass_has_raw_attachment(vk::RenderPass pass) const {
         return raw_attachment_passes.count(static_cast<VkRenderPass>(pass)) > 0;
     }
+    vk::RenderPass retrieve_mask_render_pass();
     vk::Pipeline retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem);
     bool needs_attribute_bindings(const SceGxmVertexProgram &vertex_program) const;
 

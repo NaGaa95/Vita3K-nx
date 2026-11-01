@@ -30,12 +30,14 @@ export CCACHE_DIR
 CCACHE_DIR="$(cygpath -u "C:/msys2-ccache")"
 
 cmake --preset "$PRESET"
+download_qt_translations "build/$PRESET/qt_translations"
 cmake --build "build/$PRESET" --config "$CONFIG"
 
 BINDIR="build/${PRESET}/bin/${CONFIG}"
 MSYS2_BINDIR="/${MSYSTEM,,}/bin"
-for dll in libc++.dll libunwind.dll; do
-    if [[ -f "$MSYS2_BINDIR/$dll" ]]; then
-        cp "$MSYS2_BINDIR/$dll" "$BINDIR/"
-    fi
+mapfile -t dlls < <(ldd "$BINDIR/Vita3K.exe" | grep -oiE "$MSYS2_BINDIR/\S+\.dll" | sort -u)
+echo "Bundling MSYS2 DLLs:"
+printf '%s\n' "${dlls[@]}"
+for dll in "${dlls[@]}"; do
+    cp "$dll" "$BINDIR/"
 done

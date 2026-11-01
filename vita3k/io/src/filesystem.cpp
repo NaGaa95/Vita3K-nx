@@ -27,7 +27,7 @@
 #ifdef __SWITCH__
 SharedFilePtr open_shared_file(const fs::path &path, int flags) {
     // One writable host stream permits later guest writers without reopening a live reader.
-    const auto host_path = path.generic_path().string();
+    const auto host_path = path.generic_string();
     FILE *file = fopen(host_path.c_str(), "rb+");
     const bool writable = file != nullptr;
     if (!file && !(flags & SCE_O_WRONLY))

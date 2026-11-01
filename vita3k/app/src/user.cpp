@@ -62,7 +62,7 @@ void load_users(EmuEnvState &emuenv) {
 
     const auto user_path = emuenv.vita_fs_path / "ux0/user";
     const auto load_user_directory = [&](const fs::path &path) {
-        boost::system::error_code error;
+        std::error_code error;
         if (!fs::is_directory(path, error) || error)
             return;
 
@@ -117,7 +117,7 @@ void load_users(EmuEnvState &emuenv) {
     }
     closedir(directory);
 #else
-    boost::system::error_code error;
+    std::error_code error;
     if (!fs::is_directory(user_path, error) || error)
         return;
 

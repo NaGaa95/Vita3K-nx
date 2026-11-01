@@ -57,13 +57,13 @@ static fs::path get_apps_cache_path(const EmuEnvState &emuenv) {
 }
 
 static bool directory_exists_noexcept(const fs::path &path) {
-    boost::system::error_code error;
+    std::error_code error;
     const bool is_directory = fs::is_directory(path, error);
     return is_directory && !error;
 }
 
 static int64_t get_path_write_time(const fs::path &path) {
-    boost::system::error_code error;
+    std::error_code error;
     if (!fs::exists(path, error) || error)
         return -1;
 
@@ -72,7 +72,7 @@ static int64_t get_path_write_time(const fs::path &path) {
         LOG_WARN("Failed to read timestamp for '{}': {}", path, error.message());
         return -1;
     }
-    return static_cast<int64_t>(write_time);
+    return static_cast<int64_t>(write_time.time_since_epoch().count());
 }
 
 static std::vector<AppCacheSource> collect_app_cache_sources(const EmuEnvState &emuenv) {
@@ -83,7 +83,7 @@ static std::vector<AppCacheSource> collect_app_cache_sources(const EmuEnvState &
     std::vector<AppCacheSource> sources;
     const auto append_source = [&](const fs::path &title_path) {
         if (title_path.empty() || !directory_exists_noexcept(title_path)
-            || title_path.filename_is_dot() || title_path.filename_is_dot_dot())
+            || title_path.filename() == "." || title_path.filename() == "..")
             return;
 
         const auto title_id = title_path.filename().generic_string();
@@ -111,7 +111,7 @@ static std::vector<AppCacheSource> collect_app_cache_sources(const EmuEnvState &
     }
     closedir(directory);
 #else
-    boost::system::error_code error;
+    std::error_code error;
     fs::directory_iterator entry(app_path, error);
     const fs::directory_iterator end;
     for (; !error && entry != end; entry.increment(error))
@@ -121,7 +121,7 @@ static std::vector<AppCacheSource> collect_app_cache_sources(const EmuEnvState &
     }
 #endif
 
-    std::sort(sources.begin(), sources.end(), [](const AppCacheSource &lhs, const AppCacheSource &rhs) {
+    std::ranges::sort(sources, [](const AppCacheSource &lhs, const AppCacheSource &rhs) {
         return lhs.title_id < rhs.title_id;
     });
 
@@ -262,7 +262,7 @@ static std::vector<AppTime>::iterator find_app_time(
     const std::string &user_id,
     const std::string &app_path) {
     auto &v = state.app_times[user_id];
-    return std::find_if(v.begin(), v.end(), [&](const AppTime &t) {
+    return std::ranges::find_if(v, [&](const AppTime &t) {
         return t.app_path == app_path;
     });
 }
@@ -432,7 +432,7 @@ void save_app_times(EmuEnvState &emuenv) {
     auto time_child = doc.append_child("time");
 
     for (auto &[user_id, app_times] : state.app_times) {
-        std::sort(app_times.begin(), app_times.end(), [](const AppTime &a, const AppTime &b) {
+        std::ranges::sort(app_times, [](const AppTime &a, const AppTime &b) {
             return a.last_time_used > b.last_time_used;
         });
 
@@ -507,7 +507,7 @@ void delete_app(EmuEnvState &emuenv, const std::string &app_path) {
     {
         auto &state = emuenv.app.apps_list;
         std::lock_guard<std::mutex> lock(state.mutex);
-        const auto it = std::find_if(state.apps.begin(), state.apps.end(),
+        const auto it = std::ranges::find_if(state.apps,
             [&](const AppEntry &app) { return app.path == app_path; });
         if (it == state.apps.end()) {
             LOG_WARN("'{}' not found in apps list.", app_path);
@@ -568,16 +568,10 @@ void delete_app(EmuEnvState &emuenv, const std::string &app_path) {
         auto &state = emuenv.app.apps_list;
         std::lock_guard<std::mutex> lock(state.mutex);
 
-        state.apps.erase(
-            std::remove_if(state.apps.begin(), state.apps.end(),
-                [&](const AppEntry &app) { return app.path == app_path; }),
-            state.apps.end());
+        std::erase_if(state.apps, [&](const AppEntry &app) { return app.path == app_path; });
 
         for (auto &[user_id, times] : state.app_times) {
-            times.erase(
-                std::remove_if(times.begin(), times.end(),
-                    [&](const AppTime &t) { return t.app_path == app_path; }),
-                times.end());
+            std::erase_if(times, [&](const AppTime &t) { return t.app_path == app_path; });
         }
 
         save_app_times(emuenv);
@@ -608,7 +602,7 @@ bool set_app_info(EmuEnvState &emuenv, const std::string &app_path) {
     const auto &state = emuenv.app.apps_list;
     std::lock_guard<std::mutex> lock(state.mutex);
 
-    const auto it = std::find_if(state.apps.begin(), state.apps.end(), [&](const AppEntry &app) { return app.path == app_path; });
+    const auto it = std::ranges::find_if(state.apps, [&](const AppEntry &app) { return app.path == app_path; });
 
     if (it == state.apps.end()) {
         LOG_ERROR("{} not found in apps list.", app_path);

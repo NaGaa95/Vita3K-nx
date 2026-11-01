@@ -82,6 +82,7 @@ void copy_global_to_current(Config::CurrentConfig &current, const Config &cfg) {
     current.shader_debug_dump = cfg.shader_debug_dump;
     current.color_surface_debug = cfg.color_surface_debug;
     current.validation_layer = cfg.validation_layer;
+    current.disable_mask_bit = cfg.disable_mask_bit;
     current.tracy_primitive_impl = cfg.tracy_primitive_impl;
     current.tracy_advanced_profiling_modules = cfg.tracy_advanced_profiling_modules;
 }
@@ -138,6 +139,7 @@ void copy_current_to_global(Config &cfg, const Config::CurrentConfig &current) {
     cfg.shader_debug_dump = current.shader_debug_dump;
     cfg.color_surface_debug = current.color_surface_debug;
     cfg.validation_layer = current.validation_layer;
+    cfg.disable_mask_bit = current.disable_mask_bit;
     cfg.tracy_primitive_impl = current.tracy_primitive_impl;
     cfg.tracy_advanced_profiling_modules = current.tracy_advanced_profiling_modules;
 }
@@ -170,6 +172,7 @@ std::vector<RestartRequiredSetting> get_restart_required_settings(
     append_if_changed(before.accurate_thread_scheduling != after.accurate_thread_scheduling
             || before.preempt_on_wake != after.preempt_on_wake || before.guest_cores != after.guest_cores,
         RestartRequiredSetting::AccurateThreadScheduling);
+    append_if_changed(before.disable_mask_bit != after.disable_mask_bit, RestartRequiredSetting::DisableMaskBit);
 
     return changed;
 }
@@ -275,6 +278,7 @@ bool load_custom_config(Config::CurrentConfig &out, const fs::path &config_path,
         out.shader_debug_dump = dbg.attribute("shader-debug-dump").as_bool();
         out.color_surface_debug = dbg.attribute("color-surface-debug").as_bool();
         out.validation_layer = dbg.attribute("validation-layer").as_bool(true);
+        out.disable_mask_bit = dbg.attribute("disable-mask-bit").as_bool();
     }
 
     if (!config_child.child("network").empty()) {
@@ -361,6 +365,7 @@ bool save_custom_config(const Config::CurrentConfig &cc, const fs::path &config_
     debug_child.append_attribute("shader-debug-dump") = cc.shader_debug_dump;
     debug_child.append_attribute("color-surface-debug") = cc.color_surface_debug;
     debug_child.append_attribute("validation-layer") = cc.validation_layer;
+    debug_child.append_attribute("disable-mask-bit") = cc.disable_mask_bit;
 
     auto network_child = config_child.append_child("network");
     network_child.append_attribute("psn-signed-in") = cc.psn_signed_in;
@@ -400,10 +405,10 @@ int delete_all_custom_configs(const fs::path &config_path) {
         const auto file_name = entry.path().filename().string();
         if (!entry.path().has_extension() || entry.path().extension() != ".xml")
             continue;
-        if (file_name.rfind("config_", 0) != 0)
+        if (!file_name.starts_with("config_"))
             continue;
 
-        boost::system::error_code error;
+        std::error_code error;
         if (fs::remove(entry.path(), error) && !error)
             ++removed;
     }
@@ -451,7 +456,7 @@ std::vector<std::pair<std::string, bool>> get_modules_list(
         for (auto &m : modules)
             m.second = std::ranges::contains(lle_modules, m.first);
 
-        std::sort(modules.begin(), modules.end(), [](const auto &a, const auto &b) {
+        std::ranges::sort(modules, [](const auto &a, const auto &b) {
             if (a.second == b.second)
                 return a.first < b.first;
             return a.second;

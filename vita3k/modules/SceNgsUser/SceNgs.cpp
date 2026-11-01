@@ -27,8 +27,6 @@
 
 TRACY_MODULE_NAME(SceNgs);
 
-// Remember the voice when a missing patch is followed by a volume update.
-static thread_local ngs::Voice *last_missing_output_patch_voice = nullptr;
 
 // Rack teardown frees the voice's mutex with no notice; confirm it's still racked before locking a stale voice.
 static bool voice_is_racked(EmuEnvState &emuenv, const ngs::Voice *voice) {
@@ -118,6 +116,7 @@ enum SceNgsErrorCode : uint32_t {
     SCE_NGS_ERROR_INVALID_STATE = 0x804A0010,
     SCE_NGS_ERROR_PARAM_OUT_OF_RANGE = 0x804A0009,
     SCE_NGS_ERROR_INVALID_HANDLE = 0x804A000C,
+    SCE_NGS_ERROR_PATCH_NOT_AVAIL = 0x804A000E,
     SCE_NGS_SIZE_MISMATCH = 0x804A000D
 };
 
@@ -799,15 +798,23 @@ EXPORT(SceInt32, sceNgsVoiceGetOutputPatch, ngs::Voice *voice, const SceInt32 ou
     }
 
     *patch = voice->patches[output_index][output_subindex];
-    const bool patch_missing = !(*patch) || (patch->get(emuenv.mem))->output_sub_index == -1;
-    if (patch_missing) {
-        LOG_WARN_ONCE("Getting non-existen output patch port {}:{}", output_index, output_subindex);
-        *patch = Ptr<ngs::Patch>(0);
+    ngs::Patch *output_patch = nullptr;
+    if (*patch) {
+        if (!patch->valid(emuenv.mem)) {
+            return RET_ERROR(SCE_NGS_ERROR_INVALID_HANDLE);
+        }
+
+        output_patch = patch->get(emuenv.mem);
     }
 
-    last_missing_output_patch_voice = patch_missing ? voice : nullptr;
+    if (!output_patch || (output_patch->output_sub_index == -1)) {
+        if (output_patch)
+            *patch = Ptr<ngs::Patch>(0);
 
-    return 0;
+        return RET_ERROR(SCE_NGS_ERROR_PATCH_NOT_AVAIL);
+    }
+
+    return SCE_NGS_OK;
 }
 
 EXPORT(int, sceNgsVoiceGetParamsOutOfRange) {
@@ -987,20 +994,6 @@ EXPORT(SceInt32, sceNgsVoicePatchSetVolumesMatrix, ngs::Patch *patch, const SceN
     TRACY_FUNC(sceNgsVoicePatchSetVolumesMatrix, patch, matrix);
     if (!emuenv.cfg.current_config.ngs_enable)
         return 0;
-
-    // A routing with no patch to hand back: keep its gain on the voice so the
-    // implicit route into the master can still use it.
-    ngs::Voice *pending = last_missing_output_patch_voice;
-    last_missing_output_patch_voice = nullptr;
-    if ((!patch || patch->output_sub_index == -1) && matrix && pending) {
-        if (!voice_is_racked(emuenv, pending))
-            return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);
-
-        const std::lock_guard<std::mutex> guard(*pending->voice_mutex);
-        memcpy(pending->implicit_volume_matrix, matrix->matrix, sizeof(pending->implicit_volume_matrix));
-
-        return SCE_NGS_OK;
-    }
 
     if (!patch || patch->output_sub_index == -1)
         return RET_ERROR(SCE_NGS_ERROR_INVALID_ARG);

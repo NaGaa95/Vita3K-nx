@@ -92,7 +92,7 @@ constexpr bool log_file_stat = false;
 namespace vfs {
 
 bool read_file(const VitaIoDevice device, FileBuffer &buf, const fs::path &vita_fs_path, const fs::path &vfs_file_path) {
-    const auto host_file_path = device::construct_emulated_path(device, vfs_file_path, vita_fs_path).generic_path();
+    const auto host_file_path = device::construct_emulated_path(device, vfs_file_path, vita_fs_path);
     return fs_utils::read_data(host_file_path, buf);
 }
 
@@ -104,9 +104,9 @@ SceSize get_directory_used_size(const VitaIoDevice device, const std::string &vf
     const auto emuenv_path = device::construct_emulated_path(device, vfs_path, vita_fs_path);
 
     SceSize total_size = 0;
-    boost::system::error_code ec{};
+    std::error_code ec{};
     for (fs::recursive_directory_iterator entry(emuenv_path, ec), end; !ec && entry != end; entry.increment(ec)) {
-        boost::system::error_code entry_ec{};
+        std::error_code entry_ec{};
         if (fs::is_regular_file(entry->path(), entry_ec)) {
             const auto size = fs::file_size(entry->path(), entry_ec);
             if (!entry_ec)
@@ -125,7 +125,7 @@ SceSize get_directory_used_size(const VitaIoDevice device, const std::string &vf
 
 static bool is_valid_output_path(const VitaIoDevice device) {
     return !(device == VitaIoDevice::savedata0 || device == VitaIoDevice::savedata1 || device == VitaIoDevice::app0
-        || device == VitaIoDevice::_INVALID || device == VitaIoDevice::addcont0 || device == VitaIoDevice::tty0
+        || device == VitaIoDevice::_INVALID || device == VitaIoDevice::addcont0 || device == VitaIoDevice::cache0 || device == VitaIoDevice::tty0
         || device == VitaIoDevice::tty1 || device == VitaIoDevice::tty2 || device == VitaIoDevice::tty3
         || device == VitaIoDevice::music0 || device == VitaIoDevice::photo0 || device == VitaIoDevice::video0
         || device == VitaIoDevice::memory);
@@ -134,7 +134,7 @@ static bool is_valid_output_path(const VitaIoDevice device) {
 bool init(IOState &io, const fs::path &cache_path, const fs::path &log_path, const fs::path &vita_fs_path, bool redirect_stdio) {
     bool directories_ready = true;
     const auto create_path = [&directories_ready](const fs::path &path) {
-        boost::system::error_code ec;
+        std::error_code ec;
         fs::create_directories(path, ec);
         if (ec) {
             LOG_ERROR("Failed to create I/O directory {}: {}", path, ec.message());
@@ -194,7 +194,7 @@ void io_deinit(IOState &io) {
 
     if (!io.memory_path.empty() && io.memory_path.filename().string().starts_with("session-")
         && io.memory_path.parent_path().filename() == "memory") {
-        boost::system::error_code ec;
+        std::error_code ec;
         fs::remove_all(io.memory_path, ec);
         if (ec)
             LOG_WARN("Failed to remove memory device directory {}: {}", io.memory_path, ec.message());
@@ -221,6 +221,7 @@ void init_device_paths(IOState &io) {
     io.device_paths.savedata0 = "user/" + io.user_id + "/savedata/" + io.savedata;
     io.device_paths.app0 = "app/" + io.app_path;
     io.device_paths.addcont0 = "addcont/" + io.addcont;
+    io.device_paths.cache0.clear();
 }
 
 bool init_savedata_app_path(IOState &io, const fs::path &vita_fs_path) {
@@ -228,7 +229,7 @@ bool init_savedata_app_path(IOState &io, const fs::path &vita_fs_path) {
     const fs::path savedata_path{ user_id_path / "savedata" };
     const fs::path savedata_game_path{ savedata_path / io.savedata };
 
-    boost::system::error_code ec{};
+    std::error_code ec{};
     fs::create_directories(user_id_path, ec);
     fs::create_directories(savedata_path, ec);
     fs::create_directories(savedata_game_path, ec);
@@ -261,7 +262,7 @@ bool find_case_isens_path(IOState &io, VitaIoDevice &device, const fs::path &tra
     }
     }
 
-    boost::system::error_code ec{};
+    std::error_code ec{};
     if (!fs::exists(final_path, ec))
         return false;
 
@@ -305,6 +306,13 @@ std::string translate_path(const char *path, VitaIoDevice &device, const IOState
     }
     case VitaIoDevice::addcont0: { // Redirect addcont0: to ux0:addcont/<title_id>
         relative_path = device::remove_device_from_path(relative_path, device, device_paths.addcont0);
+        device = VitaIoDevice::ux0;
+        break;
+    }
+    case VitaIoDevice::cache0: { // Redirect cache0: to ux0:cache/<title_id>
+        if (device_paths.cache0.empty())
+            return std::string{};
+        relative_path = device::remove_device_from_path(relative_path, device, device_paths.cache0);
         device = VitaIoDevice::ux0;
         break;
     }
@@ -437,7 +445,7 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
         return fd;
     }
 #endif
-    boost::system::error_code fs_ec{};
+    std::error_code fs_ec{};
     if (fs::is_directory(system_path, fs_ec)) {
         LOG_ERROR("Cannot open directory: {}", system_path);
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
@@ -471,7 +479,7 @@ SceUID open_file(IOState &io, const char *path, const int flags, const fs::path 
             if (!fs::exists(system_path.parent_path(), fs_ec)) {
                 fs::create_directories(system_path.parent_path(), fs_ec);
             }
-            fs::ofstream file(system_path);
+            std::ofstream file(system_path);
         }
     }
 
@@ -650,7 +658,7 @@ int write_file(SceUID fd, const void *data, const SceSize size, const IOState &i
     if (file == io.std_files.end())
         return IO_ERROR(SCE_ERROR_ERRNO_EBADFD);
 
-    boost::system::error_code parent_ec{};
+    std::error_code parent_ec{};
     if (!fs::is_directory(file->second.get_system_location().parent_path(), parent_ec)) {
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT); // TODO: Is it the right error code?
     }
@@ -749,7 +757,7 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
             }
         }
 #endif
-        boost::system::error_code stat_ec{};
+        std::error_code stat_ec{};
         if (
 #ifdef __SWITCH__
             !host_file &&
@@ -798,19 +806,19 @@ int stat_file(IOState &io, const char *file, SceIoStat *statp, const fs::path &v
 
 #ifdef _WIN32
     struct _stati64 sb;
-    if (_wstati64(file_path.generic_path().wstring().c_str(), &sb) < 0)
+    if (_wstati64(file_path.generic_wstring().c_str(), &sb) < 0)
         return IO_ERROR_UNK();
 #elif defined(__SWITCH__)
     // newlib has no stat64; struct stat is already 64-bit with _FILE_OFFSET_BITS=64.
     struct stat sb;
     const int result = host_file
         ? fstat(fileno(host_file), &sb)
-        : stat(file_path.generic_path().string().c_str(), &sb);
+        : stat(file_path.generic_string().c_str(), &sb);
     if (result < 0)
         return IO_ERROR_UNK();
 #else
     struct stat64 sb;
-    if (stat64(file_path.generic_path().string().c_str(), &sb) < 0)
+    if (stat64(file_path.generic_string().c_str(), &sb) < 0)
         return IO_ERROR_UNK();
 #endif
 
@@ -890,17 +898,17 @@ int remove_file(IOState &io, const char *file, const fs::path &vita_fs_path, con
     }
 
     const auto emulated_path = device::construct_emulated_path(device, translated_path, vita_fs_path, io.redirect_stdio);
-    boost::system::error_code probe_ec{};
+    std::error_code probe_ec{};
     if (!fs::exists(emulated_path, probe_ec) || fs::is_directory(emulated_path, probe_ec)) {
         LOG_ERROR("File does not exist at path: {} (target path: {})", emulated_path, file);
     }
 
     LOG_TRACE_IF(log_file_op, "{}: Removing file {} ({})", export_name, file, device::construct_normalized_path(device, translated_path));
 
-    boost::system::error_code error_code{};
-    auto res = fs::detail::remove(emulated_path, &error_code);
+    std::error_code error_code{};
+    const auto res = fs::remove(emulated_path, error_code);
 
-    if (!(res && !(error_code.value()))) {
+    if (!res || error_code.value()) {
         LOG_ERROR("Cannot remove file: {} ({})", file, device::construct_normalized_path(device, translated_path));
         LOG_ERROR("Error code: {} ({})", error_code.value(), error_code.message());
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
@@ -929,7 +937,7 @@ int rename(IOState &io, const char *old_name, const char *new_name, const fs::pa
     }
 
     const auto emulated_old_path = device::construct_emulated_path(device, translated_old_path, vita_fs_path, io.redirect_stdio);
-    boost::system::error_code probe_ec{};
+    std::error_code probe_ec{};
     if (!fs::exists(emulated_old_path, probe_ec)) {
         LOG_ERROR("File does not exist at path: {} (target path: {})", emulated_old_path, old_name);
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
@@ -939,7 +947,7 @@ int rename(IOState &io, const char *old_name, const char *new_name, const fs::pa
 
     LOG_TRACE_IF(log_file_op, "{}: Renaming file {} to {} ({} to {})", export_name, old_name, new_name, emulated_old_path, emulated_new_path);
 
-    boost::system::error_code error_code{};
+    std::error_code error_code{};
     fs::rename(emulated_old_path, emulated_new_path, error_code);
 
     if (error_code.value()) {
@@ -957,7 +965,7 @@ SceUID open_dir(IOState &io, const char *path, const fs::path &vita_fs_path, con
     const auto translated_path = translate_path(path, device, io.device_paths);
 
     auto dir_path = device::construct_emulated_path(device, translated_path, vita_fs_path, io.redirect_stdio) / "";
-    boost::system::error_code probe_ec{};
+    std::error_code probe_ec{};
     if (!fs::exists(dir_path, probe_ec)) {
         if (io.case_isens_find_enabled) {
             // Attempt a case-insensitive file search.
@@ -1017,8 +1025,7 @@ SceUID read_dir(IOState &io, const SceUID fd, SceIoDirent *dent, const fs::path 
         const auto d_name_utf8 = get_file_in_dir(d);
         strncpy(dent->d_name, d_name_utf8.c_str(), sizeof(dent->d_name));
 
-        const auto cur_path = dir->second.get_system_location() / d_name_utf8;
-        if (!(cur_path.filename_is_dot() || cur_path.filename_is_dot_dot())) {
+        if (d_name_utf8 != "." && d_name_utf8 != "..") {
             const auto file_path = std::string(dir->second.get_vita_loc()) + '/' + d_name_utf8;
 
             LOG_TRACE_IF(log_file_op, "{}: Reading entry {} of fd: {}", export_name, file_path, log_hex(fd));
@@ -1039,7 +1046,7 @@ bool copy_path(const fs::path &src_path, const fs::path &vita_fs_path, const std
         if (!fs_utils::copy_directory_contents(src_path, app_path))
             return false;
 
-        boost::system::error_code ec{};
+        std::error_code ec{};
         fs::remove_all(src_path, ec);
 
         if (ec)
@@ -1058,14 +1065,16 @@ int create_dir(IOState &io, const char *dir, int mode, const fs::path &vita_fs_p
     }
 
     const auto emulated_path = device::construct_emulated_path(device, translated_path, vita_fs_path, io.redirect_stdio);
-    boost::system::error_code ec{};
+    std::error_code ec{};
     if (recursive)
         return fs::create_directories(emulated_path, ec);
     if (fs::exists(emulated_path, ec))
         return IO_ERROR(SCE_ERROR_ERRNO_EEXIST);
 
-    const auto parent_path = fs::path(emulated_path).remove_trailing_separator().parent_path();
-    if (!fs::exists(parent_path, ec)) // Vita cannot recursively create directories
+    auto parent_path = emulated_path.parent_path();
+    if (!emulated_path.has_filename())
+        parent_path = parent_path.parent_path();
+    if (!fs::exists(parent_path)) // Vita cannot recursively create directories
         return IO_ERROR(SCE_ERROR_ERRNO_ENOENT);
 
     LOG_TRACE_IF(log_file_op, "{}: Creating new dir {} ({})", export_name, dir, device::construct_normalized_path(device, translated_path));
@@ -1107,7 +1116,7 @@ int remove_dir(IOState &io, const char *dir, const fs::path &vita_fs_path, const
 
     LOG_TRACE_IF(log_file_op, "{}: Removing dir {} ({})", export_name, dir, device::construct_normalized_path(device, translated_path));
 
-    boost::system::error_code ec{};
+    std::error_code ec{};
     const auto removed = fs::remove_all(device::construct_emulated_path(device, translated_path, vita_fs_path, io.redirect_stdio), ec);
     if (ec || removed == 0) {
         LOG_ERROR("Cannot remove dir: {} ({})", dir, device::construct_normalized_path(device, translated_path));

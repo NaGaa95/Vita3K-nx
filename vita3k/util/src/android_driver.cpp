@@ -102,7 +102,7 @@ std::optional<fs::path> get_android_files_dir(JNIEnv *env) {
         return std::nullopt;
     }
 
-    const fs::path resolved = fs::path(jni_string_to_utf8(env, files_dir_str)) / "";
+    const fs::path resolved = fs::path(jni_string_to_utf8(env, files_dir_str));
     env->PopLocalFrame(nullptr);
     return resolved;
 }
@@ -150,7 +150,7 @@ std::optional<fs::path> get_android_native_library_dir(JNIEnv *env) {
         return std::nullopt;
     }
 
-    const fs::path resolved = fs::path(jni_string_to_utf8(env, native_library_dir)) / "";
+    const fs::path resolved = fs::path(jni_string_to_utf8(env, native_library_dir));
     env->PopLocalFrame(nullptr);
     return resolved;
 }
@@ -203,7 +203,7 @@ std::optional<fs::path> resolve_custom_driver_library_path(JNIEnv *env, const st
     if (!files_dir)
         return std::nullopt;
 
-    const fs::path driver_path = *files_dir / "driver" / driver_name / "";
+    const fs::path driver_path = *files_dir / "driver" / driver_name;
     if (!fs::exists(driver_path))
         return std::nullopt;
 
@@ -330,9 +330,7 @@ bool is_safe_driver_relative_path(const fs::path &relative_path) {
     if (relative_path.empty() || relative_path == "." || relative_path.is_absolute())
         return false;
 
-    return std::none_of(relative_path.begin(), relative_path.end(), [](const fs::path &part) {
-        return part == "..";
-    });
+    return !std::ranges::contains(relative_path, "..");
 }
 
 std::optional<std::string> read_driver_library_name_from_meta(const fs::path &meta_path) {
@@ -418,7 +416,7 @@ void *open_custom_vulkan_driver(const std::string &driver_name) {
     if (!files_dir)
         return nullptr;
 
-    const fs::path driver_path = *files_dir / "driver" / driver_name / "";
+    const fs::path driver_path = *files_dir / "driver" / driver_name;
     if (!fs::exists(driver_path)) {
         LOG_ERROR("Could not find driver {}", driver_name);
         return nullptr;

@@ -771,13 +771,14 @@ bool USSETranslatorVisitor::vcomp(
     }
 
     case Opcode::VLOG: {
+        // src0 = 2^y => return y (USSE complex unit is base-2)
         result = m_b.createBuiltinCall(m_b.getTypeId(result), std_builtins, GLSLstd450Log2, { result });
         break;
     }
 
     case Opcode::VEXP: {
-        // hack (kind of) :
-        // define exp(Nan) as 1.0, this is needed for Freedom Wars to render properly
+        // y = 2^src0 => return y (USSE complex unit is base-2)
+        // Freedom Wars requires exp2(NaN) to return 1.0.
         const spv::Id exp_val = m_b.createBuiltinCall(m_b.getTypeId(result), std_builtins, GLSLstd450Exp2, { result });
         const spv::Id ones = utils::make_uniform_vector_from_type(m_b, m_b.getTypeId(result), 1.0f);
         const spv::Id is_nan = m_b.createUnaryOp(spv::OpIsNan, m_b.makeBoolType(), result);
@@ -923,12 +924,12 @@ bool USSETranslatorVisitor::sop2(
     inst.opr.dest.type = DataType::UINT8;
 
     if (cop >= sizeof(operations) / sizeof(Opcode)) {
-        LOG_ERROR("Invalid color opcode: {}", (int)cop);
+        LOG_ERROR("Invalid color opcode: {}", static_cast<int>(cop));
         return true;
     }
 
     if (aop >= sizeof(operations) / sizeof(Opcode)) {
-        LOG_ERROR("Invalid alpha opcode: {}", (int)aop);
+        LOG_ERROR("Invalid alpha opcode: {}", static_cast<int>(aop));
         return true;
     }
 
@@ -1137,12 +1138,12 @@ bool shader::usse::USSETranslatorVisitor::sop2m(Imm2 pred,
     inst.opr.dest.type = DataType::UINT8;
 
     if (cop >= sizeof(operations) / sizeof(Opcode)) {
-        LOG_ERROR("Invalid color opcode: {}", (int)cop);
+        LOG_ERROR("Invalid color opcode: {}", static_cast<int>(cop));
         return true;
     }
 
     if (aop >= sizeof(operations) / sizeof(Opcode)) {
-        LOG_ERROR("Invalid alpha opcode: {}", (int)aop);
+        LOG_ERROR("Invalid alpha opcode: {}", static_cast<int>(aop));
         return true;
     }
 
@@ -1371,12 +1372,12 @@ bool shader::usse::USSETranslatorVisitor::sop3(Imm2 pred,
     inst.opr.dest.type = DataType::UINT8;
 
     if (cop >= sizeof(operations) / sizeof(Opcode)) {
-        LOG_ERROR("Invalid color opcode: {}", (int)cop);
+        LOG_ERROR("Invalid color opcode: {}", static_cast<int>(cop));
         return true;
     }
 
     if (aop >= sizeof(operations) / sizeof(Opcode)) {
-        LOG_ERROR("Invalid alpha opcode: {}", (int)aop);
+        LOG_ERROR("Invalid alpha opcode: {}", static_cast<int>(aop));
         return true;
     }
 
@@ -1509,7 +1510,7 @@ enum class DualSrcId {
     NONE,
 };
 
-typedef std::array<DualSrcId, 3> DualSrcLayout;
+using DualSrcLayout = std::array<DualSrcId, 3>;
 
 static std::optional<DualSrcLayout> get_dual_op1_src_layout(uint8_t count, Imm2 config) {
     switch (count) {
@@ -1875,7 +1876,7 @@ bool USSETranslatorVisitor::vdual(
             break;
         }
         case Opcode::FEXP: {
-            // hack: set exp(nan) = 1.0 (see VEXP)
+            // Preserve exp2(NaN) = 1.0 (see VEXP).
             const spv::Id source = load(ops[0], write_mask_source);
             result = m_b.createBuiltinCall(m_b.getTypeId(source), std_builtins, GLSLstd450Exp2, { source });
             const int num_comp = m_b.getNumComponents(source);
@@ -1926,6 +1927,9 @@ bool USSETranslatorVisitor::vdual(
             LOG_ERROR("Missing implementation for DUAL {}.", disasm::opcode_str(code));
             return spv::NoResult;
         }
+
+        if (m_b.getNumComponents(result) == 1)
+            result = postprocess_dot_result_for_store(m_b, result, write_mask_dest);
 
         disasm_str += fmt::format("{} {}", disasm::opcode_str(code), disasm::operand_to_str(dest, write_mask_dest));
 

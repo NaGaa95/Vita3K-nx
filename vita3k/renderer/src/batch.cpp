@@ -133,6 +133,9 @@ static void process_batch(renderer::State &state, const FeatureState &features, 
         return result;
     }();
 
+    if (command_list.context)
+        state.context = command_list.context;
+
     Command *cmd = command_list.first;
 
     // Take a batch, and execute it. Hope it's not too large
@@ -295,6 +298,11 @@ static void render_loop(renderer::State &state, DisplayState &display, GxmState 
 
             process_batches(state, state.features, mem, config, 500);
 
+        if (state.paused.load(std::memory_order_relaxed) && !config.current_config.v_sync)
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+
+        if (state.render_abort.load(std::memory_order_relaxed))
+            break;
 
             if (state.render_abort.load(std::memory_order_relaxed))
                 break;

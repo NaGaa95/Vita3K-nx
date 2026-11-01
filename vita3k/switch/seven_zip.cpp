@@ -74,7 +74,7 @@ void check_archive(struct archive *reader, int result) {
 
 ExtractedSevenZip::~ExtractedSevenZip() {
     if (!directory.empty()) {
-        boost::system::error_code error;
+        std::error_code error;
         fs::remove_all(directory, error);
     }
 }
@@ -161,8 +161,8 @@ std::unique_ptr<ExtractedSevenZip> extract_seven_zip(const fs::path &source, con
         if (!closed || written != expected)
             throw std::runtime_error("Incomplete extracted file: " + identity);
         if (archive_entry_mtime_is_set(entry)) {
-            boost::system::error_code error;
-            fs::last_write_time(destination, archive_entry_mtime(entry), error);
+            std::error_code error;
+            fs::last_write_time(destination, fs::file_time_type::clock::from_sys(std::chrono::system_clock::from_time_t(archive_entry_mtime(entry))), error);
         }
         result->files.push_back(destination);
     }

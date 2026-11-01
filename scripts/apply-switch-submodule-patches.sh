@@ -45,13 +45,13 @@ apply_one "external/dynarmic" \
     "86458a0bd369d63ba4c2ef812cacbb6c9080c065"
 apply_one "external/ffmpeg" \
     "ffmpeg-switch.patch" \
-    "02f4f2691b0efffff8923235baf146a87fc37263"
+    "671860a3d70b1fa60b988fc725cebbebef729367"
 apply_one "external/LibAtrac9" \
     "libatrac9-switch.patch" \
     "82767fe38823c32536726ea798f392b0b49e66b9"
 apply_one "external/sdl" \
     "sdl-switch.patch" \
-    "f5e5f6588921eed3d7d048ce43d9eb1ff0da0ffc"
+    "fa2c02bb6e21974a89ea9824bc53c9932abe5f9c"
 apply_one "external/psvpfstools/psvpfsparser" \
     "psvpfsparser-switch.patch" \
     "d14381f871a69009bd18b2aaec2213a6738bebba"

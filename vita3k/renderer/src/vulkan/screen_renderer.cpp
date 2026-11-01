@@ -45,7 +45,6 @@
 #endif
 
 #ifdef __ANDROID__
-#include <SDL3/SDL_vulkan.h>
 #include <jni.h>
 
 static std::atomic<bool> has_surface{ false };
@@ -78,21 +77,20 @@ ScreenRenderer::ScreenRenderer(VKState &state)
 }
 
 bool ScreenRenderer::create() {
-    if (this->surface) {
-#ifdef __ANDROID__
-        SDL_Vulkan_DestroySurface(state.instance, this->surface, nullptr);
-#else
-        state.instance.destroySurfaceKHR(this->surface);
-#endif
-        this->surface = nullptr;
-    }
+    if (this->surface)
+        destroy_surface();
 
     auto *frame_host = static_cast<renderer::State &>(state).frame;
 
     const renderer::DisplayHandle display_handle = frame_host->handle();
     bool surface_created = false;
 
-    if (const auto *handle = std::get_if<renderer::Win32DisplayHandle>(&display_handle)) {
+    if (const auto *provider = frame_host->vulkan_surface_provider()) {
+        this->surface = vk::SurfaceKHR(provider->create_surface(static_cast<VkInstance>(state.instance)));
+        if (!this->surface)
+            return false;
+        surface_created = true;
+    } else if (const auto *handle = std::get_if<renderer::Win32DisplayHandle>(&display_handle)) {
 #ifdef _WIN32
         vk::Win32SurfaceCreateInfoKHR create_info{};
         create_info.hinstance = GetModuleHandle(nullptr);
@@ -111,22 +109,6 @@ bool ScreenRenderer::create() {
         vk::MetalSurfaceCreateInfoEXT create_info{};
         create_info.pLayer = static_cast<const CAMetalLayer *>(metal_layer);
         this->surface = state.instance.createMetalSurfaceEXT(create_info);
-        surface_created = true;
-#endif
-    } else if (const auto *handle = std::get_if<renderer::AndroidDisplayHandle>(&display_handle)) {
-#ifdef __ANDROID__
-        if (!handle->window) {
-            LOG_WARN("Android SDL window is not ready yet; deferring Vulkan surface recreation");
-            return false;
-        }
-
-        VkSurfaceKHR surface_handle = VK_NULL_HANDLE;
-        if (!SDL_Vulkan_CreateSurface(handle->window, state.instance, nullptr, &surface_handle)) {
-            LOG_WARN("SDL_Vulkan_CreateSurface failed: {}", SDL_GetError());
-            return false;
-        }
-
-        this->surface = surface_handle;
         surface_created = true;
 #endif
     } else if (const auto *handle = std::get_if<renderer::WaylandDisplayHandle>(&display_handle)) {
@@ -197,12 +179,19 @@ bool ScreenRenderer::setup() {
 
     for (const auto &format : surface_formats) {
         // actually we don't care that much because we will just be copying what the game rendered
-        // rgba8 or bgra8 should be the best as it matches the format output from the vita (we don't care about the swizzle)
-        if ((format.format == vk::Format::eB8G8R8A8Unorm || format.format == vk::Format::eR8G8B8A8Unorm)
+        // Prefer RGBA8 because the FSR storage-image shader has an rgba8 format qualifier.
+        if (format.format == vk::Format::eR8G8B8A8Unorm
             && format.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear) {
             surface_format = format;
             surface_format_found = true;
             break;
+        }
+
+        // Keep BGRA8 as a fallback for devices without an RGBA8 surface format.
+        if (!surface_format_found && format.format == vk::Format::eB8G8R8A8Unorm
+            && format.colorSpace == vk::ColorSpaceKHR::eSrgbNonlinear) {
+            surface_format = format;
+            surface_format_found = true;
         }
     }
     if (!surface_format_found)
@@ -471,11 +460,15 @@ void ScreenRenderer::cleanup() {
 
     command_buffers.clear();
 
-#ifdef __ANDROID__
-    SDL_Vulkan_DestroySurface(state.instance, surface, nullptr);
-#else
-    state.instance.destroy(surface);
-#endif
+    destroy_surface();
+}
+
+void ScreenRenderer::destroy_surface() {
+    const auto *frame_host = static_cast<renderer::State &>(state).frame;
+    if (const auto *provider = frame_host->vulkan_surface_provider())
+        provider->destroy_surface(static_cast<VkInstance>(state.instance), static_cast<VkSurfaceKHR>(surface));
+    else
+        state.instance.destroySurfaceKHR(surface);
     surface = nullptr;
 }
 
@@ -625,6 +618,9 @@ void ScreenRenderer::swap_window() {
         = { vk::PipelineStageFlagBits::eColorAttachmentOutput | vk::PipelineStageFlagBits::eTransfer };
     submit_info.setWaitSemaphores(wait_semaphores);
     submit_info.setWaitDstStageMask(dst_masks);
+
+    // Presentation may still be waiting on this semaphore after the submit fence signals.
+    // Reuse it only when the same swapchain image is acquired again.
     submit_info.setSignalSemaphores(image_ready_semaphores[swapchain_image_idx]);
     submit_info.setCommandBuffers(current_cmd_buffer);
 

@@ -21,6 +21,7 @@
 
 #include <cpu/common.h>
 #include <kernel/state.h>
+#include <util/switch_thread.h>
 #include <mem/functions.h>
 
 #include <kernel/thread/thread_state.h>
@@ -29,9 +30,7 @@
 #include <mem/ptr.h>
 #include <util/lock_and_find.h>
 #include <util/log.h>
-#include <util/switch_thread.h>
 
-#include <SDL3/SDL_error.h>
 #include <SDL3/SDL_mutex.h>
 #include <SDL3/SDL_thread.h>
 
@@ -55,42 +54,23 @@ void CorenumAllocator::set_max_core_count(const std::size_t max) {
 // TODO implement cross platform debug thread name setter and eliminate SDL thread
 struct ThreadParams {
     KernelState *kernel = nullptr;
-    SceUID thid = SCE_KERNEL_ERROR_ILLEGAL_THREAD_ID;
+    // Passed in rather than looked up, since the guest may delete the thread before it starts
+    ThreadStatePtr thread;
     SDL_Semaphore *host_may_destroy_params = nullptr;
 };
 
 namespace {
-thread_local SceUID current_thread_id = SCE_KERNEL_ERROR_ILLEGAL_THREAD_ID;
 thread_local ThreadStatePtr current_thread;
-
-class CurrentThreadScope {
-public:
-    CurrentThreadScope(SceUID id, const ThreadStatePtr &thread) {
-        current_thread_id = id;
-        current_thread = thread;
-    }
-
-    ~CurrentThreadScope() {
-        current_thread_id = SCE_KERNEL_ERROR_ILLEGAL_THREAD_ID;
-        current_thread.reset();
-    }
-};
-} // namespace
+}
 
 static int SDLCALL thread_function(void *data) {
     assert(data != nullptr);
-    const ThreadParams params = *static_cast<const ThreadParams *>(data);
+    ThreadParams params = *static_cast<const ThreadParams *>(data);
     SDL_SignalSemaphore(params.host_may_destroy_params);
-    ThreadStatePtr thread = params.kernel->get_thread(params.thid);
-
-    // Keep guest CPU threads off the OS-reserved core 3. A game spawns a dozen or more
-    // of these and they can spin (guest spinlocks); on core 3 that starves Horizon's
-    // system services and hard-locks the console with every core at 100%.
+    ThreadStatePtr thread = std::move(params.thread);
     switch_pin_to_app_cores("guest CPU thread");
-    // Give the host thread the priority the game asked for. Until now every guest
-    // thread ran at the process default, level with the render and audio threads.
-    switch_apply_guest_thread_priority(thread->priority);
-    switch_apply_guest_thread_affinity(thread->affinity_mask);
+    switch_apply_guest_thread_priority(thread->get_priority());
+    switch_apply_guest_thread_affinity(thread->get_affinity_mask());
 #ifdef TRACY_ENABLE
     if (!thread->name.empty()) {
         tracy::SetThreadName(thread->name.c_str());
@@ -100,18 +80,19 @@ static int SDLCALL thread_function(void *data) {
     }
 #endif
 
-    uint32_t r0;
-    {
-        const CurrentThreadScope current(params.thid, thread);
-        thread->run_loop();
-        r0 = read_reg(*thread->cpu, 0);
-    }
+    current_thread = thread;
+    thread->run_loop();
+    current_thread.reset();
+    const uint32_t r0 = read_reg(*thread->cpu, 0);
+    const SceUID id = thread->id;
+    const int processor_id = get_processor_id(*thread->cpu);
+    // release our reference first so the erase below destroys the ThreadState before process_exit() is woken
+    thread.reset();
 
     {
         std::lock_guard<std::mutex> lock(params.kernel->mutex);
-        params.kernel->threads.erase(thread->id);
-        params.kernel->corenum_allocator.free_corenum(get_processor_id(*thread->cpu));
-        thread.reset();
+        params.kernel->threads.erase(id);
+        params.kernel->corenum_allocator.free_corenum(processor_id);
         params.kernel->thread_deleted_cond.notify_all();
     }
 
@@ -172,71 +153,62 @@ void KernelState::invalidate_jit_cache(Address start, size_t length) {
     }
 }
 
+uint64_t KernelState::process_time_at(uint64_t clock_time) const {
+    // The process started at the host clock time start_tick - base_tick.tick
+    return clock_time - (start_tick - base_tick.tick);
+}
+
 ThreadStatePtr KernelState::get_thread(SceUID thread_id) {
-    if (thread_id == current_thread_id && current_thread)
-        return current_thread;
-    return lock_and_find(thread_id, threads, mutex);
+    const ThreadStatePtr thread = current_thread && current_thread->id == thread_id
+        ? current_thread : lock_and_find(thread_id, threads, mutex);
+    // A deleted thread stays in threads until its host thread ends, but guest calls can't find it
+    if (thread && thread->is_deleted())
+        return nullptr;
+    return thread;
+}
+
+SceUID KernelState::create_callback(const ThreadStatePtr &thread, const char *name, Ptr<SceKernelCallbackFunction> func, Ptr<void> common) {
+    const CallbackPtr cb = std::make_shared<Callback>(thread, name, func, common);
+    const SceUID uid = objects.add(cb, get_next_uid());
+    thread->add_callback(cb);
+    return uid;
+}
+
+bool KernelState::delete_callback(SceUID id, SceUID deleter) {
+    return objects.remove<Callback>(id, deleter);
 }
 
 ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point) {
-    return create_thread(mem, name, entry_point, SCE_KERNEL_DEFAULT_PRIORITY, SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT, SCE_KERNEL_STACK_SIZE_USER_MAIN, nullptr);
+    return create_thread(mem, name, entry_point, SCE_KERNEL_DEFAULT_PRIORITY, SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT, SCE_KERNEL_STACK_SIZE_USER_MAIN, 0, nullptr);
 }
 
-void KernelState::reap_host_threads(bool wait_all) {
-    std::vector<SDL_Thread *> completed;
-    {
-        const std::scoped_lock lock(mutex, host_threads_mutex);
-        auto it = host_threads.begin();
-        while (it != host_threads.end()) {
-            if (wait_all || !threads.contains(it->first)) {
-                completed.push_back(it->second);
-                it = host_threads.erase(it);
-            } else {
-                ++it;
-            }
-        }
+ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr, const SceKernelThreadOptParam *option) {
+    const SceUID id = get_next_uid();
+    int core_num = corenum_allocator.new_corenum();
+    if (core_num < 0) {
+        LOG_ERROR("Out of core number to allocate, use 0");
+        core_num = 0;
     }
-
-    for (SDL_Thread *host_thread : completed)
-        SDL_WaitThread(host_thread, nullptr);
-}
-
-ThreadStatePtr KernelState::create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, const SceKernelThreadOptParam *option) {
-    reap_host_threads(false);
-
-    ThreadStatePtr thread = std::make_shared<ThreadState>(get_next_uid(), *this, mem);
-    if (thread->init(name, entry_point, init_priority, affinity_mask, stack_size, option) < 0)
+    CPUStatePtr cpu = init_cpu(cpu_opt, id, static_cast<std::size_t>(core_num), mem);
+    if (!cpu)
         return nullptr;
+    ThreadStatePtr thread = std::make_shared<ThreadState>(id, *this, mem, std::move(cpu), name, entry_point.address(), init_priority, affinity_mask, stack_size, attr, option);
 
     {
         const std::lock_guard<std::mutex> lock(mutex);
         threads.emplace(thread->id, thread);
+        if (threads_paused)
+            thread->pause();
+        if (threads_suspended)
+            thread->suspend();
     }
 
     ThreadParams params;
     params.kernel = this;
-    params.thid = thread->id;
+    params.thread = thread;
 
     params.host_may_destroy_params = SDL_CreateSemaphore(0);
-    SDL_Thread *host_thread = params.host_may_destroy_params
-        ? SDL_CreateThread(&thread_function, thread->name.c_str(), &params)
-        : nullptr;
-    if (!host_thread) {
-        LOG_ERROR("Failed to create host thread '{}': {}", thread->name, SDL_GetError());
-        if (params.host_may_destroy_params)
-            SDL_DestroySemaphore(params.host_may_destroy_params);
-        {
-            const std::lock_guard<std::mutex> lock(mutex);
-            threads.erase(thread->id);
-            corenum_allocator.free_corenum(get_processor_id(*thread->cpu));
-            thread_deleted_cond.notify_all();
-        }
-        return nullptr;
-    }
-    {
-        const std::lock_guard<std::mutex> lock(host_threads_mutex);
-        host_threads.emplace_back(thread->id, host_thread);
-    }
+    SDL_DetachThread(SDL_CreateThread(&thread_function, thread->name.c_str(), &params));
     SDL_WaitSemaphore(params.host_may_destroy_params);
     SDL_DestroySemaphore(params.host_may_destroy_params);
 
@@ -263,64 +235,49 @@ void KernelState::request_process_exit(int res, std::optional<AppLaunchRequest> 
 void KernelState::process_exit() {
     {
         std::lock_guard<std::mutex> lock(mutex);
-        for (auto &[_, timer] : timers)
-            timer->condvar.notify_all();
         for (auto &[_, thread] : threads)
-            thread->exit_delete(false);
+            thread->remove();
     }
 
     std::unique_lock<std::mutex> lock(mutex);
     thread_deleted_cond.wait(lock, [this] { return threads.empty(); });
-    lock.unlock();
-    reap_host_threads(true);
 }
 
 void KernelState::pause_threads() {
     const std::lock_guard<std::mutex> lock(mutex);
-    for (auto &[_, thread] : threads) {
-        paused_threads_status[thread->id] = thread->status;
-        if (thread->status == ThreadStatus::run) {
-            thread->suspend();
-        } else {
-            // A thread waiting in sceKernelDelayThread wakes on its own
-            // timeout and re-enters the JIT, so the request has to be raised
-            // here for it to be honoured at that re-entry.
-            thread->request_suspend();
-        }
-    }
-    threads_paused.store(true, std::memory_order_release);
+    if (threads_paused)
+        return;
+    threads_paused = true;
+    for (auto &[_, thread] : threads)
+        thread->pause();
 }
 
 void KernelState::resume_threads() {
     const std::lock_guard<std::mutex> lock(mutex);
-    for (auto &[_, thread] : threads) {
-        // Threads created during the pause were never suspended.
-        if (!paused_threads_status.contains(thread->id))
-            continue;
-        // Never resume(): a thread recorded as running may have reached a wait
-        // instead of the suspend park, and resume() would force it to run and
-        // drop that wait. cancel_suspend() releases it only if it really parked.
-        thread->cancel_suspend();
-    }
-    paused_threads_status.clear();
-    threads_paused.store(false, std::memory_order_release);
+    for (auto &[_, thread] : threads)
+        thread->resume_from_pause();
+    threads_paused = false;
+}
+
+void KernelState::suspend_threads() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    threads_suspended = true;
+    for (auto &[_, thread] : threads)
+        thread->suspend();
+}
+
+void KernelState::resume_suspended_threads() {
+    const std::lock_guard<std::mutex> lock(mutex);
+    threads_suspended = false;
+    for (auto &[_, thread] : threads)
+        thread->resume();
 }
 
 void KernelState::deinit(MemState &mem) {
     process_exit();
     threads.clear();
 
-    simple_events.clear();
-    timers.clear();
-    semaphores.clear();
-    condvars.clear();
-    lwcondvars.clear();
-    mutexes.clear();
-    lwmutexes.clear();
-    rwlocks.clear();
-    eventflags.clear();
-    msgpipes.clear();
-    callbacks.clear();
+    objects.clear();
 
     loaded_modules.clear();
     loaded_sysmodules.clear();
@@ -364,7 +321,7 @@ void KernelState::deinit(MemState &mem) {
 
     next_uid = 1;
 
-    paused_threads_status.clear();
+    threads_paused = false;
 }
 
 SceKernelModuleInfo *KernelState::find_module_by_addr(Address address) {

@@ -752,7 +752,7 @@ static bool replace_folder(const fs::path &source, const fs::path &destination);
 static bool folder_paths_overlap(const fs::path &source, const fs::path &destination);
 
 static bool copy_tree_with_progress(const fs::path &source, const fs::path &destination, InstallerUI &ui, bool merge = false) {
-    boost::system::error_code ec;
+    std::error_code ec;
     const fs::path staged = merge ? destination : destination.parent_path() / ("." + destination.filename().string() + ".copying");
     if (folder_paths_overlap(source, staged)) {
         LOG_ERROR("Installer: source overlaps the copy destination '{}': '{}'", staged.string(), source.string());
@@ -796,8 +796,8 @@ static bool copy_tree_with_progress(const fs::path &source, const fs::path &dest
         fs::create_directories(target.parent_path(), ec);
         if (ec)
             break;
-        fs::ifstream in(it->path(), std::ios::binary);
-        fs::ofstream out(target, std::ios::binary | std::ios::trunc);
+        std::ifstream in(it->path(), std::ios::binary);
+        std::ofstream out(target, std::ios::binary | std::ios::trunc);
         if (!in || !out) {
             LOG_ERROR("Installer: cannot copy '{}'", it->path().string());
             return false;
@@ -838,7 +838,7 @@ static bool replace_folder(const fs::path &source, const fs::path &destination) 
     const bool replacing = fs::exists(destination);
     if (replacing)
         fs::rename(destination, backup);
-    boost::system::error_code error;
+    std::error_code error;
     fs::rename(source, destination, error);
     if (error) {
         LOG_ERROR("Cannot install extracted folder: {}", error.message());
@@ -897,7 +897,7 @@ static int install_folder(EmuEnvState &emuenv, InstallerUI &ui, const fs::path &
     const std::string suffix = info.app_category.empty() ? "" : " [" + info.app_category + "]";
     const bool is_app = !info.app_category.contains("gp") && info.app_category != "ac";
     const fs::path app_dir = emuenv.vita_fs_path / "ux0/app" / info.app_title_id;
-    boost::system::error_code ec;
+    std::error_code ec;
     const bool app_exists = is_app && fs::exists(app_dir, ec) && !ec;
     // Horizon stat does not provide unique inode numbers for equivalent().
     const bool in_place = app_exists && normalize_folder_path(folder) == normalize_folder_path(app_dir);
@@ -1116,7 +1116,7 @@ static std::vector<fs::path> extract_nested(const fs::path &archive_path, const 
         if (!ok || !flushed || sink.written != stat.m_uncomp_size) {
             LOG_ERROR("Installer: failed to unpack '{}' from '{}'", member, archive_path.string());
             ui.note("FAILED: could not unpack " + leaf);
-            boost::system::error_code ec;
+            std::error_code ec;
             fs::remove(out, ec);
             continue;
         }
@@ -1135,7 +1135,7 @@ void run_install(EmuEnvState &emuenv, InstallerUI &ui, const fs::path &target = 
     // browser: install just that, taking its license (work.bin/.rif/.bin) from the
     // same folder so find_pkg_zrif can place it in ux0/license. Otherwise install
     // everything dropped in sdmc:/switch/vita3k/install.
-    boost::system::error_code single_ec;
+    std::error_code single_ec;
     const bool single = !target.empty() && fs::is_regular_file(target, single_ec) && !single_ec;
     const bool single_folder = !target.empty() && fs::is_directory(target, single_ec) && !single_ec;
     // Where the launcher stages imports. A single target can now live outside it:
@@ -1300,7 +1300,7 @@ void run_install(EmuEnvState &emuenv, InstallerUI &ui, const fs::path &target = 
                     }
                 }
                 if (has_package) {
-                    boost::system::error_code error;
+                    std::error_code error;
                     for (fs::directory_iterator it(archive.parent_path(), error), end; !error && it != end; it.increment(error)) {
                         const std::string name = lower(it->path().filename().string());
                         if (it->is_regular_file(error) && (name == "work.bin" || lower(it->path().extension().string()) == ".rif"))
@@ -1349,7 +1349,7 @@ void run_install(EmuEnvState &emuenv, InstallerUI &ui, const fs::path &target = 
             // spending that time and then reporting SKIPPED.
             if (scan.has_package && !scan.has_license && staged_zrif.empty()) {
                 bool license_beside = false;
-                boost::system::error_code scan_ec;
+                std::error_code scan_ec;
                 for (fs::directory_iterator it(archive.parent_path(), scan_ec), end;
                      !scan_ec && it != end; it.increment(scan_ec)) {
                     const std::string leaf = lower(it->path().filename().string());
@@ -1416,7 +1416,7 @@ void run_install(EmuEnvState &emuenv, InstallerUI &ui, const fs::path &target = 
         if (single)
             return p;
         const fs::path dst = p.string() + ".installed";
-        boost::system::error_code ec;
+        std::error_code ec;
         fs::rename(p, dst, ec);
         return ec ? p : dst;
     };
@@ -1525,7 +1525,7 @@ void run_install(EmuEnvState &emuenv, InstallerUI &ui, const fs::path &target = 
                     ? emuenv.vita_fs_path / "ux0/addcont" / title_id / emuenv.app_info.app_content_id
                     : emuenv.vita_fs_path / "ux0/app" / title_id;
                 const fs::path sfo = installed_root / "sce_sys/param.sfo";
-                boost::system::error_code ec;
+                std::error_code ec;
                 if (!fs::is_regular_file(sfo, ec) || ec) {
                     LOG_ERROR("Installer: {} reported success but {} is missing", title_id, sfo.string());
                     ui.note("FAILED: installed content metadata is missing");
@@ -1606,7 +1606,7 @@ void run_install(EmuEnvState &emuenv, InstallerUI &ui, const fs::path &target = 
                         && content.category != "ac" && !content.category.contains("gp");
                     if (is_app) {
                         const fs::path sfo = emuenv.vita_fs_path / "ux0/app" / content.title_id / "sce_sys" / "param.sfo";
-                        boost::system::error_code ec;
+                        std::error_code ec;
                         if (!fs::is_regular_file(sfo, ec) || ec) {
                             LOG_ERROR("Installer: {} reported success but {} is missing",
                                 content.title_id, sfo.string());
@@ -1665,7 +1665,7 @@ void run_install(EmuEnvState &emuenv, InstallerUI &ui, const fs::path &target = 
     if (!to_delete.empty()) {
         uintmax_t total = 0;
         for (const auto &f : to_delete) {
-            boost::system::error_code ec;
+            std::error_code ec;
             const uintmax_t s = fs::file_size(f, ec);
             if (!ec)
                 total += s;
@@ -1680,7 +1680,7 @@ void run_install(EmuEnvState &emuenv, InstallerUI &ui, const fs::path &target = 
         if (ui.confirm(prompt, "Delete and free space", "Keep the files")) {
             int deleted = 0;
             for (const auto &f : to_delete) {
-                boost::system::error_code ec;
+                std::error_code ec;
                 if (fs::remove(f, ec))
                     deleted++;
             }

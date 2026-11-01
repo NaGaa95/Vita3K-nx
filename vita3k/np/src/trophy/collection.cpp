@@ -69,7 +69,7 @@ std::vector<std::string> list_collection_ids(const CollectionSource &source) {
     // Non-throwing throughout: enumerating a missing or empty trophy directory
     // reports ENOENT on the Switch sdmc: fsdev, and the throwing overloads would
     // take the whole emulator down from the overlay.
-    boost::system::error_code ec;
+    std::error_code ec;
     fs::directory_iterator entry(conf_root, ec);
     if (ec)
         return ids;
@@ -103,7 +103,7 @@ bool load_collection(const CollectionSource &source, const std::string &np_com_i
 
     initialize_locked_progress(loaded.context);
 
-    boost::system::error_code path_ec;
+    std::error_code path_ec;
     if (fs::exists(dat_path, path_ec)) {
         // Deliberately a host read rather than open_file/close_file: this runs on
         // the frontend thread while guest threads may still be executing, and the

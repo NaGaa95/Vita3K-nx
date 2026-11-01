@@ -118,9 +118,9 @@ public:
     }
 };
 
-typedef std::map<SceUID, TtyType> TtyFiles;
-typedef std::map<SceUID, FileStats> StdFiles;
-typedef std::map<SceUID, DirStats> DirEntries;
+using TtyFiles = std::map<SceUID, TtyType>;
+using StdFiles = std::map<SceUID, FileStats>;
+using DirEntries = std::map<SceUID, DirStats>;
 
 struct IOState {
     struct DevicePaths {
@@ -128,6 +128,7 @@ struct IOState {
         std::string savedata0;
         std::string addcont0;
         std::string memory0;
+        std::string cache0;
     } device_paths;
 
     std::string addcont;

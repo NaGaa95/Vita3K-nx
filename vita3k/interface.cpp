@@ -43,6 +43,7 @@
 #include <pugixml.hpp>
 
 #include <modules/module_parent.h>
+#include <modules/sysmem_state.h>
 #include <string>
 #include <util/log.h>
 #include <util/string_utils.h>
@@ -113,6 +114,11 @@ static bool is_nonpdrm(EmuEnvState &emuenv, const fs::path &output_path) {
 }
 
 static bool set_content_path(EmuEnvState &emuenv, const bool is_theme, fs::path &dest_path) {
+    if (emuenv.app_info.app_title_id.empty()) {
+        LOG_ERROR("param.sfo has no title ID, not installing it");
+        return false;
+    }
+
     const auto app_path = dest_path / "app" / emuenv.app_info.app_title_id;
 
     if (emuenv.app_info.app_category == "ac") {
@@ -125,7 +131,7 @@ static bool set_content_path(EmuEnvState &emuenv, const bool is_theme, fs::path 
             emuenv.app_info.app_title += " (DLC)";
         }
     } else if (emuenv.app_info.app_category.contains("gp")) {
-        boost::system::error_code ec;
+        std::error_code ec;
         const fs::directory_iterator entry(app_path, ec);
         if (ec || entry == fs::directory_iterator{}) {
             LOG_ERROR("Install app before patch: '{}' is empty or unreadable ({})", app_path, ec.message());
@@ -241,7 +247,7 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
                 LOG_ERROR("Unsafe archive path: {}", m_filename);
                 return false;
             }
-            const fs::path file_output = (output_path / relative_path).generic_path();
+            const fs::path file_output = (output_path / relative_path);
             if (mz_zip_reader_is_file_a_directory(zip.get(), i)) {
                 prepare_directory(file_output);
             } else {
@@ -508,7 +514,7 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
         ::call_import(emuenv, cpu, nid, thread_id);
     };
     emuenv.kernel.process_exit_callback = [&emuenv](int res, std::optional<AppLaunchRequest> relaunch) {
-        emuenv.post_app_launch_request(relaunch.value_or(AppLaunchRequest{ .reason = AppLaunchReason::ProcessExit }));
+        emuenv.post_app_launch_request(relaunch.value_or(AppLaunchRequest{ .reason = AppLaunchReason::ProcessExit, .exit_code = res }));
     };
     emuenv.kernel.accurate_thread_scheduling = emuenv.cfg.current_config.accurate_thread_scheduling;
     // The desktop settings dialog switches both together; the launcher exposes one option.
@@ -570,6 +576,7 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
         sfo::load(emuenv.sfo_handle, param_sfo);
 
     init_exported_vars(emuenv);
+    create_system_font_blocks(emuenv);
 
     // Load main executable
     if (!launch_request.self_path.empty()) {
@@ -583,7 +590,20 @@ static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const
     if (main_module_id >= 0) {
         const auto module = emuenv.kernel.loaded_modules[main_module_id];
         LOG_INFO("Main executable {} ({}) loaded", module->info.module_name, emuenv.self_path);
-        const Patches patches = get_patches(emuenv.patch_path, emuenv.io.title_id, "app0:" + emuenv.self_path);
+        uint32_t module_nid = 0;
+        {
+            const std::lock_guard<std::mutex> guard(emuenv.kernel.export_nids_mutex);
+            for (const auto &[nid, uid] : emuenv.kernel.module_uid_by_nid) {
+                if (uid == static_cast<uint32_t>(main_module_id))
+                    module_nid = nid;
+            }
+        }
+        LOG_INFO("Main executable NID: {} (for the NID attribute of a patch)", fmt::format("0x{:08X}", module_nid));
+
+        const std::string bin = "app0:" + emuenv.self_path;
+        Patches patches = get_patches(emuenv.patch_path, emuenv.io.title_id, bin);
+        const Patches xml_patches = get_xml_patches(emuenv.patch_path, emuenv.io.title_id, bin, emuenv.app_info.app_version, module_nid);
+        patches.insert(patches.end(), xml_patches.begin(), xml_patches.end());
         if (!patches.empty())
             do_patches(emuenv.mem, patches, module->info);
         load_cheats(emuenv, module->info);
@@ -719,7 +739,8 @@ ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv, const AppLaunchR
     }
 
     if (emuenv.cfg.gdbstub) {
-        emuenv.kernel.debugger.wait_for_debugger = true;
+        // The threads wait for the debugger's first continue
+        emuenv.kernel.suspend_threads();
         server_open(emuenv);
     }
 
@@ -768,12 +789,18 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
             affinity = *affinity_ptr.get(emuenv.mem);
         }
     }
-    const ThreadStatePtr main_thread = emuenv.kernel.create_thread(emuenv.mem, emuenv.io.title_id.c_str(), entry_point, priority, affinity, stack_size, nullptr);
+    // A main thread without its own affinity runs on every user core and reports them all
+    if (affinity == SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT)
+        affinity = SCE_KERNEL_CPU_MASK_USER_ALL;
+    const ThreadStatePtr main_thread = emuenv.kernel.create_thread(emuenv.mem, emuenv.io.title_id.c_str(), entry_point, priority, affinity, stack_size, 0, nullptr);
     if (!main_thread) {
         LOG_ERROR("Failed to init main thread.");
         return InitThreadFailed;
     }
     emuenv.main_thread_id = main_thread->id;
+
+    // Before any guest code runs, module_start functions included, since they can read it too
+    emuenv.set_launch_uri(emuenv.cfg.launch_uri);
 
     // Run `module_start` export (entry point) of loaded libraries
     for (auto &[_, module] : emuenv.kernel.loaded_modules) {

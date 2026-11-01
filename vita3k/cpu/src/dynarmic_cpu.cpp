@@ -99,6 +99,7 @@ public:
 
 class ArmDynarmicCP15 : public Dynarmic::A32::Coprocessor {
     uint32_t tpidruro;
+    uint32_t tpidrurw;
     uint32_t sctlr;
     uint32_t dacr;
 
@@ -107,6 +108,7 @@ public:
 
     explicit ArmDynarmicCP15()
         : tpidruro(0)
+        , tpidrurw(0)
         , sctlr(0)
         , dacr(0) {
     }
@@ -124,6 +126,11 @@ public:
         // MCR p15, 0, Rt, c13, c0, 3 — write TPIDRURO
         if (CRn == CoprocReg::C13 && CRm == CoprocReg::C0 && opc1 == 0 && opc2 == 3) {
             return &tpidruro;
+        }
+
+        // MCR p15, 0, Rt, c13, c0, 2: write TPIDRURW
+        if (!two && CRn == CoprocReg::C13 && CRm == CoprocReg::C0 && opc1 == 0 && opc2 == 2) {
+            return &tpidrurw;
         }
 
         // MCR p15, 0, Rt, c1, c0, 0 — write SCTLR
@@ -149,6 +156,11 @@ public:
         // MRC p15, 0, Rt, c13, c0, 3 — read TPIDRURO (thread-local storage)
         if (CRn == CoprocReg::C13 && CRm == CoprocReg::C0 && opc1 == 0 && opc2 == 3) {
             return &tpidruro;
+        }
+
+        // MRC p15, 0, Rt, c13, c0, 2: read TPIDRURW
+        if (!two && CRn == CoprocReg::C13 && CRm == CoprocReg::C0 && opc1 == 0 && opc2 == 2) {
+            return &tpidrurw;
         }
 
         // MRC p15, 0, Rt, c1, c0, 0 — read SCTLR
@@ -186,7 +198,17 @@ public:
     uint32_t get_tpidruro() const {
         return tpidruro;
     }
+
+    void set_tpidrurw(uint32_t tpidrurw) {
+        this->tpidrurw = tpidrurw;
+    }
+
+    uint32_t get_tpidrurw() const {
+        return tpidrurw;
+    }
 };
+
+static constexpr bool LOG_INVALID_ACCESS = false;
 
 #ifdef __SWITCH__
 // ARM event register: one global sequence plus each thread's last consumed
@@ -242,6 +264,8 @@ public:
     std::optional<std::uint32_t> MemoryReadCode(Dynarmic::A32::VAddr addr) override {
         if (cpu->log_mem)
             LOG_TRACE("Instruction fetch at address 0x{:X}", addr);
+        if (addr < KiB(4))
+            return std::nullopt;
         return MemoryRead32(addr);
     }
 
@@ -249,7 +273,7 @@ public:
         ArmDynarmicCallback &self = *reinterpret_cast<ArmDynarmicCallback *>(self_);
 
         std::string disassembly = [&]() -> std::string {
-            if (!address || !Ptr<uint32_t>{ (uint32_t)address }.valid(*self.parent->mem)) {
+            if (!address || !Ptr<uint32_t>{ static_cast<uint32_t>(address) }.valid(*self.parent->mem)) {
                 return "invalid address";
             }
             return disassemble(*self.parent, address);
@@ -349,8 +373,16 @@ public:
             }
         }
         if (cpu->log_code) {
-            ir.CallHostFunction(&TraceInstruction, ir.Imm64((uint64_t)this), ir.Imm64(pc), ir.Imm64(is_thumb));
+            ir.CallHostFunction(&TraceInstruction, ir.Imm64(reinterpret_cast<uint64_t>(this)), ir.Imm64(pc), ir.Imm64(is_thumb));
         }
+    }
+
+    void log_invalid_access(const char *access, Dynarmic::A32::VAddr addr) {
+        const uint32_t pc = this->cpu->get_pc();
+        if (!parent->mem->invalid_access_logged.test_and_set())
+            LOG_ERROR("Invalid {} at 0x{:x} by thread {} (pc 0x{:x}). Set LOG_INVALID_ACCESS for full reports", access, addr, parent->thread_id, pc);
+        else
+            LOG_ERROR("Invalid {} at 0x{:x} by thread {} (pc 0x{:x})", access, addr, parent->thread_id, pc);
     }
 
     template <typename T>
@@ -359,13 +391,17 @@ public:
         T *const host = ptr.get(*parent->mem);
         if (!host || !is_valid_addr_range_size(*parent->mem, addr, sizeof(T))
             || ptr.address() < parent->mem->host_page_size) {
-            LOG_ERROR("Invalid read of uint{}_t at address: 0x{:x}\n{}", sizeof(T) * 8, addr, this->cpu->save_context().description());
+            if (LOG_INVALID_ACCESS) {
+                LOG_ERROR("Invalid read of uint{}_t at address: 0x{:x}\n{}", sizeof(T) * 8, addr, this->cpu->save_context().description());
 
-            auto pc = this->cpu->get_pc();
-            if (pc < parent->mem->host_page_size)
-                LOG_CRITICAL("PC is 0x{:x}", pc);
-            else
-                LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+                auto pc = this->cpu->get_pc();
+                if (pc < parent->mem->host_page_size)
+                    LOG_CRITICAL("PC is 0x{:x}", pc);
+                else
+                    LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+            } else {
+                log_invalid_access("read", addr);
+            }
             return 0;
         }
 
@@ -398,13 +434,17 @@ public:
         T *const host = ptr.get(*parent->mem);
         if (!host || !is_valid_addr_range_size(*parent->mem, addr, sizeof(T))
             || ptr.address() < parent->mem->host_page_size) {
-            LOG_ERROR("Invalid write of uint{}_t at addr: 0x{:x}, val = 0x{:x}\n{}", sizeof(T) * 8, addr, value, this->cpu->save_context().description());
+            if (LOG_INVALID_ACCESS) {
+                LOG_ERROR("Invalid write of uint{}_t at addr: 0x{:x}, val = 0x{:x}\n{}", sizeof(T) * 8, addr, value, this->cpu->save_context().description());
 
-            auto pc = this->cpu->get_pc();
-            if (pc < parent->mem->host_page_size)
-                LOG_CRITICAL("PC is 0x{:x}", pc);
-            else
-                LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+                auto pc = this->cpu->get_pc();
+                if (pc < parent->mem->host_page_size)
+                    LOG_CRITICAL("PC is 0x{:x}", pc);
+                else
+                    LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+            } else {
+                log_invalid_access("write", addr);
+            }
             return;
         }
 
@@ -435,13 +475,17 @@ public:
         Ptr<T> ptr{ addr };
         if (!ptr.get(*parent->mem) || !is_valid_addr_range_size(*parent->mem, addr, sizeof(T))
             || ptr.address() < parent->mem->host_page_size) {
-            LOG_ERROR("Invalid exclusive write of uint{}_t at addr: 0x{:x}, val = 0x{:x}, expected = 0x{:x}\n{}", sizeof(T) * 8, addr, value, expected, this->cpu->save_context().description());
+            if (LOG_INVALID_ACCESS) {
+                LOG_ERROR("Invalid exclusive write of uint{}_t at addr: 0x{:x}, val = 0x{:x}, expected = 0x{:x}\n{}", sizeof(T) * 8, addr, value, expected, this->cpu->save_context().description());
 
-            auto pc = this->cpu->get_pc();
-            if (pc < parent->mem->host_page_size)
-                LOG_CRITICAL("PC is 0x{:x}", pc);
-            else
-                LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+                auto pc = this->cpu->get_pc();
+                if (pc < parent->mem->host_page_size)
+                    LOG_CRITICAL("PC is 0x{:x}", pc);
+                else
+                    LOG_ERROR("Executing: {}", disassemble(*parent, pc, nullptr));
+            } else {
+                log_invalid_access("exclusive write", addr);
+            }
             return false;
         }
 
@@ -484,6 +528,12 @@ public:
             break;
         }
         case Dynarmic::A32::Exception::WaitForInterrupt: {
+            cpu->halted = true;
+            cpu->jit->HaltExecution();
+            break;
+        }
+        case Dynarmic::A32::Exception::NoExecuteFault: {
+            LOG_CRITICAL("PC is 0x{:x}, stopping thread {}\n{}", pc, parent->thread_id, this->cpu->save_context().description());
             cpu->halted = true;
             cpu->jit->HaltExecution();
             break;
@@ -854,6 +904,14 @@ uint32_t DynarmicCPU::get_tpidruro() {
 
 void DynarmicCPU::set_tpidruro(uint32_t val) {
     cp15->set_tpidruro(val);
+}
+
+uint32_t DynarmicCPU::get_tpidrurw() {
+    return cp15->get_tpidrurw();
+}
+
+void DynarmicCPU::set_tpidrurw(uint32_t val) {
+    cp15->set_tpidrurw(val);
 }
 
 void DynarmicCPU::set_pc(uint32_t val) {

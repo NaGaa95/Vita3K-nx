@@ -110,6 +110,9 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
     // R32G32_UINT input view for the reinterpret compute pass.
     vk::ImageView reinterpret_store_view = nullptr;
 
+    // sRGB attachment view of the UNORM image used for interlock storage access
+    vk::ImageView gamma_view = nullptr;
+
     // only used when upscaling is enabled, to downscale the image first
     std::unique_ptr<vkutil::Image> blit_image;
 

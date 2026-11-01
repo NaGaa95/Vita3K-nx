@@ -261,7 +261,8 @@ int handle_touch_event(TouchState &state, SDL_TouchFingerEvent &finger) {
         state.finger_count++;
         break;
     }
-    case SDL_EVENT_FINGER_UP: {
+    case SDL_EVENT_FINGER_UP:
+    case SDL_EVENT_FINGER_CANCELED: {
         int finger_index = -1;
         for (int i = 0; i < state.finger_count; i++) {
             if (finger.fingerID == state.finger_buffer[i].fingerID) {
@@ -271,7 +272,7 @@ int handle_touch_event(TouchState &state, SDL_TouchFingerEvent &finger) {
                 state.finger_buffer[i] = state.finger_buffer[i + 1];
             }
         }
-        if (state.finger_count > 0)
+        if (finger_index != -1)
             state.finger_count--;
         break;
     }
@@ -286,6 +287,8 @@ int handle_touch_event(TouchState &state, SDL_TouchFingerEvent &finger) {
         }
         break;
     }
+    default:
+        break;
     }
 
     return 0;
@@ -321,6 +324,8 @@ int handle_touchpad_event(TouchState &state, SDL_GamepadTouchpadEvent &touchpad)
             }
         }
         break;
+    default:
+        break;
     }
 
     state.is_touchpad = state.touchpad_finger_count > 0;
@@ -352,8 +357,8 @@ int toggle_touchscreen(TouchState &state) {
     return 0;
 }
 
-int touch_get(const SceUID thread_id, EmuEnvState &emuenv, const SceUInt32 &port, SceTouchData *pData, SceUInt32 count, bool is_peek) {
-    memset(pData, 0, sizeof(SceTouchData) * count);
+int touch_get(const SceUID thread_id, EmuEnvState &emuenv, const SceUInt32 &port, SceTouchData *pData, SceUInt32 nBufs, bool is_peek) {
+    memset(pData, 0, sizeof(SceTouchData) * nBufs);
 
     const bool input_blocked = emuenv.drop_inputs || emuenv.ctrl.overlay_input_intercepted.load(std::memory_order_relaxed);
 
@@ -362,19 +367,20 @@ int touch_get(const SceUID thread_id, EmuEnvState &emuenv, const SceUInt32 &port
     int nb_returned_data = 1;
     if (is_peek) {
         if (emuenv.touch.touch_mode[port])
-            nb_returned_data = count;
+            nb_returned_data = nBufs;
         else
-            nb_returned_data = 0;
+            nb_returned_data = 1;
     } else {
         const uint64_t current_vcount = emuenv.display.vblank_count.load();
         if (current_vcount <= emuenv.touch.last_vcount[port_idx]) {
             // sceTouchRead is blocking, wait for the next vsync for the buffer to be updated
             auto thread = emuenv.kernel.get_thread(thread_id);
 
-            wait_vblank(emuenv.display, emuenv.kernel, thread, emuenv.touch.last_vcount[port_idx] + 1, false);
+            wait_vblank(emuenv.display, thread, emuenv.touch.last_vcount[port_idx] + 1, false);
         }
         uint64_t vblank_count = emuenv.display.vblank_count.load();
-        nb_returned_data = std::min<int>(count, vblank_count - emuenv.touch.last_vcount[port_idx]);
+        // clamp to 1 and not 0
+        nb_returned_data = std::max<int>(1, std::min<int>(nBufs, vblank_count - emuenv.touch.last_vcount[port_idx]));
         emuenv.touch.last_vcount[port_idx] = vblank_count;
     }
 
@@ -402,6 +408,7 @@ int touch_get(const SceUID thread_id, EmuEnvState &emuenv, const SceUInt32 &port
         }
     }
 
+    assert(nb_returned_data != 0);
     return nb_returned_data;
 }
 
