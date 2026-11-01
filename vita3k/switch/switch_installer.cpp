@@ -15,6 +15,8 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <util/fs_remove.h>
+
 #include "switch_installer.h"
 #include "seven_zip.h"
 
@@ -759,7 +761,7 @@ static bool copy_tree_with_progress(const fs::path &source, const fs::path &dest
         return false;
     }
     if (!merge) {
-        fs::remove_all(staged, ec);
+        fs_utils::remove_path(staged, ec);
         if (ec)
             return false;
     }
@@ -847,7 +849,7 @@ static bool replace_folder(const fs::path &source, const fs::path &destination) 
         return false;
     }
     if (replacing) {
-        fs::remove_all(backup, error);
+        fs_utils::remove_path(backup, error);
         if (error)
             LOG_WARN("Could not remove installation backup '{}': {}", backup.string(), error.message());
     }
@@ -972,7 +974,7 @@ static int install_folder(EmuEnvState &emuenv, InstallerUI &ui, const fs::path &
                     ui.step("Applying update: " + label);
                     ok = copy_tree_with_progress(destination, app_dir, ui, true);
                     if (ok)
-                        fs::remove_all(destination);
+                        fs_utils::remove_path(destination);
                 }
                 if (!ok)
                     ui.note("FAILED (see the log)");

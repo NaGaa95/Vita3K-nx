@@ -26,6 +26,8 @@
  *   write a NoNpDrm work.bin -> reuse decrypt_install_nonpdrm() for the PFS.
  */
 
+#include <util/fs_remove.h>
+
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 
@@ -161,7 +163,7 @@ bool install_vci(const fs::path &vci_path, EmuEnvState &emuenv, const std::funct
 
     // 4) Carve gro0 out into a standalone exFAT image (long step: 0..30%)
     const auto staging = emuenv.cache_path / "VCI_TMP";
-    fs::remove_all(staging);
+    fs_utils::remove_path(staging);
     fs::create_directories(staging);
     const auto gro_img = staging / "gro0.img"; // substr(0,3) -> "gro" output dir
     {
@@ -222,7 +224,7 @@ bool install_vci(const fs::path &vci_path, EmuEnvState &emuenv, const std::funct
     fs_utils::read_data(param_sfo, param);
     if (!sfo::get_param_info(emuenv.app_info, param, emuenv.cfg.sys_lang) || emuenv.app_info.app_title_id.empty()) {
         LOG_ERROR("VCI: param.sfo at {} is not readable or has no title ID", fs_utils::path_to_utf8(param_sfo));
-        fs::remove_all(staging);
+        fs_utils::remove_path(staging);
         return false;
     }
     LOG_INFO("Found {} [{}], category: {}, content id: {}", emuenv.app_info.app_title, emuenv.app_info.app_title_id, emuenv.app_info.app_category, emuenv.app_info.app_content_id);
@@ -231,7 +233,7 @@ bool install_vci(const fs::path &vci_path, EmuEnvState &emuenv, const std::funct
     auto path{ emuenv.vita_fs_path / "ux0" };
     path /= fs::path("app") / emuenv.app_info.app_title_id;
     if (fs::exists(path))
-        fs::remove_all(path);
+        fs_utils::remove_path(path);
     emuenv.app_info.app_title += " (App)";
 
     // 9) Read the on-card RIF: gro0:/license/app/<title_id>/<*.rif>
@@ -268,7 +270,7 @@ bool install_vci(const fs::path &vci_path, EmuEnvState &emuenv, const std::funct
     fs::create_directories(path);
     if (!fs_utils::copy_directory_contents(title_src, path)) {
         LOG_ERROR("VCI: failed to copy app into {}", fs_utils::path_to_utf8(path));
-        fs::remove_all(staging);
+        fs_utils::remove_path(staging);
         return false;
     }
     progress(60);
@@ -278,12 +280,12 @@ bool install_vci(const fs::path &vci_path, EmuEnvState &emuenv, const std::funct
     const auto decrypt_progress = [&](float frac) { progress(60.f + frac * 40.f); };
     if (!decrypt_install_nonpdrm(emuenv, drmlicpath, path, decrypt_progress)) {
         LOG_ERROR("VCI: failed to decrypt {} [{}]", emuenv.app_info.app_title, emuenv.app_info.app_title_id);
-        fs::remove_all(path);
-        fs::remove_all(staging);
+        fs_utils::remove_path(path);
+        fs_utils::remove_path(staging);
         return false;
     }
 
-    fs::remove_all(staging);
+    fs_utils::remove_path(staging);
     progress(100);
     LOG_INFO("{} [{}] installed successfully!", emuenv.app_info.app_title, emuenv.app_info.app_title_id);
     return true;

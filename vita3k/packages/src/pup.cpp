@@ -23,6 +23,8 @@
  * contain firmware updates
  */
 
+#include <util/fs_remove.h>
+
 #include <openssl/evp.h>
 #include <packages/exfat.h>
 #include <packages/sce_types.h>
@@ -261,7 +263,7 @@ std::string install_pup(const fs::path &vita_fs_path, const fs::path &pup_path, 
     fs::path pup_dec_root = vita_fs_path / "PUP_DEC";
     if (fs::exists(pup_dec_root)) {
         LOG_WARN("Path already exists, deleting it and reinstalling");
-        fs::remove_all(pup_dec_root);
+        fs_utils::remove_path(pup_dec_root);
     }
 
     const auto update_progress = [&](const uint32_t progress) {
@@ -308,7 +310,7 @@ std::string install_pup(const fs::path &vita_fs_path, const fs::path &pup_path, 
     } else
         LOG_WARN("Firmware Version file not found!");
 
-    fs::remove_all(pup_dec_root);
+    fs_utils::remove_path(pup_dec_root);
 
     return fw_version;
 }

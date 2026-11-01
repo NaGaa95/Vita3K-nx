@@ -4,6 +4,7 @@ add_library(
 	src/android_driver.cpp
 	src/arm.cpp
 	src/float_to_half.cpp
+	src/fs_remove.cpp
 	src/fs_utils.cpp
 	src/hash.cpp
 	src/instrset_detect.cpp

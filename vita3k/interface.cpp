@@ -15,6 +15,8 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <util/fs_remove.h>
+
 #include "interface.h"
 #include "archive.h"
 
@@ -104,7 +106,7 @@ static bool is_nonpdrm(EmuEnvState &emuenv, const fs::path &output_path) {
         LOG_INFO("Decrypt layer: {}", output_path);
         if (!decrypt_install_nonpdrm(emuenv, licpath, output_path)) {
             LOG_ERROR("NoNpDrm installation failed, deleting data!");
-            fs::remove_all(output_path);
+            fs_utils::remove_path(output_path);
             return false;
         }
         return true;
@@ -210,7 +212,7 @@ static bool install_archive_content(EmuEnvState &emuenv, const ZipPtr &zip, cons
                 return true;
             }
         }
-        fs::remove_all(output_path);
+        fs_utils::remove_path(output_path);
     }
 
     float file_progress = 0;
@@ -425,7 +427,7 @@ static bool install_content(EmuEnvState &emuenv, const fs::path &content_path) {
             return false;
 
         if (exists(dst_path))
-            fs::remove_all(dst_path);
+            fs_utils::remove_path(dst_path);
 
     } else if (fs_utils::read_data(theme_path, buffer)) {
         set_theme_name(emuenv, buffer, fs_utils::path_to_utf8(content_path.filename()));

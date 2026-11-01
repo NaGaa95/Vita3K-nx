@@ -1,6 +1,8 @@
 // Copyright (C) 2026 Vita3K team
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <util/fs_remove.h>
+
 #include "seven_zip.h"
 
 #include <libarchive/archive.h>
@@ -75,7 +77,7 @@ void check_archive(struct archive *reader, int result) {
 ExtractedSevenZip::~ExtractedSevenZip() {
     if (!directory.empty()) {
         std::error_code error;
-        fs::remove_all(directory, error);
+        fs_utils::remove_path(directory, error);
     }
 }
 

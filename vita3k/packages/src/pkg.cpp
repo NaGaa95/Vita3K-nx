@@ -20,6 +20,8 @@
  * @brief PlayStation Vita software package (`.pkg`) handling
  */
 
+#include <util/fs_remove.h>
+
 #include <F00DKeyEncryptorFactory.h>
 #include <PsvPfsParserConfig.h>
 #include <Utils.h>
@@ -115,7 +117,7 @@ static bool path_exists_checked(const fs::path &path, const char *description, b
 
 static bool remove_path_checked(const fs::path &path, const char *description) {
     std::error_code fs_error;
-    fs::remove_all(path, fs_error);
+    fs_utils::remove_path(path, fs_error);
     if (fs_error) {
         LOG_ERROR("Failed to remove {} '{}': {}", description, path, fs_error.message());
         return false;
@@ -188,7 +190,7 @@ static bool commit_staged_replace(const fs::path &final_path, const fs::path &st
     }
 
     if (moved_existing) {
-        fs::remove_all(backup_path, fs_error);
+        fs_utils::remove_path(backup_path, fs_error);
         if (fs_error)
             LOG_WARN("Installed content, but failed to remove old backup '{}': {}", backup_path, fs_error.message());
     }
@@ -727,7 +729,7 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         return false;
 
     if (is_patch) {
-        fs::remove_all(content_final_path, fs_error);
+        fs_utils::remove_path(content_final_path, fs_error);
         if (fs_error)
             LOG_WARN("Update installed, but failed to remove legacy patch directory '{}': {}", content_final_path, fs_error.message());
     }
