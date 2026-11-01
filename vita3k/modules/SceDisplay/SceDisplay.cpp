@@ -24,6 +24,7 @@
 #include <packages/functions.h>
 #include <renderer/state.h>
 #include <util/types.h>
+#include <util/switch_overlay.h>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceDisplay);
@@ -155,6 +156,14 @@ EXPORT(SceInt32, _sceDisplaySetFrameBuf, const SceDisplayFrameBuf *pFrameBuf, Sc
 
     emuenv.display.last_setframe_vblank_count = emuenv.display.vblank_count.load();
     emuenv.frame_count++;
+#ifdef __SWITCH__
+    if (emuenv.renderer) {
+        const auto &renderer = *emuenv.renderer;
+        switch_overlay::frame(uint32_t(pFrameBuf->width * renderer.res_multiplier),
+            uint32_t(pFrameBuf->height * renderer.res_multiplier),
+            renderer.current_backend == renderer::Backend::Vulkan ? 3 : renderer.current_backend == renderer::Backend::OpenGL ? 2 : 1);
+    }
+#endif
 
 #ifdef TRACY_ENABLE
     FrameMarkNamed("SCE frame buffer"); // Tracy - Secondary frame end mark for the emulated frame buffer

@@ -52,6 +52,7 @@
 #include <nids/functions.h>
 #include <util/switch_thread.h>
 #include <util/switch_vibration.h>
+#include <util/switch_overlay.h>
 
 #include <fmt/format.h>
 
@@ -2006,8 +2007,11 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    if (!install_mode)
+        switch_overlay::start();
     auto &session = switch_session_state();
     if (!init_switch_session(storage_path, session.root_paths, session.emuenv, install_mode)) {
+        switch_overlay::stop();
         // Fall back to an on-screen console so the failure is visible on device.
         consoleInit(nullptr);
         printf("Vita3K: initialisation failed. Check sdmc:/switch/vita3k/logs.\n");
@@ -2132,6 +2136,7 @@ int main(int argc, char *argv[]) {
     // drops cached Vulkan device data and any remaining owners of guest threads
     // before the process is handed back to hbloader.
     guarded("stopping the app session", [&] { session.app_session_controller.reset(); });
+    guarded("stopping overlay reporting", [] { switch_overlay::stop(); });
     guarded("releasing the emulator state", [&] { session.emuenv.reset(); });
     guarded("stopping vibration", [] { switch_stop_vibration(); });
 

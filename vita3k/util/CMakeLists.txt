@@ -11,6 +11,7 @@ add_library(
 	src/net_utils.cpp
 	src/string_utils.cpp
 	src/switch_storage.cpp
+	src/switch_overlay.cpp
 	src/switch_thread.cpp
 	src/switch_vibration.cpp
 	src/sysinfo.cpp
