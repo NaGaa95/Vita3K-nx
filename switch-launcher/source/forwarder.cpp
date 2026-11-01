@@ -814,18 +814,6 @@ bool validateForwarderConfig(const std::string &path)
     return second != data.end() && second == data.end() - 1 && second != first + 1;
 }
 
-bool readForwarderConfig(const std::string &path,std::string &nroPath,std::string &args)
-{
-    if(!validateForwarderConfig(path))return false;
-    struct stat st{};if(stat(path.c_str(),&st)!=0)return false;
-    std::vector<char> data(static_cast<size_t>(st.st_size));FILE *file=fopen(path.c_str(),"rb");
-    if(!file)
-        return false;
-    const bool ok=fread(data.data(),1,data.size(),file)==data.size()&&!ferror(file);
-    if(fclose(file)!=0||!ok)return false;
-    const auto first=std::find(data.begin(),data.end(),'\0');
-    nroPath.assign(data.begin(),first);args.assign(first+1,data.end()-1);return true;
-}
 
 std::string resolveLauncherPath()
 {
