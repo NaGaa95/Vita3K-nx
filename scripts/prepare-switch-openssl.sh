@@ -43,10 +43,12 @@ while (($#)); do
 	esac
 done
 
+BUILD_ROOT="$(cd -- "$(dirname -- "${BUILD_ROOT}")" && pwd)/$(basename -- "${BUILD_ROOT}")"
 SOURCE_DIR="${BUILD_ROOT}/openssl-${OPENSSL_VERSION}"
 ARCHIVE="${BUILD_ROOT}/openssl-${OPENSSL_VERSION}.tar.gz"
 COMPAT_DIR="${ROOT}/cmake/switch/openssl-compat"
 STAMP="${SOURCE_DIR}/.vita3k-switch-build"
+BUILD_ID="openssl-${OPENSSL_VERSION} aarch64-none-elf armv8-crypto-v1"
 
 ensure_directory() {
 	[[ -d "$1" ]] || mkdir "$1"
@@ -64,8 +66,13 @@ check_result() {
 			failed=1
 		fi
 	done
-	if [[ ! -f "${STAMP}" ]] || ! grep -qx "openssl-${OPENSSL_VERSION} aarch64-none-elf" "${STAMP}"; then
+	if [[ ! -f "${STAMP}" ]] || ! grep -qx "${BUILD_ID}" "${STAMP}"; then
 		echo "Missing or stale Switch OpenSSL build stamp: ${STAMP}" >&2
+		failed=1
+	fi
+	if [[ -f "${SOURCE_DIR}/include/openssl/configuration.h" ]] &&
+		grep -qE '^# *define OPENSSL_NO_ASM' "${SOURCE_DIR}/include/openssl/configuration.h"; then
+		echo "Switch OpenSSL assembly is disabled" >&2
 		failed=1
 	fi
 	((failed == 0)) || return 1
@@ -81,7 +88,7 @@ fi
 DEVKITA64="${DEVKITA64:-${DEVKITPRO}/devkitA64}"
 TOOLCHAIN_BIN="${DEVKITA64}/bin"
 
-for tool in curl perl make tar sha256sum; do
+for tool in curl git perl make tar sha256sum; do
 	command -v "${tool}" >/dev/null || { echo "Required host tool not found: ${tool}" >&2; exit 1; }
 done
 [[ -x "${TOOLCHAIN_BIN}/aarch64-none-elf-gcc" ]] || {
@@ -111,11 +118,19 @@ ensure_directory "${TMPDIR}"
 
 cd "${SOURCE_DIR}"
 
+ARM_CAP_PATCH="${ROOT}/cmake/switch/openssl-armcap.patch"
+if GIT_CEILING_DIRECTORIES="${SOURCE_DIR}/.." git apply --no-index --check "${ARM_CAP_PATCH}" 2>/dev/null; then
+	GIT_CEILING_DIRECTORIES="${SOURCE_DIR}/.." git apply --no-index "${ARM_CAP_PATCH}"
+elif ! GIT_CEILING_DIRECTORIES="${SOURCE_DIR}/.." git apply --no-index --reverse --check "${ARM_CAP_PATCH}" 2>/dev/null; then
+	echo "OpenSSL CPU capability patch does not match the pinned sources" >&2
+	exit 1
+fi
+
 # OpenSSL's unix seed backend probes a weak getentropy symbol. Vita3K supplies
 # it with Horizon's csrng service, giving TLS/key generation real OS entropy.
 # Providers are built into libcrypto because Horizon has no dlopen modules.
 perl ./Configure linux-aarch64 \
-	no-shared no-tests no-asm no-apps no-docs no-dso no-quic \
+	no-shared no-tests no-apps no-docs no-dso no-quic \
 	no-module no-ui-console \
 	--cross-compile-prefix=aarch64-none-elf- \
 	--with-rand-seed=getrandom \
@@ -129,5 +144,5 @@ if [[ -z "${JOBS}" ]]; then
 fi
 make -j"${JOBS}" build_libs
 
-printf 'openssl-%s aarch64-none-elf\n' "${OPENSSL_VERSION}" >"${STAMP}"
+printf '%s\n' "${BUILD_ID}" >"${STAMP}"
 check_result

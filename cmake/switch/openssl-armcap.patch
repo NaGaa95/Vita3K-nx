@@ -1,0 +1,23 @@
+diff --git a/crypto/armcap.c b/crypto/armcap.c
+--- a/crypto/armcap.c
++++ b/crypto/armcap.c
+@@ -37,6 +37,18 @@ uint64_t _armv8_sve_get_vl_bytes(void);
+ #endif
+ 
+-#ifdef _WIN32
++#if defined(__SWITCH__)
++void OPENSSL_cpuid_setup(void)
++{
++    /* Tegra X1: Horizon has neither Linux auxv nor recoverable SIGILL probes. */
++    OPENSSL_armcap_P = ARMV7_NEON | ARMV8_AES | ARMV8_PMULL
++        | ARMV8_SHA1 | ARMV8_SHA256;
++}
++
++uint32_t OPENSSL_rdtsc(void)
++{
++    return 0;
++}
++#elif defined(_WIN32)
+ void OPENSSL_cpuid_setup(void)
+ {
+     OPENSSL_armcap_P |= ARMV7_NEON;

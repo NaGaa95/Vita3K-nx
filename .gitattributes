@@ -15,5 +15,6 @@ src/external/*	linguist-vendored
 *.sh			eol=lf
 *.psv			text eol=lf
 patches/submodules/*.patch text eol=lf whitespace=-blank-at-eol,-space-before-tab
+cmake/switch/*.patch text eol=lf whitespace=-blank-at-eol,-space-before-tab
 
 *.bat			eol=crlf

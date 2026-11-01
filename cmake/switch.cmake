@@ -113,7 +113,8 @@ foreach(_openssl_file
 		libssl.a
 		include/openssl/ssl.h
 		include/openssl/configuration.h
-		include/openssl/opensslv.h)
+		include/openssl/opensslv.h
+		.vita3k-switch-build)
 	if(NOT EXISTS "${SWITCH_OPENSSL_DIR}/${_openssl_file}")
 		message(FATAL_ERROR
 			"Invalid Switch OpenSSL directory: missing ${SWITCH_OPENSSL_DIR}/${_openssl_file}")
@@ -124,6 +125,18 @@ file(STRINGS "${SWITCH_OPENSSL_DIR}/include/openssl/opensslv.h"
 if(NOT _switch_openssl_version_line MATCHES "OpenSSL 4\\.0\\.1")
 	message(FATAL_ERROR
 		"Vita3K Switch requires the pinned OpenSSL 4.0.1 build; found: ${_switch_openssl_version_line}")
+endif()
+file(STRINGS "${SWITCH_OPENSSL_DIR}/include/openssl/configuration.h"
+	_switch_openssl_no_asm REGEX "^# *define OPENSSL_NO_ASM")
+if(_switch_openssl_no_asm)
+	message(FATAL_ERROR
+		"Switch OpenSSL assembly is disabled. Rebuild with scripts/prepare-switch-openssl.sh.")
+endif()
+file(READ "${SWITCH_OPENSSL_DIR}/.vita3k-switch-build" _switch_openssl_build_id)
+string(STRIP "${_switch_openssl_build_id}" _switch_openssl_build_id)
+if(NOT _switch_openssl_build_id STREQUAL "openssl-4.0.1 aarch64-none-elf armv8-crypto-v1")
+	message(FATAL_ERROR
+		"Switch OpenSSL is outdated. Rebuild with scripts/prepare-switch-openssl.sh.")
 endif()
 message(STATUS "Switch: using OpenSSL 4.0.1 at ${SWITCH_OPENSSL_DIR}")
 
