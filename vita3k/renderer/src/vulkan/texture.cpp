@@ -224,12 +224,7 @@ void VKTextureCache::prepare_staging_buffer(bool is_configure) {
             state.submit_general(submit_info, current_fence, "texture staging submission");
             context->cmdbuffers_to_submit.clear();
 
-            auto result = state.device.waitForFences(current_fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
-            if (result != vk::Result::eSuccess) {
-                LOG_ERROR("Could not wait for fences.");
-                assert(false);
-                return;
-            }
+            state.wait_upload_fence(current_fence);
             state.device.resetFences(current_fence);
 
             // also call begin again on the prerender command
@@ -245,12 +240,7 @@ void VKTextureCache::prepare_staging_buffer(bool is_configure) {
             }
         } else {
             // wait for the fence, but don't reset it
-            auto result = state.device.waitForFences(staging_buffer->waiting_fence, VK_TRUE, std::numeric_limits<uint64_t>::max());
-            if (result != vk::Result::eSuccess) {
-                LOG_ERROR("Could not wait for fences.");
-                assert(false);
-                return;
-            }
+            state.wait_upload_fence(staging_buffer->waiting_fence);
             last_waited_scene = staging_buffer->scene_timestamp;
         }
     }
@@ -565,14 +555,12 @@ void VKTextureCache::upload_texture_impl(SceGxmTextureBaseFormat base_format, ui
     auto *const upload_destination = static_cast<uint8_t *>(staging_buffer.buffer.mapped_data) + upload_offset;
     memcpy(upload_destination, text_data, upload_size);
 
-#ifdef __SWITCH__
-    // NVK can expose a cached CPU mapping even when the Vulkan allocation is
-    // reported as HOST_COHERENT. Clean it explicitly before the GPU copy reads
-    // the staging bytes.
-    armDCacheFlush(upload_destination, upload_size);
-#endif
     if (!staging_buffer.is_coherent)
         staging_buffer.buffer.flush(upload_offset, upload_size);
+#ifdef __SWITCH__
+    else
+        armDCacheClean(upload_destination, upload_size);
+#endif
 
     vk::ImageSubresourceLayers layer{
         .aspectMask = vk::ImageAspectFlagBits::eColor,

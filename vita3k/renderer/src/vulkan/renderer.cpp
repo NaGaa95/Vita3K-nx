@@ -427,6 +427,26 @@ void VKState::submit_general(const vk::SubmitInfo &submit_info, vk::Fence fence,
     }
 }
 
+void VKState::wait_upload_fence(vk::Fence fence) {
+    while (!render_abort.load(std::memory_order_relaxed) && !device_lost.load(std::memory_order_acquire)) {
+        vk::Result result;
+        try {
+            result = device.waitForFences(fence, VK_TRUE, 100'000'000ULL);
+        } catch (const vk::SystemError &) {
+            device_lost.store(true, std::memory_order_release);
+            throw;
+        }
+        if (result == vk::Result::eSuccess)
+            return;
+        if (result == vk::Result::eTimeout)
+            continue;
+        if (result == vk::Result::eErrorDeviceLost)
+            device_lost.store(true, std::memory_order_release);
+        throw std::runtime_error("Texture staging fence wait failed");
+    }
+    throw std::runtime_error("Texture staging upload aborted");
+}
+
 void VKState::submit_general_sequence(const std::vector<vk::CommandBuffer> &commands, vk::Fence fence) {
     assert(!commands.empty());
     // Keep uploads and rendering separate, with no worker submissions between them.
@@ -1499,8 +1519,20 @@ void VKState::render_frame(DisplayState &display, const GxmState &gxm, MemState 
             }
 
             // copy surface to staging buffer
-            const vk::DeviceSize texture_data_size = frame.pitch * frame.image_size.y * 4;
-            memcpy(screen_renderer.vita_surface_staging_info.pMappedData, frame.base.get(mem), texture_data_size);
+            const vk::DeviceSize texture_data_size = vk::DeviceSize(frame.pitch) * frame.image_size.y * 4;
+            auto &staging = screen_renderer.vita_surface_staging[screen_renderer.swapchain_image_idx];
+            if (staging.size < texture_data_size) {
+                staging.destroy();
+                staging = vkutil::Buffer(texture_data_size);
+                staging.init_buffer(vk::BufferUsageFlagBits::eTransferSrc, vkutil::vma_mapped_alloc_cached);
+            }
+            memcpy(staging.mapped_data, frame.base.get(mem), texture_data_size);
+            if (!staging.is_host_coherent())
+                staging.flush(0, texture_data_size);
+#ifdef __SWITCH__
+            else
+                armDCacheClean(staging.mapped_data, texture_data_size);
+#endif
 
             // copy staging buffer to image
             auto &cmd_buffer = screen_renderer.current_cmd_buffer;
@@ -1513,7 +1545,7 @@ void VKState::render_frame(DisplayState &display, const GxmState &gxm, MemState 
                 .imageOffset = { 0, 0, 0 },
                 .imageExtent = { static_cast<uint32_t>(frame.image_size.x), static_cast<uint32_t>(frame.image_size.y), 1 }
             };
-            cmd_buffer.copyBufferToImage(screen_renderer.vita_surface_staging, vita_surface.image, vk::ImageLayout::eTransferDstOptimal, region);
+            cmd_buffer.copyBufferToImage(staging.buffer, vita_surface.image, vk::ImageLayout::eTransferDstOptimal, region);
 
             vita_surface.transition_to(cmd_buffer, vkutil::ImageLayout::SampledImage);
 

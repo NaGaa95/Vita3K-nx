@@ -68,9 +68,7 @@ public:
     std::unique_ptr<ScreenFilter> filter;
 
     std::vector<vkutil::Image> vita_surface;
-    vma::Allocation vita_surface_staging_alloc;
-    vma::AllocationInfo vita_surface_staging_info;
-    vk::Buffer vita_surface_staging;
+    std::vector<vkutil::Buffer> vita_surface_staging;
 
     vk::CommandBuffer current_cmd_buffer;
 

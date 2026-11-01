@@ -235,9 +235,6 @@ bool ScreenRenderer::setup() {
 
     create_swapchain();
 
-    // these functions do not need to be called when the swapchain is resized
-    create_surface_image();
-
     filter = std::make_unique<BilinearScreenFilter>(*this);
     filter->init();
 
@@ -383,6 +380,7 @@ void ScreenRenderer::create_swapchain() {
     }
 
     create_layout_sync();
+    create_surface_image();
 
 #ifdef __SWITCH__
     if (lsfg_compatible && lsfg::is_session_prepared())
@@ -421,10 +419,7 @@ void ScreenRenderer::cleanup() {
         img.destroy();
     vita_surface.clear();
 
-    if (vita_surface_staging) {
-        state.allocator.destroyBuffer(vita_surface_staging, vita_surface_staging_alloc);
-        vita_surface_staging = nullptr;
-    }
+    vita_surface_staging.clear();
 
     for (vk::Framebuffer fb : swapchain_framebuffers)
         state.device.destroy(fb);
@@ -761,13 +756,7 @@ void ScreenRenderer::create_render_pass() {
 void ScreenRenderer::create_surface_image() {
     vita_surface.resize(swapchain_size);
 
-    vk::BufferCreateInfo buffer_info{
-        // make sure it is big enough
-        .size = 1024 * 720 * sizeof(uint32_t),
-        .usage = vk::BufferUsageFlagBits::eTransferSrc,
-        .sharingMode = vk::SharingMode::eExclusive
-    };
-    std::tie(vita_surface_staging, vita_surface_staging_alloc) = state.allocator.createBuffer(buffer_info, vkutil::vma_mapped_alloc, vita_surface_staging_info);
+    vita_surface_staging.resize(swapchain_size);
 }
 
 bool ScreenRenderer::ensure_swapchain() {
