@@ -203,6 +203,7 @@ private:
     }
 
     void store(Operand dest, spv::Id source, std::uint8_t dest_mask = 0xFF, int shift_offset = 0);
+    bool is_declared_output_type(DataType type) const;
     spv::Id swizzle_to_spv_comp(spv::Id composite, spv::Id type, SwizzleChannel swizzle);
 
     // TODO: Separate file for translator helpers?
@@ -215,6 +216,7 @@ private:
     bool m_output_accessed{ false };
     bool m_output_read_declared{ false };
     bool m_raw_move{ false };
+    bool m_store_raw_f16_lanes{ false };
     struct PackedWordFormat {
         DataType type = DataType::UNK;
         uint8_t bytes = 0;

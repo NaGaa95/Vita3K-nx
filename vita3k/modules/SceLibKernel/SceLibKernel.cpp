@@ -447,9 +447,10 @@ EXPORT(int, sceClibVdprintf) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceClibVprintf, const char *fmt, module::vargs args) {
-    TRACY_FUNC(sceClibVprintf, fmt);
+EXPORT(int, sceClibVprintf, const char *fmt, Address list) {
+    TRACY_FUNC(sceClibVprintf, fmt, list);
     const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id);
+    module::vargs args(list);
     if (!thread) {
         return SCE_KERNEL_ERROR_UNKNOWN_THREAD_ID;
     }

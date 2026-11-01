@@ -178,6 +178,28 @@ spv::Id shader::usse::USSETranslatorVisitor::do_fetch_texture(const spv::Id tex,
 
         m_b.createStore(m_b.createCompositeConstruct(type_f32_v[2], { new_x, new_y }), cast_coord);
         active_branch.makeEndIf();
+        spv::Id tie_phase = m_b.createUnaryOp(spv::OpConvertFToU, type_u32, phase_f);
+        tie_phase = m_b.createBinOp(spv::OpShiftRightLogical, type_u32, tie_phase, m_b.makeUintConstant(texture_index));
+        tie_phase = m_b.createBinOp(spv::OpBitwiseAnd, type_u32, tie_phase, m_b.makeUintConstant(1));
+        const spv::Id phase_view = m_b.createBinOp(spv::OpLogicalAnd, type_bool,
+            m_b.createBinOp(spv::OpINotEqual, type_bool, tie_phase, m_b.makeUintConstant(0)),
+            m_b.createUnaryOp(spv::OpLogicalNot, type_bool, unit_is_cast));
+        const spv::Id cast_at_1x = m_b.createBinOp(spv::OpLogicalAnd, type_bool, unit_is_cast,
+            m_b.createUnaryOp(spv::OpLogicalNot, type_bool, not_1x));
+        spv::Builder::If tie_branch(m_b.createBinOp(spv::OpLogicalOr, type_bool, phase_view, cast_at_1x), spv::SelectionControlMaskNone, m_b);
+        const spv::Id tie_i32 = m_b.makeIntType(32);
+        const spv::Id tie_image = m_b.createUnaryOp(spv::OpImage,
+            m_b.makeImageType(type_f32, spv::Dim2D, false, false, false, 1, spv::ImageFormatUnknown), tex);
+        const spv::Id tie_size = m_b.createOp(spv::OpImageQuerySizeLod, m_b.makeVectorType(tie_i32, 2), { tie_image, m_b.makeIntConstant(0) });
+        const spv::Id tie_width = m_b.createUnaryOp(spv::OpConvertSToF, type_f32,
+            utils::extract_vector_component(m_b, tie_i32, tie_size, m_b.makeIntConstant(0)));
+        const spv::Id tie_x = m_b.createBinOp(spv::OpFSub, type_f32,
+            utils::extract_vector_component(m_b, type_f32, coord_xy, m_b.makeIntConstant(0)),
+            m_b.createBinOp(spv::OpFDiv, type_f32, m_b.makeFloatConstant(1.0f / 256.0f), tie_width));
+        // Keep point reads on the lower side of a cast texel boundary.
+        m_b.createStore(m_b.createCompositeConstruct(type_f32_v[2], { tie_x,
+            utils::extract_vector_component(m_b, type_f32, coord_xy, m_b.makeIntConstant(1)) }), cast_coord);
+        tie_branch.makeEndIf();
         cast_branch.makeEndIf();
 
         const spv::Id new_xy = m_b.createLoad(cast_coord, spv::NoPrecision);

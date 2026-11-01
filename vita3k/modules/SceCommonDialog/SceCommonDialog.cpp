@@ -1345,7 +1345,7 @@ EXPORT(SceInt32, sceSaveDataDialogGetResult, SceSaveDataDialogResult *result) {
 
 EXPORT(int, sceSaveDataDialogGetStatus) {
     TRACY_FUNC(sceSaveDataDialogGetStatus);
-    if ((emuenv.common_dialog.type != SAVEDATA_DIALOG) || ((emuenv.common_dialog.status != SCE_COMMON_DIALOG_STATUS_RUNNING) && (emuenv.common_dialog.substatus != SCE_COMMON_DIALOG_STATUS_RUNNING)))
+    if (emuenv.common_dialog.type != SAVEDATA_DIALOG)
         return SCE_COMMON_DIALOG_STATUS_NONE;
 
     return emuenv.common_dialog.status;

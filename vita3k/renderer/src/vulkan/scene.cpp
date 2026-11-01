@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <renderer/vulkan/functions.h>
+#include <renderer/vulkan/vertex_input.h>
 
 #include <algorithm>
 #include <cmath>
@@ -293,6 +294,7 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
     const SceGxmVertexProgram &vertex_program = *state.vertex_program.get(mem);
     VertexProgram *vkvert = vertex_program.renderer_data.get();
 
+    const auto &layout = context.state.pipeline_cache.vertex_input_layout(vertex_program);
     int max_stream_idx = -1;
 
     for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
@@ -306,19 +308,16 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
         for (int i = 0; i < max_stream_idx; i++)
             state.vertex_streams[i].size = 0;
 
-        // same as in SceGxm.cpp
-        for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
-            const SceGxmAttributeFormat attribute_format = static_cast<SceGxmAttributeFormat>(attribute.format);
-            const size_t attribute_size = gxm::attribute_format_size(attribute_format) * attribute.componentCount;
-            const SceGxmVertexStream &stream = vertex_program.streams[attribute.streamIndex];
-            const SceGxmIndexSource index_source = static_cast<SceGxmIndexSource>(stream.indexSource);
-            const size_t data_passed_length = gxm::is_stream_instancing(index_source) ? ((instance_count - 1) * stream.stride) : (max_index * stream.stride);
-            const size_t data_length = attribute.offset + data_passed_length + attribute_size;
-            state.vertex_streams[attribute.streamIndex].size = std::max<size_t>(state.vertex_streams[attribute.streamIndex].size, data_length);
+        for (uint32_t index = 0; index < layout.stream_count; ++index) {
+            if (!(layout.used_streams & (1u << index)))
+                continue;
+            const auto &stream = vertex_program.streams[index];
+            const auto last = gxm::is_stream_instancing(SceGxmIndexSource(stream.indexSource)) ? instance_count - 1 : max_index;
+            state.vertex_streams[index].size = uint64_t(last) * stream.stride + layout.streams[index].source_record_size;
         }
 
         for (int i = 0; i < max_stream_idx; i++) {
-            if (state.vertex_streams[i].data)
+            if ((layout.used_streams & (1u << i)) && state.vertex_streams[i].data)
                 // on the PS Vita, shader stores are used most of the time to write to a vertex buffer
                 context.state.buffer_trapping.access_buffer(state.vertex_streams[i].data.address(), static_cast<uint32_t>(state.vertex_streams[i].size), mem, context.state.has_shader_store);
         }
@@ -328,30 +327,38 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
         return;
 
     for (int i = 0; i < max_stream_idx; i++) {
-        if (state.vertex_streams[i].data) {
-            if (context.state.features.enable_memory_mapping) {
+        if ((layout.used_streams & (1u << i)) && state.vertex_streams[i].data) {
+            const auto &stream_layout = layout.streams[i];
+            const bool unaligned_base = state.vertex_streams[i].data.address() % stream_layout.alignment != 0;
+            if (context.state.features.enable_memory_mapping && !stream_layout.repack && !unaligned_base) {
                 auto [buffer, offset] = context.state.get_matching_mapping(state.vertex_streams[i].data.cast<void>());
-
                 context.vertex_stream_offsets[i] = offset;
                 context.vertex_stream_buffers[i] = buffer;
             } else {
-                const uint8_t *stream = state.vertex_streams[i].data.get(mem);
-                uint32_t stream_size = state.vertex_streams[i].size;
-#ifdef __APPLE__
-                // Vulkan allows any stride, but Metal only allows multiples of 4.
-                const bool restride = vertex_program.streams[i].stride % 4 != 0;
-                if (restride) {
-                    restride_stream(stream, stream_size, vertex_program.streams[i].stride);
+                const auto *stream = state.vertex_streams[i].data.get(mem);
+                size_t source_size = state.vertex_streams[i].size;
+                const auto &source_layout = vertex_program.streams[i];
+                const bool instanced = gxm::is_stream_instancing(SceGxmIndexSource(source_layout.indexSource));
+                const size_t records = source_layout.stride == 0 ? 1 : instanced ? instance_count : size_t(max_index) + 1;
+                if (stream_layout.repack || stream_layout.extended_source) {
+                    source_size = std::max<uint64_t>(source_size, (records - 1) * uint64_t(source_layout.stride) + stream_layout.source_record_size);
+                    if (source_size > context.vertex_stream_ring_buffer.size()
+                        || !is_valid_addr_range_size(mem, state.vertex_streams[i].data.address(), source_size))
+                        throw std::runtime_error("Invalid Vulkan vertex stream span");
                 }
-#endif
-                context.vertex_stream_ring_buffer.allocate(context.prerender_cmd, stream_size, stream);
+                if (stream_layout.repack) {
+                    const uint64_t size = (records - 1) * uint64_t(stream_layout.stride) + stream_layout.record_size;
+                    if (size > context.vertex_stream_ring_buffer.size())
+                        throw std::runtime_error("Repacked vertex stream exceeds buffer limits");
+                    context.vertex_stream_ring_buffer.allocate(uint32_t(size));
+                    repack_vertex_stream(stream_layout, source_layout.stride, stream, source_size,
+                        static_cast<uint8_t *>(context.vertex_stream_ring_buffer.mapped_data()), records);
+                    context.vertex_stream_ring_buffer.flush(uint32_t(size));
+                } else {
+                    context.vertex_stream_ring_buffer.allocate(context.prerender_cmd, uint32_t(source_size), stream);
+                }
                 context.vertex_stream_offsets[i] = context.vertex_stream_ring_buffer.data_offset;
-
-#ifdef __APPLE__
-                if (restride) {
-                    delete[] stream;
-                }
-#endif
+                context.vertex_stream_buffers[i] = context.vertex_stream_ring_buffer.handle();
             }
 
             state.vertex_streams[i].data = nullptr;
@@ -359,7 +366,7 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
         }
     }
 
-    if (!context.state.pipeline_cache.needs_attribute_bindings(vertex_program)) {
+    if (!layout.attribute_bindings) {
         context.render_cmd.bindVertexBuffers(0, max_stream_idx, context.vertex_stream_buffers, context.vertex_stream_offsets);
         return;
     }
@@ -368,11 +375,12 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
     static thread_local std::vector<vk::DeviceSize> offsets;
     buffers.clear();
     offsets.clear();
-    for (const SceGxmVertexAttribute &attribute : vertex_program.attributes) {
+    for (size_t i = 0; i < vertex_program.attributes.size(); ++i) {
+        const auto &attribute = vertex_program.attributes[i];
         if (!vkvert->attribute_infos.contains(attribute.regIndex))
             continue;
         buffers.push_back(context.vertex_stream_buffers[attribute.streamIndex]);
-        offsets.push_back(context.vertex_stream_offsets[attribute.streamIndex] + attribute.offset);
+        offsets.push_back(context.vertex_stream_offsets[attribute.streamIndex] + layout.attribute_offsets[i]);
     }
     context.render_cmd.bindVertexBuffers(0, buffers, offsets);
 }
@@ -665,6 +673,16 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         context.render_cmd.bindIndexBuffer(context.index_stream_ring_buffer.handle(), context.index_stream_ring_buffer.data_offset, index_type);
     }
 
+    const auto &input_layout = context.state.pipeline_cache.vertex_input_layout(*context.record.vertex_program.get(mem));
+    if ((input_layout.repack_vertices || (!use_memory_mapping && input_layout.extended_vertex_source)) && !max_index && count) {
+        if (format == SCE_GXM_INDEX_FORMAT_U16) {
+            const auto *data = static_cast<const uint16_t *>(indices_ptr);
+            max_index = *std::max_element(data, data + count);
+        } else {
+            const auto *data = static_cast<const uint32_t *>(indices_ptr);
+            max_index = *std::max_element(data, data + count);
+        }
+    }
     // bind the vertex streams
     bind_vertex_streams(context, mem, instance_count, max_index);
 

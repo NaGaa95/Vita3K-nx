@@ -126,9 +126,24 @@ EXPORT(int, sceNpManagerGetAccountRegion) {
     return UNIMPLEMENTED();
 }
 
-EXPORT(int, sceNpManagerGetCachedParam) {
-    TRACY_FUNC(sceNpManagerGetCachedParam);
-    return UNIMPLEMENTED();
+struct SceNpAvatarUrl {
+    char data[128];
+};
+
+struct SceNpManagerCacheParam {
+    np::SceNpId npId;
+    SceNpAvatarUrl avatarUrl;
+};
+static_assert(sizeof(SceNpManagerCacheParam) == 0xA4);
+
+EXPORT(int, sceNpManagerGetCachedParam, Ptr<SceNpManagerCacheParam> param) {
+    TRACY_FUNC(sceNpManagerGetCachedParam, param);
+    if (!param || !is_valid_addr_range_size(emuenv.mem, param.address(), sizeof(SceNpManagerCacheParam)))
+        return RET_ERROR(SCE_NP_MANAGER_ERROR_INVALID_ARGUMENT);
+
+    SceNpManagerCacheParam *cache = param.get(emuenv.mem);
+    *cache = {};
+    return CALL_EXPORT(sceNpManagerGetNpId, &cache->npId);
 }
 
 EXPORT(int, sceNpManagerGetChatRestrictionFlag, SceInt *isRestricted) {
@@ -146,13 +161,15 @@ EXPORT(int, sceNpManagerGetContentRatingFlag, SceInt *isRestricted, SceInt *age)
 
 EXPORT(int, sceNpManagerGetNpId, np::SceNpId *id) {
     TRACY_FUNC(sceNpManagerGetNpId, id);
+    if (!id)
+        return SCE_NP_MANAGER_ERROR_INVALID_ARGUMENT;
     if (emuenv.io.user_name.length() > SCE_NP_ONLINEID_MAX_LENGTH) {
         LOG_ERROR("Your online ID has over 16 characters, try again with shorter name");
         return SCE_NP_MANAGER_ERROR_ID_NOT_AVAIL;
     }
     // Fill the unused stuffs to 0 (prevent some weird things happen)
     memset(id, 0, sizeof(np::SceNpId));
-    strcpy(id->handle.data, emuenv.io.user_name.c_str());
+    memcpy(id->handle.data, emuenv.io.user_name.data(), emuenv.io.user_name.size());
     id->isIdValid = true;
     id->opt.platformType[0] = 'p';
     id->opt.platformType[1] = 's';

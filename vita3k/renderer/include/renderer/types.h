@@ -39,6 +39,10 @@ using UniformBufferSizes = std::array<std::uint32_t, 15>;
 
 namespace renderer {
 
+namespace vulkan {
+struct VertexInputLayout;
+}
+
 // State types
 typedef std::map<Sha256Hash, const SceGxmProgram *> GXPPtrMap;
 
@@ -216,6 +220,7 @@ struct FragmentProgram : ShaderProgram {
 
 struct VertexProgram : ShaderProgram {
     shader::usse::AttributeInformationMap attribute_infos;
+    std::shared_ptr<const vulkan::VertexInputLayout> vulkan_vertex_input;
     uint32_t varying_location_mask = 0x00ffffff;
 };
 

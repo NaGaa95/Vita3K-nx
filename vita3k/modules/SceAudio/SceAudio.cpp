@@ -145,8 +145,21 @@ EXPORT(int, sceAudioOutGetAdopt, SceAudioOutPortType type) {
 }
 
 EXPORT(int, sceAudioOutGetConfig, int port, SceAudioOutConfigType type) {
-    TRACY_FUNC(sceAudioOutGetConfig, type);
-    return UNIMPLEMENTED();
+    TRACY_FUNC(sceAudioOutGetConfig, port, type);
+    const AudioOutPortPtr prt = lock_and_find(port, emuenv.audio.out_ports, emuenv.audio.mutex);
+    if (!prt)
+        return RET_ERROR(SCE_AUDIO_OUT_ERROR_INVALID_PORT);
+
+    switch (type) {
+    case SCE_AUDIO_OUT_CONFIG_TYPE_LEN:
+        return prt->len;
+    case SCE_AUDIO_OUT_CONFIG_TYPE_FREQ:
+        return prt->freq;
+    case SCE_AUDIO_OUT_CONFIG_TYPE_MODE:
+        return prt->mode;
+    default:
+        return RET_ERROR(SCE_AUDIO_OUT_ERROR_INVALID_CONF_TYPE);
+    }
 }
 
 EXPORT(int, sceAudioOutGetPortVolume_forUser) {
@@ -289,6 +302,11 @@ EXPORT(int, sceAudioOutSetConfig, int port, int len, int freq, int mode) {
     if ((set_len == prt->len) && (set_freq == prt->freq) && (set_mode == prt->mode))
         return 0;
 
+    const int type = prt->type;
+    const int left_volume = prt->left_channel_volume;
+    const int right_volume = prt->right_channel_volume;
+    const float volume = prt->volume;
+
     if (CALL_EXPORT(sceAudioOutReleasePort, port) != 0)
         return RET_ERROR(SCE_AUDIO_OUT_ERROR_INVALID_PORT);
 
@@ -299,9 +317,13 @@ EXPORT(int, sceAudioOutSetConfig, int port, int len, int freq, int mode) {
         return RET_ERROR(SCE_AUDIO_OUT_ERROR_NOT_OPENED);
 
     // Save the port configuration
+    prt->type = type;
     prt->freq = set_freq;
     prt->len = set_len;
     prt->mode = set_mode;
+    prt->left_channel_volume = left_volume;
+    prt->right_channel_volume = right_volume;
+    emuenv.audio.set_volume(*prt, volume);
 
     const std::lock_guard<std::mutex> lock(emuenv.audio.mutex);
     emuenv.audio.out_ports.emplace(port, prt);

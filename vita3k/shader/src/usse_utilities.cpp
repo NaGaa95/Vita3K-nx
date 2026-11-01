@@ -1407,11 +1407,14 @@ spv::Id unpack(spv::Builder &b, SpirvUtilFunctions &utils, const FeatureState &f
 }
 
 void store(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFunctions &utils, const FeatureState &features, Operand dest,
-    spv::Id source, std::uint8_t dest_mask, int off) {
+    spv::Id source, std::uint8_t dest_mask, int off, bool raw_f16_lanes) {
     if (source == spv::NoResult) {
         LOG_WARN("Source invalid");
         return;
     }
+
+    if (raw_f16_lanes)
+        dest.type = DataType::UINT16;
 
     // Check for INDEX bank. INDEX bank are optimized to store an integer
     if (dest.bank == RegisterBank::INDEX || dest.bank == RegisterBank::PREDICATE) {
@@ -1434,14 +1437,8 @@ void store(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFuncti
                 source = b.createOp(spv::OpBitcast, b.makeIntType(32), ops);
             }
 
-            // if dest is a 8 or 16 bits integer
-            // Todo: keep the content of the upper bits of idx (not done right now)
-            if (!is_float_data_type(dest.type) && get_data_type_size(dest.type) < 4) {
-                spv::Id mask = (get_data_type_size(dest.type) == 1)
-                    ? b.makeIntConstant(0xFF)
-                    : b.makeIntConstant(0xFFFF);
-                source = b.createBinOp(spv::OpBitwiseAnd, b.makeIntType(32), source, mask);
-            }
+            const bool byte_write = !is_float_data_type(dest.type) && get_data_type_size(dest.type) == 1;
+            source = b.createBinOp(spv::OpBitwiseAnd, b.makeIntType(32), source, b.makeIntConstant(byte_write ? 0xFF : 0xFFFF));
         }
 
         spv::Id var = b.createOp(spv::OpAccessChain, b.makePointer(spv::StorageClassPrivate, b.getContainedTypeId(b.getContainedTypeId(b.getTypeId(bank_base)))), { bank_base, b.makeIntConstant(dest.num) });
@@ -1521,7 +1518,7 @@ void store(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFuncti
         spv::Id vec_comp_type = utils::unwrap_type(b, b.getTypeId(source));
         int source_value_taken_count = 0;
         int last_swizz_on = 4;
-        if (dest.type == DataType::F16) {
+        if (dest.type == DataType::F16 || raw_f16_lanes) {
             if (!dest_mask)
                 return;
             while (!(dest_mask & (1 << (last_swizz_on - 1))))
@@ -1560,7 +1557,7 @@ void store(spv::Builder &b, const SpirvShaderParameters &params, SpirvUtilFuncti
             spv::Id result = ops.size() == 1 ? ops[0] : b.createCompositeConstruct(result_type, ops);
             result = pack_one(b, utils, features, result, dest.type);
 
-            if (dest.type == DataType::F16) {
+            if (dest.type == DataType::F16 || raw_f16_lanes) {
                 const uint32_t lanes = (dest_mask >> (nearest_swizz_on + i)) & 3;
                 if (lanes != 3) {
                     // Unwritten halves may hold integer bits, including half-float NaN encodings.

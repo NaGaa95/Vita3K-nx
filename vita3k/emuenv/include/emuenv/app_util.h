@@ -38,6 +38,16 @@ struct SceAppUtilDrmAddcontId {
     SceChar8 padding[3];
 };
 
+struct SceAppUtilTitleId {
+    SceChar8 data[10];
+    SceChar8 padding[6];
+};
+static_assert(sizeof(SceAppUtilTitleId) == 16);
+
+struct SceAppUtilPassCode {
+    SceUChar8 data[32];
+};
+
 struct SceAppUtilSaveDataDataSaveItem {
     const Ptr<char> dataPath;
     const Ptr<void> buf;

@@ -125,6 +125,7 @@ public:
     vk::Buffer handle() const {
         return buffer.buffer;
     }
+    uint32_t size() const { return capacity; }
 };
 
 // RingBuffer allocated in the GPU memory, may not be accessible from the host
@@ -152,6 +153,9 @@ public:
         : RingBuffer(usage, capacity) {
     }
     void create() override;
+
+    void *mapped_data() { return static_cast<uint8_t *>(buffer.mapped_data) + data_offset; }
+    void flush(uint32_t size);
 
     void copy(vk::CommandBuffer cmd_buffer, const uint32_t size, const void *data, const uint32_t offset = 0) override;
 };

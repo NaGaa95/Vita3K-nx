@@ -198,6 +198,7 @@ struct TextureLookupResult {
     bool is_typeless_cast = false;
     bool cast_phase_hi = false;
     bool is_raw_bits = false;
+    bool is_cast_phase_view = false;
 };
 
 // result when trying to retrieve a surface from the surface cache

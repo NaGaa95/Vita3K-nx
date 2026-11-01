@@ -683,6 +683,11 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
         for (int i = 0; i < 4; i++)
             texture_repr[i] &= mask[i];
     }
+    const auto base_format = gxm::get_base_format(gxm::get_format(gxm_texture));
+    const bool paletted = gxm::is_paletted_format(base_format) && gxm_texture.palette_addr != 0;
+    const uint64_t palette_hash = paletted
+        ? hash_palette_data(gxm_texture, base_format == SCE_GXM_TEXTURE_BASE_FORMAT_P4 ? 16 : 256, mem)
+        : 0;
     auto gxm_it = texture_lookup.find(texture_repr);
     if (gxm_it != texture_lookup.end())
         // we found the texture in the cache
@@ -744,7 +749,7 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
             bool verified_this_scene = false;
 #ifdef __SWITCH__
             verified_this_scene = memo_scene != 0 && info->last_hashed_scene == memo_scene
-                && !import_textures && !export_textures;
+                && !import_textures && !export_textures && info->palette_hash == palette_hash;
             info->last_hashed_scene = memo_scene;
 #endif
             if (verified_this_scene) {
@@ -764,6 +769,9 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
             upload = info->dirty;
         }
     }
+    if (paletted && info->palette_hash != palette_hash)
+        upload = true;
+    info->palette_hash = palette_hash;
     current_info = info;
 
     if (gxm_texture.data_addr == 0) {

@@ -150,10 +150,10 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
     }
 
     if (!is_vertex) {
-        const uint32_t old_cast_units = context.curr_frag_ublock.cast_sampler_bits | context.curr_frag_ublock.raw_cast_bits;
-        context.curr_frag_ublock.set_cast_sampler_bit(index, lookup_result->is_typeless_cast, lookup_result->cast_phase_hi);
+        const uint32_t old_cast_units = context.curr_frag_ublock.cast_sampler_bits | context.curr_frag_ublock.cast_phase_bits | context.curr_frag_ublock.raw_cast_bits;
+        context.curr_frag_ublock.set_cast_sampler_bit(index, lookup_result->is_typeless_cast, lookup_result->cast_phase_hi, lookup_result->is_cast_phase_view);
         context.curr_frag_ublock.set_raw_cast_bit(index, lookup_result->is_raw_bits);
-        const uint32_t cast_units = context.curr_frag_ublock.cast_sampler_bits | context.curr_frag_ublock.raw_cast_bits;
+        const uint32_t cast_units = context.curr_frag_ublock.cast_sampler_bits | context.curr_frag_ublock.cast_phase_bits | context.curr_frag_ublock.raw_cast_bits;
         // the pipeline is specialized on the cast units
         if (cast_units != old_cast_units)
             context.refresh_pipeline = true;

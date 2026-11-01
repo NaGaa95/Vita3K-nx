@@ -258,6 +258,11 @@ void HostRingBuffer::copy(vk::CommandBuffer cmd_buffer, const uint32_t size, con
         allocator.flushAllocation(buffer.allocation, data_offset + offset, size);
 }
 
+void HostRingBuffer::flush(const uint32_t size) {
+    if (!is_coherent)
+        allocator.flushAllocation(buffer.allocation, data_offset, size);
+}
+
 void LocalRingBuffer::create() {
     // the auto_alloc default behavior should give us memory on the gpu
     // UpdateBuffer needs the buffer to have TransferDst specified

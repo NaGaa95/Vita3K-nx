@@ -514,6 +514,15 @@ void release_rack(State &ngs, const MemState &mem, System *system, Rack *rack) {
         }
     }
 
+    auto &pending = system->voice_scheduler.operations_pending;
+    const size_t pending_count = pending.size();
+    for (size_t i = 0; i < pending_count; ++i) {
+        const auto op = pending.front();
+        pending.pop();
+        if (op.type != PendingType::VoiceFinished || op.finished_data.voice->rack != rack)
+            pending.push(op);
+    }
+
     // remove all queued voices
     for (const auto &voice : rack->voices) {
         Voice *v = voice.get(mem);

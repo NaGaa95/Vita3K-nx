@@ -27,13 +27,22 @@
 using namespace shader;
 using namespace usse;
 
+bool USSETranslatorVisitor::is_declared_output_type(const DataType type) const {
+    if (!m_program.is_fragment())
+        return false;
+    static constexpr DataType types[] = { DataType::F32, DataType::F16, DataType::C10,
+        DataType::UINT32, DataType::INT32, DataType::UINT16, DataType::INT16, DataType::UINT8, DataType::INT8 };
+    const auto declared = m_program.get_fragment_output_type();
+    return declared < std::size(types) && types[declared] == type;
+}
+
 spv::Id USSETranslatorVisitor::load(Operand op, const Imm4 dest_mask, const int shift_offset) {
     if (!m_second_program && op.bank == RegisterBank::OUTPUT && !m_output_accessed) {
         const int type_size = get_data_type_size(op.type);
         for (int i = 0; i < 4; ++i) {
             const auto channel = static_cast<unsigned>(op.swizzle[i]);
             if ((dest_mask & (1 << i)) && channel < 4 && op.num + shift_offset + (channel * type_size) / 4 == 0) {
-                m_output_read_declared = !m_raw_move && (op.type == DataType::F16 || op.type == DataType::F32);
+                m_output_read_declared = !m_raw_move && (op.type == DataType::F16 || op.type == DataType::F32 || is_declared_output_type(op.type));
                 m_output_accessed = true;
                 break;
             }
@@ -74,10 +83,10 @@ void USSETranslatorVisitor::store(Operand dest, spv::Id source, std::uint8_t des
         const std::uint8_t first_word_mask = (type_size >= 4) ? 0b0001 : ((type_size == 2) ? 0b0011 : 0b1111);
         if (dest_mask & first_word_mask) {
             m_output_accessed = true;
-            m_output_written_declared = (dest.type == DataType::F16 || dest.type == DataType::F32);
+            m_output_written_declared = dest.type == DataType::F16 || dest.type == DataType::F32 || is_declared_output_type(dest.type);
         }
     }
-    utils::store(m_b, m_spirv_params, m_util_funcs, m_features, dest, source, dest_mask, shift_offset);
+    utils::store(m_b, m_spirv_params, m_util_funcs, m_features, dest, source, dest_mask, shift_offset, m_store_raw_f16_lanes);
 }
 
 spv::Id USSETranslatorVisitor::swizzle_to_spv_comp(spv::Id composite, spv::Id type, SwizzleChannel swizzle) {

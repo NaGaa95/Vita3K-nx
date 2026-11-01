@@ -38,7 +38,8 @@ struct System;
 struct State;
 
 enum class PendingType {
-    ReleaseRack
+    ReleaseRack,
+    VoiceFinished
     // TODO add voice operations during system lock
 };
 
@@ -53,6 +54,10 @@ struct OperationPending {
             // can't use a ptr, otherwise the default constructor is deleted
             Address callback;
         } release_data;
+        struct {
+            Voice *voice;
+            uint32_t generation;
+        } finished_data;
     };
 };
 

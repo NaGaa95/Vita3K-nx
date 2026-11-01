@@ -291,8 +291,8 @@ bool Atrac9Module::decode_more_data(KernelState &kern, const MemState &mem, cons
 
     logical->superframe_staging.clear();
 
-    state->samples_generated_since_key_on += decoded_size * params->channels;
-    state->samples_generated_total += decoded_size * params->channels;
+    state->samples_generated_since_key_on += decoded_size * SCE_NGS_MAX_SYSTEM_CHANNELS;
+    state->samples_generated_total += decoded_size * SCE_NGS_MAX_SYSTEM_CHANNELS;
     state->bytes_consumed_since_key_on += superframe_size;
     state->total_bytes_consumed += superframe_size;
     runtime->decoder->export_state(&logical->saved_state);
@@ -318,6 +318,12 @@ bool Atrac9Module::process(KernelState &kern, const MemState &mem, const SceUID 
             break;
         }
         const SceNgsAT9BufferParams &current_bufparam = params->buffer_params[state->current_buffer];
+        if (!current_bufparam.buffer && state->bytes_consumed_since_key_on != 0) {
+            if (!data.invoke_callback(kern, mem, thread_id, SCE_NGS_AT9_END_OF_DATA, 0, 0, scheduler_lock, voice_lock))
+                return false;
+            is_finished = true;
+            break;
+        }
         // Wait for publication without wrapping an empty buffer or ending its chain.
         if (!current_bufparam.buffer || current_bufparam.bytes_count <= 0)
             break;

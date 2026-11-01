@@ -48,6 +48,7 @@ static constexpr size_t TextureCacheSize = 1024;
 typedef std::array<uint32_t, 4> TextureGxmDataRepr;
 struct TextureCacheInfo {
     uint64_t hash = 0;
+    uint64_t palette_hash = 0;
 #ifdef __SWITCH__
     // Scene epoch of the last hash verification; see TextureCache::memo_scene.
     uint64_t last_hashed_scene = 0;

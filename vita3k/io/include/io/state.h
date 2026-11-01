@@ -126,6 +126,7 @@ struct IOState {
     struct DevicePaths {
         std::string app0;
         std::string savedata0;
+        std::shared_ptr<const std::string> savedata1;
         std::string addcont0;
         std::string memory0;
         std::string cache0;

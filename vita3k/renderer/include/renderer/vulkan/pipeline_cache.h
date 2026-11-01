@@ -54,6 +54,7 @@ struct VKContext;
 struct CompileRequest;
 struct PipelineFragmentProgram;
 struct PipelineVertexProgram;
+struct VertexInputLayout;
 
 using PipelineCompileQueue = moodycamel::BlockingConcurrentQueue<CompileRequest *>;
 
@@ -113,7 +114,6 @@ private:
 
     vk::ShaderModule load_shader_module(const Sha256Hash &hash, const SceGxmProgram *program = nullptr, const shader::Hints *hints = nullptr, bool maskupdate = false);
     vk::PipelineShaderStageCreateInfo retrieve_shader(const SceGxmProgram *program, const Sha256Hash &hash, bool is_vertex, bool maskupdate, MemState &mem, const shader::Hints &hints, bool is_srgb = false, bool has_casts = false);
-    bool needs_attribute_bindings(const PipelineVertexProgram &vertex_program) const;
     vk::PipelineVertexInputStateCreateInfo get_vertex_input_state(const PipelineVertexProgram &vertex_program, MemState &mem);
 
     // queue containing request sent by the main thread to the compile threads
@@ -157,7 +157,7 @@ public:
     }
     vk::RenderPass retrieve_mask_render_pass();
     vk::Pipeline retrieve_pipeline(VKContext &context, SceGxmPrimitiveType &type, bool consider_for_async, MemState &mem);
-    bool needs_attribute_bindings(const SceGxmVertexProgram &vertex_program) const;
+    const VertexInputLayout &vertex_input_layout(const SceGxmVertexProgram &vertex_program) const;
 
     vk::ShaderModule precompile_shader(const Sha256Hash &hash);
 

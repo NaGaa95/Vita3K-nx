@@ -161,6 +161,18 @@ bool USSETranslatorVisitor::vmov(
         return false;
     }
 
+    const auto holds_raw_lanes = [](RegisterBank bank) {
+        return bank == RegisterBank::TEMP || bank == RegisterBank::PRIMATTR || bank == RegisterBank::SECATTR || bank == RegisterBank::OUTPUT
+            || bank == RegisterBank::INDEXED1 || bank == RegisterBank::INDEXED2;
+    };
+    bool raw_f16_lanes = move_data_type == DataType::F16 && (!is_conditional || compare_op != spv::OpAny)
+        && holds_raw_lanes(inst.opr.dest.bank) && holds_raw_lanes(inst.opr.src1.bank)
+        && (!is_conditional || holds_raw_lanes(inst.opr.src2.bank));
+    for (int i = 0; i < 4; ++i) {
+        if ((dest_mask & (1 << i)) && static_cast<int>(inst.opr.src1.swizzle[i]) >= static_cast<int>(SwizzleChannel::C_0))
+            raw_f16_lanes = false;
+    }
+
     // Recompile
 
     m_b.setDebugSourceLocation(m_recompiler.cur_pc, nullptr);
@@ -201,8 +213,14 @@ bool USSETranslatorVisitor::vmov(
     LOG_DISASM("{}", disasm_str);
 
     spv::Id source_to_compare_with_0 = spv::NoResult;
+    Operand move_src1 = inst.opr.src1;
+    Operand move_src2 = inst.opr.src2;
+    if (raw_f16_lanes) {
+        move_src1.type = DataType::UINT16;
+        move_src2.type = DataType::UINT16;
+    }
     m_raw_move = !is_conditional;
-    spv::Id source_1 = load(inst.opr.src1, dest_mask, src1_repeat_offset);
+    spv::Id source_1 = load(move_src1, dest_mask, src1_repeat_offset);
     m_raw_move = false;
     spv::Id source_2 = spv::NoResult;
     spv::Id result = spv::NoResult;
@@ -214,7 +232,7 @@ bool USSETranslatorVisitor::vmov(
 
     if (is_conditional) {
         source_to_compare_with_0 = load(inst.opr.src0, dest_mask, src0_repeat_offset);
-        source_2 = load(inst.opr.src2, dest_mask, src2_repeat_offset);
+        source_2 = load(move_src2, dest_mask, src2_repeat_offset);
         spv::Id result_type = m_b.getTypeId(source_2);
         spv::Id v0_comp_type = is_test_unsigned ? m_b.makeUintType(32) : (is_test_signed ? m_b.makeIntType(32) : m_b.makeFloatType(32));
         spv::Id v0_type = utils::make_vector_or_scalar_type(m_b, v0_comp_type, m_b.getNumComponents(source_2));
@@ -303,7 +321,9 @@ bool USSETranslatorVisitor::vmov(
                 source_formats[i] = it->second;
         }
     }
+    m_store_raw_f16_lanes = raw_f16_lanes;
     store(inst.opr.dest, result, dest_mask, dest_repeat_offset);
+    m_store_raw_f16_lanes = false;
     if (copy_words && inst.opr.dest.bank != RegisterBank::FPINTERNAL) {
         for (int i = 0; i < 4; ++i) {
             if (!(dest_mask & (1 << i)))
@@ -315,9 +335,7 @@ bool USSETranslatorVisitor::vmov(
     // Moves do not establish the output's numeric type.
     if (!m_second_program && inst.opr.dest.bank == RegisterBank::OUTPUT && inst.opr.dest.num + dest_repeat_offset == 0 && (dest_mask & 1)) {
         const auto &format = source_formats[0];
-        m_output_written_declared = copy_words && format.bytes == 0xF
-            && ((format.type == DataType::F16 && m_program.get_fragment_output_type() == SCE_GXM_PARAMETER_TYPE_F16)
-                || (format.type == DataType::F32 && m_program.get_fragment_output_type() == SCE_GXM_PARAMETER_TYPE_F32));
+        m_output_written_declared = copy_words && format.bytes == 0xF && is_declared_output_type(format.type);
     }
 
     END_REPEAT()

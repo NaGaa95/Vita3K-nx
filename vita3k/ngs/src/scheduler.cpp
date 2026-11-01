@@ -275,7 +275,8 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
         voice->frame_count++;
     }
 
-    while (!operations_pending.empty()) {
+    const size_t pending_count = operations_pending.size();
+    for (size_t i = 0; i < pending_count && !operations_pending.empty(); ++i) {
         const OperationPending op = operations_pending.front();
         operations_pending.pop();
 
@@ -283,7 +284,20 @@ void VoiceScheduler::update(KernelState &kern, const MemState &mem, const SceUID
         case PendingType::ReleaseRack: {
             const SceNgsCallbackInfo info = op.release_data.rack->release_callback_info(mem);
             release_rack(*op.release_data.state, mem, op.system, op.release_data.rack);
+            scheduler_lock.unlock();
             invoke_callback(kern, mem, thread_id, Ptr<void>(op.release_data.callback), info);
+            scheduler_lock.lock();
+            break;
+        }
+        case PendingType::VoiceFinished: {
+            Voice *voice = op.finished_data.voice;
+            if (voice->state != VOICE_STATE_AVAILABLE || voice->state_generation != op.finished_data.generation || !voice->finished_callback)
+                break;
+            const auto callback = voice->finished_callback;
+            const SceNgsCallbackInfo info{ Ptr<void>(voice, mem), Ptr<void>(voice->rack, mem), 0, 0, 0, {}, voice->finished_callback_user_data };
+            scheduler_lock.unlock();
+            invoke_callback(kern, mem, thread_id, callback, info);
+            scheduler_lock.lock();
             break;
         }
         }

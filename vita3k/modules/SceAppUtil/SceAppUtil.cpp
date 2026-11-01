@@ -401,9 +401,42 @@ EXPORT(int, sceAppUtilSaveDataGetQuota, SceSize *quotaSizeKiB, SceSize *usedSize
     return 0;
 }
 
-EXPORT(int, sceAppUtilSaveDataMount) {
-    TRACY_FUNC(sceAppUtilSaveDataMount);
-    return UNIMPLEMENTED();
+EXPORT(SceInt32, sceAppUtilSaveDataMount, Ptr<const SceAppUtilTitleId> titleId, Ptr<const SceAppUtilPassCode> passCode) {
+    TRACY_FUNC(sceAppUtilSaveDataMount, titleId, passCode);
+    if (!titleId || !passCode
+        || !is_valid_addr_range_size(emuenv.mem, titleId.address(), sizeof(SceAppUtilTitleId))
+        || !is_valid_addr_range_size(emuenv.mem, passCode.address(), sizeof(SceAppUtilPassCode)))
+        return RET_ERROR(SCE_APPUTIL_ERROR_PARAMETER);
+
+    const auto &data = titleId.get(emuenv.mem)->data;
+    if (data[9] != '\0' || !std::all_of(data, data + 9, [](char c) {
+            return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+        }))
+        return RET_ERROR(SCE_APPUTIL_ERROR_PARAMETER);
+
+    const std::string title_id(reinterpret_cast<const char *>(data), 9);
+    bool listed = false;
+    for (int i = 1; i <= 7 && !listed; ++i) {
+        std::string listed_id;
+        if (sfo::get_data_by_key(listed_id, emuenv.sfo_handle, fmt::format("INSTALL_DIR_SAVEDATA_ADD_{}", i))
+            || sfo::get_data_by_key(listed_id, emuenv.sfo_handle, fmt::format("INSTALL_DIR_SAVEDATA_ADD{}", i)))
+            listed = listed_id == title_id;
+    }
+    if (!listed)
+        return RET_ERROR(SCE_APPUTIL_ERROR_PARAMETER);
+    if (std::atomic_load(&emuenv.io.device_paths.savedata1))
+        return RET_ERROR(SCE_APPUTIL_ERROR_BUSY);
+
+    const std::string savedata_path = "user/" + emuenv.io.user_id + "/savedata/" + title_id;
+    std::error_code ec;
+    if (!fs::is_directory(emuenv.vita_fs_path / "ux0" / savedata_path, ec))
+        return RET_ERROR(SCE_ERROR_ERRNO_ENOENT);
+
+    std::shared_ptr<const std::string> expected;
+    const auto mounted = std::make_shared<const std::string>(savedata_path);
+    if (!std::atomic_compare_exchange_strong(&emuenv.io.device_paths.savedata1, &expected, mounted))
+        return RET_ERROR(SCE_APPUTIL_ERROR_BUSY);
+    return 0;
 }
 
 EXPORT(int, sceAppUtilSaveDataSlotCreate, unsigned int slotId, SceAppUtilSaveDataSlotParam *param, SceAppUtilMountPoint *mountPoint) {
@@ -497,9 +530,11 @@ EXPORT(SceInt32, sceAppUtilSaveDataSlotSetParam, SceAppUtilSaveDataSlotId slotId
     return 0;
 }
 
-EXPORT(int, sceAppUtilSaveDataUmount) {
+EXPORT(SceInt32, sceAppUtilSaveDataUmount) {
     TRACY_FUNC(sceAppUtilSaveDataUmount);
-    return UNIMPLEMENTED();
+    if (!std::atomic_exchange(&emuenv.io.device_paths.savedata1, std::shared_ptr<const std::string>{}))
+        return RET_ERROR(SCE_APPUTIL_ERROR_NOT_MOUNTED);
+    return 0;
 }
 
 static SceInt32 SafeMemory(EmuEnvState &emuenv, void *buf, SceSize bufSize, SceOff offset, const char *export_name, bool save) {

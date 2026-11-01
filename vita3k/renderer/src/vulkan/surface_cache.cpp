@@ -1041,7 +1041,8 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
                         use_alt_gamma ? cast_sampled_format : casted->texture.format,
                         is_typeless_cast && !info.has_phase_view,
                         cast_phase_hi,
-                        raw_bits_cast
+                        raw_bits_cast,
+                        is_typeless_cast && info.has_phase_view
                     };
                 }
 
@@ -1321,7 +1322,8 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
             use_alt_gamma ? cast_sampled_format : casted->texture.format,
             is_typeless_cast && !info.has_phase_view,
             cast_phase_hi,
-            raw_bits_cast
+            raw_bits_cast,
+            is_typeless_cast && info.has_phase_view
         };
     } else {
         // the renderpass external dependencies should take care of the barrier

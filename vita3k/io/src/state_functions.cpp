@@ -59,15 +59,12 @@ SceOff FileStats::read(void *input_data, const int element_size, const SceSize e
     }
 #endif
 
-    // we are filling this buffer this data, why would we have to set some parts to 0 before ?
-    // that's because host io does not work well with memory trapping and read-only buffer
-    // so set 1 byte to 0 in all pages to trigger all possible pagefaults in this range
-    // todo: call a mem function to check this instead
+    // Trigger write protection without changing bytes beyond a short read.
     const size_t requested_bytes = static_cast<size_t>(element_size) * element_count;
     volatile uint8_t *input_addr = reinterpret_cast<volatile uint8_t *>(input_data);
     for (size_t i = 0; i < requested_bytes; i += page_size)
-        input_addr[i] = 0;
-    input_addr[requested_bytes - 1] = 0;
+        input_addr[i] = input_addr[i];
+    input_addr[requested_bytes - 1] = input_addr[requested_bytes - 1];
 
 #ifdef __SWITCH__
     const auto bytes = shared_file->read_at(input_data, requested_bytes, file_offset);

@@ -185,6 +185,12 @@ bool PlayerModule::process(KernelState &kern, const MemState &mem, const SceUID 
             finished = true;
             break;
         }
+        if (!params->buffer_params[state->current_buffer].buffer && state->bytes_consumed_since_key_on != 0) {
+            if (!data.invoke_callback(kern, mem, thread_id, SCE_NGS_PLAYER_END_OF_DATA, 0, 0, scheduler_lock, voice_lock))
+                return false;
+            finished = true;
+            break;
+        }
         if (!params->buffer_params[state->current_buffer].buffer
             || (params->buffer_params[state->current_buffer].bytes_count == 0)) {
             if (state->current_buffer > -1) {
