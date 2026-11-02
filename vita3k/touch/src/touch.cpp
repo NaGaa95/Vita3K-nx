@@ -92,39 +92,44 @@ static SceTouchData recover_touchpad_events(const EmuEnvState &emuenv, const int
 }
 
 #ifdef __SWITCH__
-// Sony's rear-panel convention for the pad buttons the Vita lacks: L2/R2 on the
-// top quadrants, L3/R3 on the bottom. Panel space is x 0..1919, y 108..889.
-static void apply_rear_trigger_touch(TouchState &touch, const uint64_t timestamp) {
-    SceTouchData &data = touch.touch_buffers[(touch.touch_buffer_idx + 1) % MAX_TOUCH_BUFFER_SAVED][SCE_TOUCH_PORT_BACK];
-    constexpr int16_t quadrant_x[4] = { 480, 1440, 480, 1440 };
-    constexpr int16_t quadrant_y[4] = { 300, 300, 695, 695 };
+static int allocate_physical_touch_id(TouchState &touch) {
+    const auto in_use = [&] {
+        return std::any_of(touch.finger_buffer, touch.finger_buffer + touch.finger_count,
+                   [&](const auto &contact) { return contact.touchID == touch.next_touch_id; })
+            || std::any_of(touch.touchpad_buffer, touch.touchpad_buffer + touch.touchpad_finger_count,
+                [&](const auto &contact) { return contact.which == touch.next_touch_id; });
+    };
+    while (in_use())
+        touch.next_touch_id = (touch.next_touch_id + 1) % 64;
+    const int id = touch.next_touch_id;
+    touch.next_touch_id = (id + 1) % 64;
+    return id;
+}
 
-    for (int quadrant = 0; quadrant < 4; quadrant++) {
-        if (!touch.rear_touch_held[quadrant]) {
-            touch.rear_touch_id[quadrant] = -1;
-            continue;
-        }
-
-        if (touch.rear_touch_id[quadrant] < 0) {
-            touch.curr_touch_id[SCE_TOUCH_PORT_BACK]++;
-            touch.curr_touch_id[SCE_TOUCH_PORT_BACK] %= 128;
-            touch.rear_touch_id[quadrant] = touch.curr_touch_id[SCE_TOUCH_PORT_BACK];
-        }
-
-        if (data.reportNum >= SCE_TOUCH_MAX_REPORT)
-            continue;
-
-        // Reports persist between frames on this path; write every field.
-        SceTouchReport &report = data.report[data.reportNum];
-        report = SceTouchReport{};
-        report.x = quadrant_x[quadrant];
-        report.y = quadrant_y[quadrant];
-        report.id = static_cast<SceUInt8>(touch.rear_touch_id[quadrant]);
-        report.force = 128;
-        ++data.reportNum;
+static void apply_button_touch(EmuEnvState &emuenv) {
+    auto &touch = emuenv.touch;
+    SceTouchData *buffers = touch.touch_buffers[(touch.touch_buffer_idx + 1) % MAX_TOUCH_BUFFER_SAVED];
+    const bool blocked = emuenv.drop_inputs || emuenv.ctrl.overlay_input_intercepted.load(std::memory_order_relaxed)
+        || is_common_dialog_running(emuenv);
+    uint8_t sampled = 0;
+    for (int port = 0; port < 2; ++port) {
+        if (touch.touch_mode[port] == SCE_TOUCH_SAMPLING_STATE_START && !blocked)
+            sampled |= 1u << port;
     }
-
-    data.timeStamp = timestamp;
+    touch.button_touch_contacts.update(touch.button_touch_bindings,
+        touch.button_touch_held.load(std::memory_order_relaxed), sampled,
+        [&](const touch_mapping::Binding &binding, const uint8_t id) {
+            auto &data = buffers[static_cast<unsigned>(binding.panel)];
+            if (data.reportNum >= SCE_TOUCH_MAX_REPORT)
+                return false;
+            auto &report = data.report[data.reportNum++];
+            report = SceTouchReport{};
+            report.x = static_cast<SceInt16>(binding.x);
+            report.y = static_cast<SceInt16>(binding.y);
+            report.id = id;
+            report.force = touch.force_touch_enabled[static_cast<unsigned>(binding.panel)] ? 128 : 0;
+            return true;
+        });
 }
 #endif
 
@@ -175,7 +180,11 @@ void touch_vsync_update(EmuEnvState &emuenv) {
                 if (!touch.is_touched[port]) {
                     touch.curr_touch_id[port]++;
                     // the touch id must be between 0 and 127
+#ifdef __SWITCH__
+                    touch.curr_touch_id[port] %= 63;
+#else
                     touch.curr_touch_id[port] %= 128;
+#endif
                     touch.is_touched[port] = true;
                 }
 
@@ -224,7 +233,7 @@ void touch_vsync_update(EmuEnvState &emuenv) {
     }
 
 #ifdef __SWITCH__
-    apply_rear_trigger_touch(touch, timestamp);
+    apply_button_touch(emuenv);
 #endif
 
     touch.touch_buffer_idx++;
@@ -256,8 +265,12 @@ int handle_touch_event(TouchState &state, SDL_TouchFingerEvent &finger) {
             state.finger_count = 0;
 
         state.finger_buffer[state.finger_count] = finger;
+#ifdef __SWITCH__
+        state.finger_buffer[state.finger_count].touchID = allocate_physical_touch_id(state);
+#else
         state.finger_buffer[state.finger_count].touchID = state.next_touch_id;
         state.next_touch_id = (state.next_touch_id + 1) % 128;
+#endif
         state.finger_count++;
         break;
     }
@@ -301,8 +314,12 @@ int handle_touchpad_event(TouchState &state, SDL_GamepadTouchpadEvent &touchpad)
             state.touchpad_finger_count = 0;
 
         state.touchpad_buffer[state.touchpad_finger_count] = touchpad;
+#ifdef __SWITCH__
+        state.touchpad_buffer[state.touchpad_finger_count].which = allocate_physical_touch_id(state);
+#else
         state.touchpad_buffer[state.touchpad_finger_count].which = state.next_touch_id;
         state.next_touch_id = (state.next_touch_id + 1) % 128;
+#endif
         state.touchpad_finger_count++;
         break;
     case SDL_EVENT_GAMEPAD_TOUCHPAD_UP:

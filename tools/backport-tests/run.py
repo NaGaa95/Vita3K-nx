@@ -63,7 +63,7 @@ def main():
                 root / "external/fmt/include", root / "external/spdlog/include",
                 root / "external/VulkanMemoryAllocator-Hpp/Vulkan-Headers/include"]
     includes += [root / "vita3k" / module / "include" for module in
-                 ("shader", "gxm", "renderer", "mem", "util", "kernel", "features", "module", "cpu", "audio", "np", "rtc", "io", "emuenv", "ngs")]
+                 ("shader", "gxm", "renderer", "mem", "util", "kernel", "features", "module", "cpu", "audio", "np", "rtc", "io", "emuenv", "ngs", "touch")]
     common = [args.cxx, "-std=c++23", "-O1", "-g", "-ffunction-sections", "-fdata-sections", "-include", "algorithm",
               "-DFMT_HEADER_ONLY", "-DSPDLOG_FMT_EXTERNAL", "-Wno-deprecated-declarations", "-pthread"]
     common += ["-I" + str(path) for path in includes]
@@ -81,6 +81,8 @@ def main():
         command = common + [str(fixtures / (name + ".cpp"))] + [str(root / path) for path in sources]
         subprocess.run(command + ["-Wl,--gc-sections", "-o", str(executable)], check=True)
         subprocess.run([str(executable), str(output)], check=True)
+
+    run_fixture("touch_mapping", [])
 
     (output / "ngs_lifecycle.inc").write_text("namespace ngs {\n"
         + block(read("vita3k/ngs/src/ngs.cpp"), "void Voice::transition(") + "\n"

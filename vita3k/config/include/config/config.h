@@ -217,7 +217,8 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(int, "preempt-on-wake-us", 1000, preempt_on_wake_us)                                          \
     code(int, "guest-cores", 3, guest_cores)                                                           \
     code(std::string, "switch-rear-touch", "zl", switch_rear_touch)                                   \
-    code(bool, "switch-rear-touch-triggers", true, switch_rear_touch_triggers)                        \
+    code(std::string, "switch-touch-mode", "rear", switch_touch_mode)                               \
+    code(std::string, "switch-touch-bindings", "", switch_touch_bindings)                            \
     code(std::string, "switch-button-a", "circle", switch_button_a)                                   \
     code(std::string, "switch-button-b", "cross", switch_button_b)                                    \
     code(std::string, "switch-button-x", "triangle", switch_button_x)                                 \

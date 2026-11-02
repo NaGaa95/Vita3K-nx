@@ -115,6 +115,10 @@ static void update_members(Config &self, const YAML::Node &p_yaml_node) {
     CONFIG_LIST(UPDATE_MEMBERS)
 #undef UPDATE_MEMBERS
 
+    if (!p_yaml_node["switch-touch-mode"].IsDefined() && p_yaml_node["switch-rear-touch-triggers"].IsDefined()) {
+        self.switch_touch_mode = p_yaml_node["switch-rear-touch-triggers"].as<bool>() ? "rear" : "off";
+    }
+
     if (!p_yaml_node["check-for-updates-mode"].IsDefined() && p_yaml_node["check-for-updates"].IsDefined()) {
         self.check_for_updates_mode = p_yaml_node["check-for-updates"].as<bool>()
             ? static_cast<int>(UPDATE_STARTUP_PROMPT)

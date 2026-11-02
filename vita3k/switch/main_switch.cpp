@@ -780,6 +780,23 @@ struct SwitchControllerStatus {
 constexpr u64 VIRTUAL_MOUSE_CLICK_BUTTONS =
     HidNpadButton_A | HidNpadButton_B | HidNpadButton_ZR;
 
+static constexpr std::array<u64, static_cast<size_t>(touch_mapping::Button::Count)> TOUCH_BUTTONS = {
+    0, HidNpadButton_A, HidNpadButton_B, HidNpadButton_X, HidNpadButton_Y,
+    HidNpadButton_L, HidNpadButton_R, HidNpadButton_ZL, HidNpadButton_ZR,
+    HidNpadButton_StickL, HidNpadButton_StickR, HidNpadButton_Up, HidNpadButton_Down,
+    HidNpadButton_Left, HidNpadButton_Right, HidNpadButton_Plus, HidNpadButton_Minus
+};
+
+static void switch_configure_touch(EmuEnvState &emuenv) {
+    const auto mode = touch_mapping::parse_mode(emuenv.cfg.switch_touch_mode);
+    auto &touch = emuenv.touch;
+    touch.button_touch_rear_preset = mode == touch_mapping::Mode::RearPreset && !emuenv.cfg.current_config.pstv_mode;
+    touch.button_touch_bindings = mode == touch_mapping::Mode::Custom
+        ? touch_mapping::parse_bindings(emuenv.cfg.switch_touch_bindings, emuenv.cfg.switch_swap_shoulders)
+        : touch.button_touch_rear_preset ? touch_mapping::rear_preset(emuenv.cfg.switch_swap_shoulders)
+                                       : touch_mapping::Bindings{};
+}
+
 static SwitchControllerFrame switch_poll_controller(EmuEnvState &emuenv, PadState &pad,
     SwitchSixAxis &six_axis, SwitchControllerStatus &status, bool intercepted,
     VirtualMouseState &vmouse) {
@@ -809,7 +826,7 @@ static SwitchControllerFrame switch_poll_controller(EmuEnvState &emuenv, PadStat
         clear_switch_controller_input(emuenv);
         emuenv.touch.touchscreen_port = SCE_TOUCH_PORT_FRONT;
         emuenv.touch.touchscreen_both = false;
-        std::fill_n(emuenv.touch.rear_touch_held, 4, false);
+        emuenv.touch.button_touch_held.store(0, std::memory_order_relaxed);
         if (!frame.connected)
             emuenv.ctrl.has_motion_support = false;
         return frame;
@@ -844,6 +861,10 @@ static SwitchControllerFrame switch_poll_controller(EmuEnvState &emuenv, PadStat
         // is zeroed after it so the guest sees a centred stick.
         held &= ~VIRTUAL_MOUSE_CLICK_BUTTONS;
     }
+
+    const auto touch_presses = touch_mapping::pressed_bindings(emuenv.touch.button_touch_bindings, held, TOUCH_BUTTONS);
+    emuenv.touch.button_touch_held.store(touch_presses.slots, std::memory_order_relaxed);
+    held &= ~touch_presses.consumed;
 
     uint32_t buttons = 0;
     uint32_t buttons_ext = 0;
@@ -888,16 +909,7 @@ static SwitchControllerFrame switch_poll_controller(EmuEnvState &emuenv, PadStat
     set_base(nx_shoulder_r, SCE_CTRL_R);
     set_ext(nx_shoulder_l, SCE_CTRL_L1);
     set_ext(nx_shoulder_r, SCE_CTRL_R1);
-    // A handheld Vita has a rear panel and no L2/R2/L3/R3; a PS TV has those
-    // four buttons and no rear panel. The mapping follows the emulated hardware:
-    // on PS TV the buttons go to the pad, otherwise they are rear-panel
-    // quadrants and claim those bits whole so no press is delivered twice.
-    const bool rear_triggers = emuenv.cfg.switch_rear_touch_triggers
-        && !emuenv.cfg.current_config.pstv_mode;
-    emuenv.touch.rear_touch_held[0] = rear_triggers && (held & nx_trigger_l);
-    emuenv.touch.rear_touch_held[1] = rear_triggers && (held & nx_trigger_r);
-    emuenv.touch.rear_touch_held[2] = rear_triggers && (held & HidNpadButton_StickL);
-    emuenv.touch.rear_touch_held[3] = rear_triggers && (held & HidNpadButton_StickR);
+    const bool rear_triggers = emuenv.touch.button_touch_rear_preset;
 
     const bool rear_zl = !rear_triggers && emuenv.cfg.switch_rear_touch == "zl" && (held & nx_trigger_l);
     const bool rear_zr = !rear_triggers && emuenv.cfg.switch_rear_touch == "zr" && (held & nx_trigger_r);
@@ -1534,6 +1546,8 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
 
         if (emuenv->backend_renderer == renderer::Backend::Vulkan && !emuenv->vulkan_device_info)
             emuenv->vulkan_device_info = std::make_unique<renderer::VulkanDeviceInfo>(renderer::enumerate_vulkan_devices());
+
+        switch_configure_touch(*emuenv);
 
         if (!frame_host.initialize_for_backend(
                 emuenv->backend_renderer, emuenv->cfg.current_config.backend_renderer,

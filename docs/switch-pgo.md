@@ -14,6 +14,5 @@ different compiler or a non-Release build. `VITA3K_SWITCH_PGO_DIR` can point
 to an unpacked replacement profile set with `profiles.json` and `data/`.
 
 Archive integrity, compiler version and individual profile hashes are
-checked during configuration. Same-path builds reject changed function
-coverage. Relocated checkouts warn and reuse compatible profiles; GCC leaves
-unmatched functions normally optimized.
+checked during configuration. GCC warns about changed function coverage and
+reuses compatible profiles, leaving unmatched functions normally optimized.

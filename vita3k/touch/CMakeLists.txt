@@ -1,6 +1,7 @@
 add_library(
 	touch
 	STATIC
+	include/touch/controller_mapping.h
 	include/touch/functions.h
 	include/touch/state.h
 	include/touch/touch.h

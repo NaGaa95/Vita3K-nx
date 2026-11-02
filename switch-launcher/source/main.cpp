@@ -48,6 +48,7 @@
 #include "localization.h"
 #include "storage.h"
 #include "ui_audio.h"
+#include <touch/controller_mapping.h>
 
 // ---------------------------------------------------------------------------
 // paths
@@ -181,6 +182,12 @@ static void storeLoad(Store &s, const char *path) {
     if (c == EOF) break;
   }
   fclose(f);
+  const char *legacyTouch=storeGet(s,"switch-rear-touch-triggers",nullptr);
+  if(legacyTouch){
+    if(!storeGet(s,"switch-touch-mode",nullptr))
+      storeSet(s,"switch-touch-mode",!strcmp(legacyTouch,"true")?"rear":"off");
+    storeRemove(s,"switch-rear-touch-triggers");
+  }
 }
 
 static bool queryRegularFile(const std::string &path, bool &exists) {
@@ -335,6 +342,7 @@ static const Choice C_aniso[]    = { {"Off","1"}, {"2x","2"}, {"4x","4"}, {"8x",
 static const Choice C_memmap[]   = { {"External host","external-host"}, {"Double buffer","double-buffer"}, {"Disabled","disabled"} };
 static const Choice C_analog[]   = { {"0.5x","0.5"}, {"1.0x","1.0"}, {"1.5x","1.5"}, {"2.0x","2.0"} };
 static const Choice C_reartouch[]= { {"Off","off"}, {"ZL + touchscreen","zl"}, {"ZR + touchscreen","zr"}, {"Front and rear together","both"} };
+static const Choice C_touchMode[]= { {"Off","off"}, {"Rear preset","rear"}, {"Custom","custom"} };
 // Same values, named for the buttons left once L/R and ZL/ZR are swapped.
 static const Choice C_reartouchSwap[]= { {"Off","off"}, {"L + touchscreen","zl"}, {"R + touchscreen","zr"}, {"Front and rear together","both"} };
 
@@ -374,7 +382,7 @@ static const Choice C_perfpos[] = {
   {"Bottom left","3"}, {"Bottom center","4"}, {"Bottom right","5"},
 };
 
-enum { SCR_FRAMEGEN, SCR_EMULATION, SCR_GRAPHICS, SCR_AUDIO, SCR_SYSTEM, SCR_NETWORK, SCR_CONTROLLER, SCR_COUNT };
+enum { SCR_FRAMEGEN, SCR_EMULATION, SCR_GRAPHICS, SCR_AUDIO, SCR_SYSTEM, SCR_NETWORK, SCR_CONTROLLER, SCR_TOUCH, SCR_COUNT };
 
 static const Opt S_framegen[] = {
   O_CHOICE("LSFG 2x (Vulkan only)", "switch-lsfg-enabled", C_bool, "false"),
@@ -454,13 +462,18 @@ static const Opt S_controller[] = {
   O_CHOICE("Stick sensitivity",   "controller-analog-multiplier", C_analog,    "1.0"),
   O_RANGE ("Stick deadzone (%)",  "switch-stick-deadzone",        0, 40, 2,    "15"),
   O_CHOICE("Swap L/R with ZL/ZR", "switch-swap-shoulders",         C_bool,      "false"),
-  O_CHOICE("Rear touch modifier", "switch-rear-touch",            C_reartouch, "zl"),
-  O_CHOICE("Rear touch buttons",  "switch-rear-touch-triggers",   C_bool,      "true"),
+  O_SUB("Touch controls", SCR_TOUCH),
   O_CHOICE("Switch A maps to",    "switch-button-a",              C_vitaface,  "circle"),
   O_CHOICE("Switch B maps to",    "switch-button-b",              C_vitaface,  "cross"),
   O_CHOICE("Switch X maps to",    "switch-button-x",              C_vitaface,  "triangle"),
   O_CHOICE("Switch Y maps to",    "switch-button-y",              C_vitaface,  "square"),
 };
+static const Opt S_touch[] = {
+  O_CHOICE("Button mapping", "switch-touch-mode", C_touchMode, "rear"),
+  O_TEXT("Edit touch points", "switch-touch-bindings", ""),
+  O_CHOICE("Rear touch modifier", "switch-rear-touch", C_reartouch, "zl"),
+};
+
 // Launcher-only preferences. These keys never enter Vita3K's config.yml.
 static const Opt S_launcher[] = {
   O_CHOICE("Language",          "Wrapper/Language",       C_launcherLanguage, "system"),
@@ -486,6 +499,7 @@ static const Screen g_screens[SCR_COUNT] = {
   { "System",            S_system,     (int)(sizeof(S_system)/sizeof(Opt)),     false },
   { "Network",           S_network,    (int)(sizeof(S_network)/sizeof(Opt)),    false },
   { "Controller",        S_controller, (int)(sizeof(S_controller)/sizeof(Opt)), false },
+  { "Touch controls",    S_touch,      (int)(sizeof(S_touch)/sizeof(Opt)),      false },
 };
 
 // commit every managed option of the active store (so what was shown persists)
@@ -539,6 +553,11 @@ static bool writeConfigYml(const std::vector<KV> &eff) {
   std::string modules;
   for (auto &e : eff) {
     if (e.k == "lle-modules") { modules = e.v; continue; }
+    if (e.k == "switch-touch-bindings") {
+      text += e.k + ": '" + (e.v.empty()?std::string{}:
+        touch_mapping::serialize(touch_mapping::parse_bindings(e.v))) + "'\n";
+      continue;
+    }
     text += e.k + ": " + e.v + "\n";
   }
   // lle-modules has to be a real YAML sequence: yaml-cpp throws on a scalar and
@@ -1648,14 +1667,14 @@ static void waitForNextFrame(bool forceAnimation=false) {
   }
 }
 
-static void navRepeat(){
+static void navRepeat(bool useStick=true){
   if(!g_pad) return;
   const int TH=18000;
   int dir=0;
-  if(SDL_GameControllerGetButton(g_pad,SDL_CONTROLLER_BUTTON_DPAD_UP)   || SDL_GameControllerGetAxis(g_pad,SDL_CONTROLLER_AXIS_LEFTY)<-TH) dir=SDL_CONTROLLER_BUTTON_DPAD_UP;
-  else if(SDL_GameControllerGetButton(g_pad,SDL_CONTROLLER_BUTTON_DPAD_DOWN) || SDL_GameControllerGetAxis(g_pad,SDL_CONTROLLER_AXIS_LEFTY)> TH) dir=SDL_CONTROLLER_BUTTON_DPAD_DOWN;
-  else if(SDL_GameControllerGetButton(g_pad,SDL_CONTROLLER_BUTTON_DPAD_LEFT)  || SDL_GameControllerGetAxis(g_pad,SDL_CONTROLLER_AXIS_LEFTX)<-TH) dir=SDL_CONTROLLER_BUTTON_DPAD_LEFT;
-  else if(SDL_GameControllerGetButton(g_pad,SDL_CONTROLLER_BUTTON_DPAD_RIGHT) || SDL_GameControllerGetAxis(g_pad,SDL_CONTROLLER_AXIS_LEFTX)> TH) dir=SDL_CONTROLLER_BUTTON_DPAD_RIGHT;
+  if(SDL_GameControllerGetButton(g_pad,SDL_CONTROLLER_BUTTON_DPAD_UP)   || (useStick&&SDL_GameControllerGetAxis(g_pad,SDL_CONTROLLER_AXIS_LEFTY)<-TH)) dir=SDL_CONTROLLER_BUTTON_DPAD_UP;
+  else if(SDL_GameControllerGetButton(g_pad,SDL_CONTROLLER_BUTTON_DPAD_DOWN) || (useStick&&SDL_GameControllerGetAxis(g_pad,SDL_CONTROLLER_AXIS_LEFTY)> TH)) dir=SDL_CONTROLLER_BUTTON_DPAD_DOWN;
+  else if(SDL_GameControllerGetButton(g_pad,SDL_CONTROLLER_BUTTON_DPAD_LEFT)  || (useStick&&SDL_GameControllerGetAxis(g_pad,SDL_CONTROLLER_AXIS_LEFTX)<-TH)) dir=SDL_CONTROLLER_BUTTON_DPAD_LEFT;
+  else if(SDL_GameControllerGetButton(g_pad,SDL_CONTROLLER_BUTTON_DPAD_RIGHT) || (useStick&&SDL_GameControllerGetAxis(g_pad,SDL_CONTROLLER_AXIS_LEFTX)> TH)) dir=SDL_CONTROLLER_BUTTON_DPAD_RIGHT;
   Uint32 now=SDL_GetTicks();
   if(dir!=g_navHeld){ g_navHeld=dir; g_navSince=now; g_navLast=now; return; }
   if(!dir) return;
@@ -2436,6 +2455,11 @@ static bool isVulkanOnlyOption(const Opt &o) {
 }
 // a gated option is inactive (greyed, non-adjustable) while its parent is off
 static bool optEnabled(const Opt &o) {
+  if(o.key && !strcmp(o.key,"switch-touch-bindings") &&
+     strcmp(iniGet("switch-touch-mode","rear"),"custom")) return false;
+  if(o.key && !strcmp(o.key,"switch-rear-touch") &&
+     !strcmp(iniGet("switch-touch-mode","rear"),"rear") &&
+     strcmp(iniGet("pstv-mode","false"),"true")) return false;
   if(o.key && !strcmp(o.key,"fsr-sharpness") &&
      strcmp(iniGet("screen-filter","Bilinear"),"FSR")) return false;
   if(o.key && !strcmp(o.key,"spirv-shader") &&
@@ -2470,7 +2494,11 @@ static void optValue(const Opt &o, char *out, int n) {
   else if (o.type==OT_RANGE){ snprintf(out,n,"%s", iniGet(o.key,o.def)); }
   else if (o.type==OT_TEXT){
     const char *v=iniGet(o.key,o.def);
-    if(!strcmp(o.key,"Wrapper/SteamGridDBKey"))
+    if(!strcmp(o.key,"switch-touch-bindings")){
+      const auto bindings=touch_mapping::parse_bindings(v,shouldersSwapped());
+      const int count=(int)std::count_if(bindings.begin(),bindings.end(),[](const auto &b){return b.button!=touch_mapping::Button::None;});
+      snprintf(out,n,"%d / %zu",count,bindings.size());
+    } else if(!strcmp(o.key,"Wrapper/SteamGridDBKey"))
       snprintf(out,n,"%s",LauncherLocalization::Translate(v&&*v?"Configured":"Not configured").data());
     else snprintf(out,n,"%s", (v&&*v)?v:"(none)");
   }
@@ -2577,9 +2605,10 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"switch-gyro-source","Controls","Chooses which detached Joy-Con supplies motion. Falls back to the other connected Joy-Con."},
   {"controller-analog-multiplier","Controls","Scales analog stick movement before it is sent to the emulated Vita."},
   {"switch-stick-deadzone","Controls","Ignores small stick movements to reduce drift. Too high a value reduces fine control."},
-  {"switch-swap-shoulders","Controls","Swaps the Switch shoulder buttons with the triggers, so ZL and ZR act as the Vita L and R. The rear touch options below follow the swap and name whichever pair is left."},
-  {"switch-rear-touch","Controls","Chooses the shoulder-button modifier used with the touchscreen to emulate the Vita rear touch panel. \"Front and rear together\" uses no modifier and reports every touch on both panels at once, for games that ask for the two to be pressed together. Like the other choices here it needs \"Rear touch buttons\" below turned off."},
-  {"switch-rear-touch-triggers","Controls","Puts L2, R2, L3 and R3 on the quadrants of the Vita rear touch panel, where most games expect them: the triggers press the top two, the stick clicks the bottom two. Takes over those four buttons, so the rear touch modifier above is ignored."},
+  {"switch-swap-shoulders","Controls","Swaps L/R with ZL/ZR for Vita buttons, the rear preset and the touch modifier. Custom touch mappings use physical buttons."},
+  {"switch-rear-touch","Touch controls","Routes physical touchscreen input to the rear panel while holding the chosen button, or to both panels together. Not used with the rear preset."},
+  {"switch-touch-mode","Touch controls","Rear preset maps L2/R2 and L3/R3 to the four rear corners. Custom assigns physical buttons to precise front or rear touch points. Mapped buttons replace their normal Vita button input. The rear preset is inactive in PS TV mode."},
+  {"switch-touch-bindings","Touch controls","Configure up to eight touch points. Hold a mapped button to keep touching that position. The same button can press several points, including both panels. Set a point to Unassigned to disable it."},
   {"switch-button-a","Controls","Chooses which Vita face button is produced by Nintendo Switch A."},
   {"switch-button-b","Controls","Chooses which Vita face button is produced by Nintendo Switch B."},
   {"switch-button-x","Controls","Chooses which Vita face button is produced by Nintendo Switch X."},
@@ -3005,6 +3034,175 @@ static void optChoosePopup(const Opt &o) {
   if(idx>=0 && idx<o.nch) iniSet(o.key, o.ch[idx].val);
 }
 
+static const char *const TOUCH_BUTTON_LABELS[] = {
+  "Unassigned", "A", "B", "X", "Y", "L", "R", "ZL", "ZR",
+  "Left stick click", "Right stick click", "D-pad up", "D-pad down", "D-pad left", "D-pad right", "+", "-"
+};
+static_assert(std::size(TOUCH_BUTTON_LABELS)==static_cast<size_t>(touch_mapping::Button::Count));
+
+static void editTouchPoints(const char *ctx){
+  using namespace touch_mapping;
+  Bindings bindings=parse_bindings(iniGet("switch-touch-bindings",""),shouldersSwapped());
+  int selected=0;
+  bool dragging=false;
+  SDL_FingerID dragFinger=0;
+  float remainderX=0.f,remainderY=0.f;
+  Uint32 lastTick=SDL_GetTicks();
+  const FootItem footer[]={{"L/R","Point"},{"D-pad","Move"},{"X","Button"},{"Y","Panel"},
+                           {"+","Reset"},{"A","Save"},{"B","Cancel"}};
+  const int margin=g_launcherPortrait?32:40,gap=24;
+  const int bodyY=topBarH()+24;
+  const int bodyH=SH-bodyY-measureFooter(footer,7).height-44;
+  const SDL_Rect list={margin,bodyY,g_launcherPortrait?SW-2*margin:300,
+    g_launcherPortrait?278:bodyH};
+  const SDL_Rect detail=g_launcherPortrait
+    ? SDL_Rect{margin,list.y+list.h+gap,list.w,bodyH-list.h-gap}
+    : SDL_Rect{list.x+list.w+gap,bodyY,SW-list.x-list.w-gap-margin,bodyH};
+  const int rowH=(list.h-48)/(g_launcherPortrait?4:8);
+  const int columnW=(list.w-16)/(g_launcherPortrait?2:1);
+  const auto rowRect=[&](int i){return SDL_Rect{list.x+8+(g_launcherPortrait?i/4:0)*columnW,
+    list.y+42+(g_launcherPortrait?i%4:i)*rowH,columnW,rowH};};
+  const SDL_Rect buttonField{detail.x+16,detail.y+14,(detail.w-40)/2,58};
+  const SDL_Rect panelField{buttonField.x+buttonField.w+8,buttonField.y,buttonField.w,58};
+  const int previewH=std::min(detail.h-144,(detail.w-48)*1088/1920);
+  const int previewW=previewH*1920/1088;
+  const SDL_Rect preview{detail.x+(detail.w-previewW)/2,detail.y+86,previewW,previewH};
+  const auto contains=[](const SDL_Rect &r,int x,int y){return x>=r.x&&x<r.x+r.w&&y>=r.y&&y<r.y+r.h;};
+  const auto pointPosition=[&](const Binding &b){return SDL_Point{
+    preview.x+b.x*(preview.w-1)/max_x,preview.y+b.y*(preview.h-1)/max_y(Panel::Front)};};
+  const auto setPosition=[&](int x,int y){
+    auto &b=bindings[selected];
+    b.x=std::clamp((int)std::lround((x-preview.x)*(double)max_x/(preview.w-1)),0,max_x);
+    b.y=std::clamp((int)std::lround((y-preview.y)*(double)max_y(Panel::Front)/(preview.h-1)),min_y(b.panel),max_y(b.panel));
+    remainderX=remainderY=0.f;
+  };
+  const auto changePanel=[&]{
+    auto &b=bindings[selected];
+    const int oldMin=min_y(b.panel),oldRange=max_y(b.panel)-oldMin;
+    b.panel=b.panel==Panel::Front?Panel::Rear:Panel::Front;
+    b.y=min_y(b.panel)+(b.y-oldMin)*(max_y(b.panel)-min_y(b.panel))/oldRange;
+    remainderX=remainderY=0.f;
+  };
+  const auto chooseButton=[&]{
+    const int choice=dropdown("Button",TOUCH_BUTTON_LABELS,(int)std::size(TOUCH_BUTTON_LABELS),
+      static_cast<int>(bindings[selected].button));
+    if(choice>=0)bindings[selected].button=static_cast<Button>(choice);
+    lastTick=SDL_GetTicks();g_touch={};beginScreenFx();
+  };
+  g_touch={};beginScreenFx();
+  for(;;){
+    if(!beginUiFrame())return;
+    SDL_Event event;navRepeat(false);
+    while(pollUiEvent(event)){
+      if(event.type==SDL_FINGERDOWN||event.type==SDL_FINGERMOTION||event.type==SDL_FINGERUP){
+        float ux=0.f,uy=0.f;touchUiPoint(event.tfinger.x,event.tfinger.y,ux,uy);
+        const int x=(int)ux,y=(int)uy;
+        if(event.type==SDL_FINGERDOWN&&!dragging&&contains(preview,x,y)){
+          int nearest=-1,distance=24*24;
+          for(int i=0;i<(int)bindings.size();i++){
+            if(bindings[i].button==Button::None||bindings[i].panel!=bindings[selected].panel)continue;
+            const SDL_Point p=pointPosition(bindings[i]);
+            const int d=(x-p.x)*(x-p.x)+(y-p.y)*(y-p.y);
+            if(d<distance){nearest=i;distance=d;}
+          }
+          if(nearest>=0)selected=nearest;
+          dragging=true;dragFinger=event.tfinger.fingerId;g_touch={};setPosition(x,y);continue;
+        }
+        if(dragging&&event.tfinger.fingerId==dragFinger){
+          setPosition(x,y);
+          if(event.type==SDL_FINGERUP)dragging=false;
+          continue;
+        }
+      }
+      int x=0,y=0;
+      if(touchFeed(event,&x,&y)==TOUCH_TAP){
+        if(contains(buttonField,x,y))chooseButton();
+        else if(contains(panelField,x,y))changePanel();
+        else for(int i=0;i<(int)bindings.size();i++)if(contains(rowRect(i),x,y)){
+          selected=i;remainderX=remainderY=0.f;break;
+        }
+        continue;
+      }
+      if(event.type!=SDL_CONTROLLERBUTTONDOWN)continue;
+      auto &b=bindings[selected];
+      switch(event.cbutton.button){
+        case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:selected=(selected+(int)slot_count-1)%(int)slot_count;break;
+        case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:selected=(selected+1)%(int)slot_count;break;
+        case SDL_CONTROLLER_BUTTON_DPAD_LEFT:b.x=std::max(0,b.x-1);break;
+        case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:b.x=std::min(max_x,b.x+1);break;
+        case SDL_CONTROLLER_BUTTON_DPAD_UP:b.y=std::max(min_y(b.panel),b.y-1);break;
+        case SDL_CONTROLLER_BUTTON_DPAD_DOWN:b.y=std::min(max_y(b.panel),b.y+1);break;
+        case BTN_SETTINGS:chooseButton();break;
+        case SDL_CONTROLLER_BUTTON_X:changePanel();break;
+        case SDL_CONTROLLER_BUTTON_START:bindings=rear_preset(shouldersSwapped());break;
+        case BTN_CONFIRM:iniSet("switch-touch-bindings",serialize(bindings).c_str());return;
+        case BTN_CANCEL:return;
+      }
+      remainderX=remainderY=0.f;
+    }
+    const Uint32 now=SDL_GetTicks();
+    const float elapsed=std::min(0.05f,(now-lastTick)/1000.f);lastTick=now;
+    const auto velocity=[](Sint16 axis){const int magnitude=std::abs((int)axis);
+      return magnitude<=8000?0.f:std::copysign((magnitude-8000)/24767.f*1000.f,(float)axis);};
+    const float vx=g_pad?velocity(SDL_GameControllerGetAxis(g_pad,SDL_CONTROLLER_AXIS_LEFTX)):0.f;
+    const float vy=g_pad?velocity(SDL_GameControllerGetAxis(g_pad,SDL_CONTROLLER_AXIS_LEFTY)):0.f;
+    const bool moving=!dragging&&(vx!=0.f||vy!=0.f);
+    if(moving){
+      auto &b=bindings[selected];remainderX+=vx*elapsed;remainderY+=vy*elapsed;
+      const int dx=(int)remainderX,dy=(int)remainderY;remainderX-=dx;remainderY-=dy;
+      b.x=std::clamp(b.x+dx,0,max_x);b.y=std::clamp(b.y+dy,min_y(b.panel),max_y(b.panel));
+    }
+    clearUiBackground();drawLocalizedHeader("Touch points",ctx);
+    glassPanel(list.x,list.y,list.w,list.h);glassPanel(detail.x,detail.y,detail.w,detail.h);
+    drawSectionHeading("Touch points",list.x+20,list.y+10,list.w-40);
+    for(int i=0;i<(int)bindings.size();i++){
+      const SDL_Rect row=rowRect(i);const auto &b=bindings[i];
+      if(i==selected)drawRowHighlight(row.x,row.y,row.w,row.h-2);
+      char label[128];snprintf(label,sizeof(label),"%d   %s",i+1,tr(TOUCH_BUTTON_LABELS[static_cast<size_t>(b.button)]));
+      drawText(g_font_sm,row.x+14,row.y+2,fittedText(g_font_sm,label,row.w-28).c_str(),i==selected?COL_VAL:COL_TXT);
+      if(b.button!=Button::None){
+        snprintf(label,sizeof(label),"%s  %d, %d",tr(b.panel==Panel::Front?"Front touch":"Rear touch"),b.x,b.y);
+        drawText(g_font_caption,row.x+14,row.y+fontHeight(g_font_sm)+2,
+          fittedText(g_font_caption,label,row.w-28).c_str(),COL_DIM);
+      }
+    }
+    const auto &current=bindings[selected];
+    drawButtonPanel(buttonField.x,buttonField.y,buttonField.w,buttonField.h,false);
+    drawButtonPanel(panelField.x,panelField.y,panelField.w,panelField.h,false);
+    drawText(g_font_caption,buttonField.x+12,buttonField.y+5,tr("Button"),COL_DIM);
+    drawText(g_font_sm,buttonField.x+12,buttonField.y+24,
+      fittedText(g_font_sm,tr(TOUCH_BUTTON_LABELS[static_cast<size_t>(current.button)]),buttonField.w-24).c_str(),COL_VAL);
+    drawText(g_font_caption,panelField.x+12,panelField.y+5,tr("Panel"),COL_DIM);
+    drawText(g_font_sm,panelField.x+12,panelField.y+24,tr(current.panel==Panel::Front?"Front touch":"Rear touch"),COL_VAL);
+    roundedPanel(preview.x-2,preview.y-2,preview.w+4,preview.h+4,COL_CARD,COL_DIM,8);
+    if(current.panel==Panel::Rear){
+      const int top=preview.h*min_y(Panel::Rear)/max_y(Panel::Front);
+      const int bottom=preview.h*max_y(Panel::Rear)/max_y(Panel::Front);
+      fillRect(preview.x,preview.y,preview.w,top,{0,0,0,100});
+      fillRect(preview.x,preview.y+bottom,preview.w,preview.h-bottom,{0,0,0,100});
+    }
+    for(int i=1;i<4;i++){
+      fillRect(preview.x+preview.w*i/4,preview.y,1,preview.h,{255,255,255,24});
+      fillRect(preview.x,preview.y+preview.h*i/4,preview.w,1,{255,255,255,24});
+    }
+    const auto drawPoint=[&](int i){
+      const auto &b=bindings[i];
+      if(b.panel!=current.panel||(b.button==Button::None&&i!=selected))return;
+      const SDL_Point p=pointPosition(b);const bool active=i==selected;
+      fillCircle(p.x,p.y,active?15:12,active?COL_SEL:COL_DIM);
+      char label[16];snprintf(label,sizeof(label),"%d",i+1);
+      drawTextC(g_font_caption,p.x,p.y-fontHeight(g_font_caption)/2,label,{8,14,24,255});
+    };
+    for(int i=0;i<(int)bindings.size();i++)if(i!=selected)drawPoint(i);
+    drawPoint(selected);
+    char coordinates[80];snprintf(coordinates,sizeof(coordinates),"X: %d / %d    Y: %d / %d",current.x,max_x,current.y,max_y(current.panel));
+    drawTextC(g_font_sm,detail.x+detail.w/2,preview.y+preview.h+12,coordinates,COL_VAL);
+    drawTextC(g_font_caption,detail.x+detail.w/2,preview.y+preview.h+40,
+      tr("D-pad: 1 pixel / Left stick: move faster"),COL_DIM);
+    drawFooterHints(footer,7,SH-26);drawFadeIn();presentUi();waitForNextFrame(moving);
+  }
+}
+
 static int s_setSel[SCR_COUNT]={0}, s_setTop[SCR_COUNT]={0};   // per-screen position, remembered across re-entry
 static void runSettings(int scr, SDL_GameController *pad, const char *ctx) {
   Screen S=g_screens[scr];
@@ -3069,8 +3267,11 @@ static void runSettings(int scr, SDL_GameController *pad, const char *ctx) {
           if(o.type==OT_SUBMENU){ runSettings(o.sub,pad,ctx); beginScreenFx(); }
           else if(o.type==OT_TEXT){                            // A: edit via on-screen keyboard
             if(optEnabled(o)){
-              char buf[128];
-              if(promptText(o.label, iniGet(o.key,o.def), buf, sizeof(buf))) iniSet(o.key,buf);
+              if(!strcmp(o.key,"switch-touch-bindings"))editTouchPoints(ctx);
+              else {
+                char buf[128];
+                if(promptText(o.label, iniGet(o.key,o.def), buf, sizeof(buf))) iniSet(o.key,buf);
+              }
             }
             beginScreenFx();
           }
@@ -5151,7 +5352,8 @@ static const char *settingsCategoryDescription(int screen){
     case SCR_AUDIO:return "Controls Switch audio output, volume, and Vita NGS support.";
     case SCR_SYSTEM:return "Controls Vita language, formats, PS TV behavior, and logging.";
     case SCR_NETWORK:return "Controls Vita network emulation, PSN state, and ad-hoc configuration.";
-    case SCR_CONTROLLER:return "Controls Switch buttons, sticks, motion, and rear-touch emulation.";
+    case SCR_CONTROLLER:return "Controls Switch buttons, sticks, motion, and touch emulation.";
+    case SCR_TOUCH:return "Map buttons to the front and rear touch panels.";
     default:return "Vita3K configuration category.";
   }
 }

@@ -20,7 +20,7 @@ TARGET		:=	Vita3K
 BUILD		:=	build
 SOURCES		:=	source
 DATA		:=	data
-INCLUDES	:=	include
+INCLUDES	:=	include ../vita3k/touch/include
 ROMFS		:=	romfs		# launcher assets plus the bundled emulator (romfs/emu/Vita3K.nro)
 
 # Pinned USB mass-storage + SMB dependencies are built out-of-tree, but kept
