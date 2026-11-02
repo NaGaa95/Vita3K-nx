@@ -1,0 +1,10 @@
+{
+  "gcc_version": "16.1.0",
+  "source_revision": "569427561ba6ea520e67a72ece47859889f8d59a",
+  "source_root": "C:/Users/PC/Documents/GitHub/Vita3K-nx",
+  "profile_id": "bee03bb66589011047d7ded58b7cbde0f05f757d92b564aa82dfd669ee40010b",
+  "backend": "vulkan",
+  "runs": 5,
+  "objects": 399,
+  "sha256": "721ea54b3ca5b08dbd41508339d4f5ea0f9a00a39bafbe38fcc6e82518b1cbac"
+}

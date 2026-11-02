@@ -564,3 +564,8 @@ if(TRACY_ENABLE_ON_CORE_COMPONENTS)
 	# Enable Tracy profiling on the main compilation target
 	target_link_libraries(vita3k PRIVATE tracy)
 endif()
+
+if(SWITCH)
+	include("${CMAKE_SOURCE_DIR}/cmake/switch_pgo.cmake")
+	vita3k_switch_configure_pgo(vita3k)
+endif()
