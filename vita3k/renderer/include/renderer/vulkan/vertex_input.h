@@ -17,6 +17,8 @@ struct VertexInputLayout {
     std::array<VertexStreamLayout, SCE_GXM_MAX_VERTEX_STREAMS> streams;
     std::vector<vk::VertexInputBindingDescription> bindings;
     std::vector<vk::VertexInputAttributeDescription> attributes;
+    std::vector<vk::VertexInputBindingDescription2EXT> dynamic_bindings;
+    std::vector<vk::VertexInputAttributeDescription2EXT> dynamic_attributes;
     std::vector<uint32_t> attribute_offsets;
     uint32_t used_streams = 0;
     uint32_t stream_count = 0;

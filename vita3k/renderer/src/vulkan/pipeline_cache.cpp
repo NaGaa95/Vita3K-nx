@@ -838,7 +838,7 @@ vk::RenderPass PipelineCache::retrieve_render_pass(vk::Format format, bool depth
 
 static std::shared_ptr<const VertexInputLayout> make_vertex_input_layout(const PipelineVertexProgram &vertex_program,
     bool support_scaled_vertex_attribute, const std::set<vk::Format> &unsupported_rgb_vertex_attribute_formats,
-    uint32_t max_attribute_offset) {
+    uint32_t max_attribute_offset, bool native_unaligned = false) {
     auto layout = std::make_shared<VertexInputLayout>();
     struct Fetch {
         size_t index;
@@ -937,8 +937,11 @@ static std::shared_ptr<const VertexInputLayout> make_vertex_input_layout(const P
             stream.source_record_size = std::max(stream.source_record_size, fetch.source + fetch.source_size);
             const auto &attribute = vertex_program.attributes[fetch.index];
             stream.extended_source |= fetch.source_size > attribute.componentCount * gxm::attribute_format_size(attribute.format);
-            stream.alignment = std::max(stream.alignment, fetch.alignment);
-            stream.repack |= fetch.source % fetch.alignment != 0 || stream.stride % fetch.alignment != 0 || fetch.source_size != fetch.size;
+            if (!native_unaligned) {
+                stream.alignment = std::max(stream.alignment, fetch.alignment);
+                stream.repack |= fetch.source % fetch.alignment != 0 || stream.stride % fetch.alignment != 0;
+            }
+            stream.repack |= fetch.source_size != fetch.size;
         }
 #ifdef __APPLE__
         stream.alignment = std::max(stream.alignment, 4u);
@@ -986,6 +989,16 @@ static std::shared_ptr<const VertexInputLayout> make_vertex_input_layout(const P
         for (uint32_t index = 0; index < layout->stream_count; ++index)
             if (layout->used_streams & (1u << index))
                 add_binding(index, index);
+    if (native_unaligned) {
+        layout->dynamic_bindings.reserve(layout->bindings.size());
+        for (const auto &binding : layout->bindings)
+            layout->dynamic_bindings.push_back(vk::VertexInputBindingDescription2EXT{
+                .binding = binding.binding, .stride = binding.stride, .inputRate = binding.inputRate, .divisor = 1});
+        layout->dynamic_attributes.reserve(layout->attributes.size());
+        for (const auto &attribute : layout->attributes)
+            layout->dynamic_attributes.push_back(vk::VertexInputAttributeDescription2EXT{
+                .location = attribute.location, .binding = attribute.binding, .format = attribute.format, .offset = attribute.offset});
+    }
     return layout;
 }
 
@@ -994,7 +1007,7 @@ const VertexInputLayout &PipelineCache::vertex_input_layout(const SceGxmVertexPr
     if (!cached) {
         const PipelineVertexProgram program{nullptr, vertex_program.streams, vertex_program.attributes, *vertex_program.renderer_data};
         cached = make_vertex_input_layout(program, support_scaled_vertex_attribute, unsupported_rgb_vertex_attribute_formats,
-            state.physical_device_properties.limits.maxVertexInputAttributeOffset);
+            state.physical_device_properties.limits.maxVertexInputAttributeOffset, state.support_native_unaligned_vertex_input);
     }
     return *cached;
 }
@@ -1004,7 +1017,7 @@ vk::PipelineVertexInputStateCreateInfo PipelineCache::get_vertex_input_state(con
     layout = vertex_program.renderer_data.vulkan_vertex_input;
     if (!layout)
         layout = make_vertex_input_layout(vertex_program, support_scaled_vertex_attribute, unsupported_rgb_vertex_attribute_formats,
-            state.physical_device_properties.limits.maxVertexInputAttributeOffset);
+            state.physical_device_properties.limits.maxVertexInputAttributeOffset, state.support_native_unaligned_vertex_input);
     vk::PipelineVertexInputStateCreateInfo input{};
     input.setVertexBindingDescriptions(layout->bindings);
     input.setVertexAttributeDescriptions(layout->attributes);
@@ -1143,19 +1156,21 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
 
     // all of these can be changed at any time using the vita graphics api (like opengl)
     // Because each one can take a lot of different values, it's better to set them as dynamic
-    const std::array dynamic_states = {
+    std::array<vk::DynamicState, 8> dynamic_states = {
         vk::DynamicState::eViewport,
         vk::DynamicState::eScissor,
         vk::DynamicState::eStencilCompareMask,
         vk::DynamicState::eStencilReference,
         vk::DynamicState::eStencilWriteMask,
         vk::DynamicState::eDepthBias,
-        vk::DynamicState::eLineWidth,
     };
+    uint32_t dynamic_count = 6;
+    if (state.support_native_unaligned_vertex_input)
+        dynamic_states[dynamic_count++] = vk::DynamicState::eVertexInputEXT;
+    if (state.physical_device_features.wideLines)
+        dynamic_states[dynamic_count++] = vk::DynamicState::eLineWidth;
     vk::PipelineDynamicStateCreateInfo dynamic_info{};
-    dynamic_info.setDynamicStates(dynamic_states);
-    if (!state.physical_device_features.wideLines)
-        dynamic_info.dynamicStateCount--;
+    dynamic_info.setDynamicStateCount(dynamic_count).setPDynamicStates(dynamic_states.data());
 
     // we still need to specify the viewport and scissor count even though they are dynamic
     vk::PipelineViewportStateCreateInfo viewport{
@@ -1167,7 +1182,7 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         .flags = cache_only ? vk::PipelineCreateFlagBits::eFailOnPipelineCompileRequiredEXT : vk::PipelineCreateFlags{},
         .stageCount = shader_stage_count,
         .pStages = shader_stages,
-        .pVertexInputState = &vertex_input,
+        .pVertexInputState = state.support_native_unaligned_vertex_input ? nullptr : &vertex_input,
         .pInputAssemblyState = &input_assembly,
         .pViewportState = &viewport,
         .pRasterizationState = &rasterizer,

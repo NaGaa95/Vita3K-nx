@@ -52,6 +52,7 @@ struct Viewport {
 };
 
 struct VKState : public renderer::State {
+    bool support_native_unaligned_vertex_input = false;
 #ifdef __SWITCH__
     // A refused host import turns the method off for the session.
     bool switch_external_mapping_broken = false;

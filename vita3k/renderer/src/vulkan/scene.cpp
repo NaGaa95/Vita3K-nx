@@ -563,8 +563,13 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         if (new_pipeline != context.current_pipeline) {
             context.current_pipeline = new_pipeline;
 
-            if (new_pipeline != nullptr)
+            if (new_pipeline != nullptr) {
                 context.render_cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, context.current_pipeline);
+                if (context.state.support_native_unaligned_vertex_input) {
+                    const auto &layout = context.state.pipeline_cache.vertex_input_layout(*context.record.vertex_program.get(mem));
+                    context.render_cmd.setVertexInputEXT(layout.dynamic_bindings, layout.dynamic_attributes);
+                }
+            }
         }
     }
 

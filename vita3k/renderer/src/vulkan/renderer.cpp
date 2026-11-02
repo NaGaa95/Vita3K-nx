@@ -862,6 +862,8 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
         bool support_buffer_device_address = false;
         bool support_external_memory = false;
         bool support_shader_interlock = false;
+        bool support_vertex_input_dynamic_state = false;
+        bool support_legacy_vertex_attributes = false;
 #ifdef __SWITCH__
         bool support_timeline_semaphore = false;
 #endif
@@ -894,6 +896,8 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             { vk::EXTPipelineCreationCacheControlExtensionName, &support_pipeline_creation_cache_control },
             // used for accurate programmable blending on desktop GPUs
             { vk::EXTFragmentShaderInterlockExtensionName, &support_shader_interlock },
+            { VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME, &support_vertex_input_dynamic_state },
+            { VK_EXT_LEGACY_VERTEX_ATTRIBUTES_EXTENSION_NAME, &support_legacy_vertex_attributes },
 #ifdef __APPLE__
             // Needed to create the MoltenVK device
             { vk::KHRPortabilitySubsetExtensionName, &temp_bool },
@@ -1037,6 +1041,16 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             support_pipeline_creation_cache_control = static_cast<bool>(props.get<vk::PhysicalDevicePipelineCreationCacheControlFeaturesEXT>().pipelineCreationCacheControl);
         }
 
+        if (support_vertex_input_dynamic_state && support_legacy_vertex_attributes) {
+            const auto supported = physical_device.getFeatures2KHR<vk::PhysicalDeviceFeatures2,
+                vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT, vk::PhysicalDeviceLegacyVertexAttributesFeaturesEXT>();
+            const auto properties = physical_device.getProperties2KHR<vk::PhysicalDeviceProperties2,
+                vk::PhysicalDeviceLegacyVertexAttributesPropertiesEXT>();
+            support_native_unaligned_vertex_input = supported.get<vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT>().vertexInputDynamicState
+                && supported.get<vk::PhysicalDeviceLegacyVertexAttributesFeaturesEXT>().legacyVertexAttributes
+                && properties.get<vk::PhysicalDeviceLegacyVertexAttributesPropertiesEXT>().nativeUnalignedPerformance;
+        }
+
         vk::StructureChain<vk::DeviceCreateInfo,
             vk::PhysicalDeviceBufferDeviceAddressFeatures,
             vk::PhysicalDeviceUniformBufferStandardLayoutFeatures,
@@ -1044,7 +1058,9 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
             vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT,
             vk::PhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT,
             vk::PhysicalDevicePipelineCreationCacheControlFeaturesEXT,
-            vk::PhysicalDeviceTimelineSemaphoreFeatures>
+            vk::PhysicalDeviceTimelineSemaphoreFeatures,
+            vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT,
+            vk::PhysicalDeviceLegacyVertexAttributesFeaturesEXT>
             device_info{
                 vk::DeviceCreateInfo{
                     .pEnabledFeatures = &enabled_features },
@@ -1062,10 +1078,18 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
                 vk::PhysicalDevicePipelineCreationCacheControlFeaturesEXT{
                     .pipelineCreationCacheControl = VK_TRUE },
                 vk::PhysicalDeviceTimelineSemaphoreFeatures{
-                    .timelineSemaphore = VK_TRUE }
+                    .timelineSemaphore = VK_TRUE },
+                vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT{
+                    .vertexInputDynamicState = VK_TRUE },
+                vk::PhysicalDeviceLegacyVertexAttributesFeaturesEXT{
+                    .legacyVertexAttributes = VK_TRUE }
             };
         device_info.get().setQueueCreateInfos(queue_infos);
         device_info.get().setPEnabledExtensionNames(device_extensions);
+        if (!support_native_unaligned_vertex_input) {
+            device_info.unlink<vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT>();
+            device_info.unlink<vk::PhysicalDeviceLegacyVertexAttributesFeaturesEXT>();
+        }
 
         if (!support_memory_mapping)
             device_info.unlink<vk::PhysicalDeviceBufferDeviceAddressFeatures>();
@@ -1611,7 +1635,8 @@ uint32_t VKState::get_features_mask() {
         | (uint32_t(features.support_unknown_format) << 9)
         | (uint32_t(features.support_clip_distance) << 10)
         | (uint32_t(features.force_full_precision) << 11)
-        | (uint32_t(features.support_gxm_clip_planes) << 12);
+        | (uint32_t(features.support_gxm_clip_planes) << 12)
+        | (uint32_t(support_native_unaligned_vertex_input) << 13);
 }
 
 int VKState::get_supported_filters() {

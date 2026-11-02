@@ -157,6 +157,13 @@ int main() {
     assert(unaligned.vertex_stream_ring_buffer.creations == 1 && unaligned.vertex_stream_ring_buffer.copies == 1);
     assert(std::memcmp(unaligned.vertex_stream_ring_buffer.bytes.data(), mem.bytes.data() + 258, 95 * 12) == 0);
 
+    VKContext native;
+    setup(native, false, 258);
+    native.state.pipeline_cache.layout.streams[0].alignment = 1;
+    bind_vertex_streams(native, mem, 1, 94);
+    assert(native.state.mapped_uploads == 1 && native.vertex_stream_ring_buffer.creations == 0);
+    assert(native.vertex_stream_buffers[0] == 99 && native.vertex_stream_offsets[0] == 258);
+
     VKContext copied;
     copied.state.features.enable_memory_mapping = false;
     copied.state.cpu_sync = true;
