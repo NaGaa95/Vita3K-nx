@@ -83,6 +83,9 @@ def main():
         subprocess.run([str(executable), str(output)], check=True)
 
     run_fixture("touch_mapping", [])
+    run_fixture("vertex_upload", [
+        block(read("vita3k/vkutil/src/objects.cpp"), "void RingBuffer::allocate(const uint32_t data_size)"),
+        block(read("vita3k/renderer/src/vulkan/scene.cpp"), "static void bind_vertex_streams(")])
 
     (output / "ngs_lifecycle.inc").write_text("namespace ngs {\n"
         + block(read("vita3k/ngs/src/ngs.cpp"), "void Voice::transition(") + "\n"

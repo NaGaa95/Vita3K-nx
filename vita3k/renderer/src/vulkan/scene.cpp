@@ -346,6 +346,8 @@ static void bind_vertex_streams(VKContext &context, MemState &mem, uint32_t inst
                         || !is_valid_addr_range_size(mem, state.vertex_streams[i].data.address(), source_size))
                         throw std::runtime_error("Invalid Vulkan vertex stream span");
                 }
+                if (!context.vertex_stream_ring_buffer.handle())
+                    context.vertex_stream_ring_buffer.create();
                 if (stream_layout.repack) {
                     const uint64_t size = (records - 1) * uint64_t(stream_layout.stride) + stream_layout.record_size;
                     if (size > context.vertex_stream_ring_buffer.size())
