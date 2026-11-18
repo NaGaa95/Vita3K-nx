@@ -17,7 +17,7 @@
 
 #include "switch_state.h"
 
-#include <cpu/functions.h>
+#include <cpu/state.h>
 #include <kernel/state.h>
 #include <kernel/thread/thread_state.h>
 #include <util/switch_thread.h>
@@ -79,7 +79,7 @@ void preemption_watchdog(EmuEnvState &emuenv) {
         unsigned quanta = 0;
     };
     std::unordered_map<SceUID, Watched> seen;
-    std::vector<std::pair<SceUID, ThreadStatePtr>> threads;
+    std::vector<std::pair<SceUID, ThreadStateRef>> threads;
     uint64_t next_refresh = 0;
 
     while (preemption_running.load(std::memory_order_relaxed)) {
@@ -118,7 +118,7 @@ void preemption_watchdog(EmuEnvState &emuenv) {
                 continue;
             }
             watched.quanta++;
-            preempt(*thread->cpu, watched.quanta >= PREEMPT_RELEASE_AFTER);
+            thread->cpu->preempt(watched.quanta >= PREEMPT_RELEASE_AFTER);
         }
     }
 }

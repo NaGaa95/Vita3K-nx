@@ -59,7 +59,7 @@ else
 fi
 apply_one "external/ffmpeg" \
     "ffmpeg-switch.patch" \
-    "671860a3d70b1fa60b988fc725cebbebef729367"
+    "eaf918c97e76d3fa7ec5bfea63a307fced559e76"
 apply_one "external/LibAtrac9" \
     "libatrac9-switch.patch" \
     "82767fe38823c32536726ea798f392b0b49e66b9"
@@ -68,6 +68,6 @@ apply_one "external/sdl" \
     "fa2c02bb6e21974a89ea9824bc53c9932abe5f9c"
 apply_one "external/psvpfstools/psvpfsparser" \
     "psvpfsparser-switch.patch" \
-    "d14381f871a69009bd18b2aaec2213a6738bebba"
+    "05d43a06a6189302d31091c65e4fc8707476eef3"
 
 printf 'All Switch submodule patches are applied.\n'

@@ -31,6 +31,7 @@
 #include <display/functions.h>
 #include <display/state.h>
 #include <emuenv/state.h>
+#include <gxm/functions.h>
 #include <io/functions.h>
 #include <io/vfs.h>
 #include <kernel/state.h>
@@ -500,6 +501,7 @@ static void load_cheats(EmuEnvState &emuenv, const SceKernelModuleInfo &module_i
     // A `$B2` code with module index 0 refers to the main executable.
     CheatModule main_module;
     main_module.name = std::string(module_info.module_name, strnlen(module_info.module_name, sizeof(module_info.module_name)));
+    static_assert(main_module.segments.size() == MODULE_INFO_NUM_SEGMENTS);
     for (size_t i = 0; i < main_module.segments.size(); i++) {
         main_module.segments[i].address = module_info.segments[i].vaddr.address();
         main_module.segments[i].size = module_info.segments[i].memsz;
@@ -513,7 +515,7 @@ static void load_cheats(EmuEnvState &emuenv, const SceKernelModuleInfo &module_i
 
 static ExitCode load_app_impl(SceUID &main_module_id, EmuEnvState &emuenv, const AppLaunchRequest &launch_request) {
     const auto call_import = [&emuenv](CPUState &cpu, uint32_t nid, SceUID thread_id) {
-        ::call_import(emuenv, cpu, nid, thread_id);
+        return ::call_import(emuenv, cpu, nid, thread_id);
     };
     emuenv.kernel.process_exit_callback = [&emuenv](int res, std::optional<AppLaunchRequest> relaunch) {
         emuenv.post_app_launch_request(relaunch.value_or(AppLaunchRequest{ .reason = AppLaunchReason::ProcessExit, .exit_code = res }));
@@ -742,7 +744,7 @@ ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv, const AppLaunchR
 
     if (emuenv.cfg.gdbstub) {
         // The threads wait for the debugger's first continue
-        emuenv.kernel.suspend_threads();
+        emuenv.kernel.set_threads_suspended(true);
         server_open(emuenv);
     }
 
@@ -794,7 +796,7 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
     // A main thread without its own affinity runs on every user core and reports them all
     if (affinity == SCE_KERNEL_THREAD_CPU_AFFINITY_MASK_DEFAULT)
         affinity = SCE_KERNEL_CPU_MASK_USER_ALL;
-    const ThreadStatePtr main_thread = emuenv.kernel.create_thread(emuenv.mem, emuenv.io.title_id.c_str(), entry_point, priority, affinity, stack_size, 0, nullptr);
+    const ThreadStateRef main_thread = emuenv.kernel.create_thread(emuenv.mem, emuenv.io.title_id.c_str(), entry_point, priority, affinity, stack_size, 0);
     if (!main_thread) {
         LOG_ERROR("Failed to init main thread.");
         return InitThreadFailed;
@@ -803,6 +805,12 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
 
     // Before any guest code runs, module_start functions included, since they can read it too
     emuenv.set_launch_uri(emuenv.cfg.launch_uri);
+
+    // Before any guest code runs, since it may wait for a vblank or register a vblank callback
+    start_sync_thread(emuenv);
+
+    // Before any guest code runs
+    gxm::init_compat_mask(emuenv, main_thread->id);
 
     // Run `module_start` export (entry point) of loaded libraries
     for (auto &[_, module] : emuenv.kernel.loaded_modules) {
@@ -831,8 +839,6 @@ ExitCode run_app(EmuEnvState &emuenv, int32_t main_module_id, const AppLaunchReq
         LOG_ERROR("Failed to run main thread.");
         return RunThreadFailed;
     }
-
-    start_sync_thread(emuenv);
 
     return Success;
 }

@@ -20,15 +20,19 @@
 #include <mem/ptr.h>
 #include <mem/state.h>
 #include <util/log.h>
+#include <util/string_utils.h>
 
 #include <algorithm>
+#include <mutex>
 
 namespace cheat {
 
 namespace {
 
-// Safety net so that a malformed database cannot make the vblank thread walk codes forever.
-constexpr size_t max_executed_lines = 4096;
+// Bounds the lines the vblank thread walks for each cheat every frame.
+constexpr size_t max_lines = 4096;
+// A `$4` or `$7` code repeats its write up to 65535 times, this bounds all of them in one cheat.
+constexpr size_t max_repeated_writes = 0x10000;
 // The format allows at most five levels of indirection.
 constexpr uint8_t max_pointer_level = 5;
 
@@ -54,36 +58,29 @@ bool is_accessible(const MemState &mem, uint32_t address, uint32_t size) {
 }
 
 // The guest pages a value spans are not necessarily contiguous in host memory, so go byte by byte.
-bool read_bytes(const MemState &mem, uint32_t address, uint8_t *destination, uint32_t size) {
+bool read_bytes(MemState &mem, uint32_t address, uint8_t *destination, uint32_t size) {
+    const std::lock_guard<std::mutex> lock(mem.generation_mutex);
     if (!is_accessible(mem, address, size))
         return false;
 
-    for (uint32_t i = 0; i < size; ++i) {
-        // A page the allocator hands out but that has no host backing yet reads as null.
-        const uint8_t *byte = Ptr<uint8_t>(address + i).get(mem);
-        if (!byte)
-            return false;
-        destination[i] = *byte;
-    }
+    for (uint32_t i = 0; i < size; ++i)
+        destination[i] = *Ptr<uint8_t>(address + i).get(mem);
 
     return true;
 }
 
 bool write_bytes(MemState &mem, uint32_t address, const uint8_t *source, uint32_t size) {
+    const std::lock_guard<std::mutex> lock(mem.generation_mutex);
     if (!is_accessible(mem, address, size))
         return false;
 
-    for (uint32_t i = 0; i < size; ++i) {
-        uint8_t *byte = Ptr<uint8_t>(address + i).get(mem);
-        if (!byte)
-            return false;
-        *byte = source[i];
-    }
+    for (uint32_t i = 0; i < size; ++i)
+        *Ptr<uint8_t>(address + i).get(mem) = source[i];
 
     return true;
 }
 
-bool read_value(const MemState &mem, uint32_t address, CodeWidth width, uint32_t &value) {
+bool read_value(MemState &mem, uint32_t address, CodeWidth width, uint32_t &value) {
     uint8_t bytes[4] = {};
     const uint32_t size = width_size(width);
     if (!read_bytes(mem, address, bytes, size))
@@ -105,6 +102,178 @@ bool write_value(MemState &mem, uint32_t address, CodeWidth width, uint32_t valu
     return write_bytes(mem, address, bytes, size);
 }
 
+size_t pointer_block_lines(const CodeLine &head) {
+    return std::min<size_t>(head.param(), max_pointer_level);
+}
+
+size_t code_line_count(const std::vector<CodeLine> &lines, size_t index) {
+    if (index >= lines.size())
+        return 0;
+
+    const CodeLine &line = lines[index];
+    switch (line.type()) {
+    case CodeType::compression:
+        return 2;
+    case CodeType::pointer_write:
+        return 1 + pointer_block_lines(line);
+    case CodeType::pointer_compression:
+        // The block, then the line holding the count and the gaps.
+        return 1 + pointer_block_lines(line) + 1;
+    case CodeType::pointer_mov: {
+        // A pointer MOV is a destination block followed by a source block.
+        const size_t destination = 1 + pointer_block_lines(line);
+        const size_t source_index = index + destination;
+        if ((source_index >= lines.size()) || (lines[source_index].type() != CodeType::pointer_mov))
+            return destination;
+        return destination + 1 + pointer_block_lines(lines[source_index]);
+    }
+    default:
+        return 1;
+    }
+}
+
+// Runs once per cheat when it is loaded, the interpreter then trusts every code to be complete.
+class Validator {
+public:
+    Validator(const Cheat &cheat, const std::vector<CheatModule> &modules)
+        : m_cheat(cheat)
+        , m_modules(modules) {}
+
+    bool validate() const {
+        if (m_cheat.lines.size() > max_lines) {
+            LOG_WARN("Cheat '{}' has more than {} lines", m_cheat.name, max_lines);
+            return false;
+        }
+
+        size_t index = 0;
+        size_t repeated_writes = 0;
+        while (index < m_cheat.lines.size()) {
+            if (!validate_code(index))
+                return false;
+            repeated_writes += repeat_count(index);
+            index += code_line_count(m_cheat.lines, index);
+        }
+
+        if (repeated_writes > max_repeated_writes) {
+            LOG_WARN("Cheat '{}' repeats its writes more than {} times", m_cheat.name, max_repeated_writes);
+            return false;
+        }
+
+        return true;
+    }
+
+private:
+    // The count is the whole control word of the line that follows the code.
+    size_t repeat_count(size_t index) const {
+        const CodeLine &line = m_cheat.lines[index];
+        if (line.type() == CodeType::compression)
+            return m_cheat.lines[index + 1].control;
+        if (line.type() == CodeType::pointer_compression)
+            return m_cheat.lines[index + 1 + pointer_block_lines(line)].control;
+        return 0;
+    }
+
+    bool validate_width(const CodeLine &line) const {
+        if (line.op() <= static_cast<uint8_t>(CodeWidth::bits32))
+            return true;
+
+        LOG_WARN("Cheat '{}' uses the invalid width of code ${:04X}", m_cheat.name, line.control);
+        return false;
+    }
+
+    bool validate_pointer_level(const CodeLine &line) const {
+        const uint8_t level = line.param();
+        if ((level > 0) && (level <= max_pointer_level))
+            return true;
+
+        LOG_WARN("Cheat '{}' uses the invalid pointer level {} of code ${:04X}", m_cheat.name, level, line.control);
+        return false;
+    }
+
+    bool validate_length(size_t index) const {
+        if (index + code_line_count(m_cheat.lines, index) <= m_cheat.lines.size())
+            return true;
+
+        LOG_WARN("Cheat '{}' ends with an incomplete code ${:04X}", m_cheat.name, m_cheat.lines[index].control);
+        return false;
+    }
+
+    bool validate_code(size_t index) const {
+        const CodeLine &line = m_cheat.lines[index];
+        switch (line.type()) {
+        case CodeType::write:
+        case CodeType::mov:
+            return validate_width(line);
+        case CodeType::compression:
+            return validate_width(line) && validate_length(index);
+        case CodeType::pointer_write:
+        case CodeType::pointer_compression:
+            return validate_width(line) && validate_pointer_level(line) && validate_length(index);
+        case CodeType::pointer_mov: {
+            if (!validate_width(line) || !validate_pointer_level(line))
+                return false;
+
+            const size_t source_index = index + 1 + line.param();
+            const CodeLine *source = (source_index < m_cheat.lines.size()) ? &m_cheat.lines[source_index] : nullptr;
+            if (!source || (source->type() != CodeType::pointer_mov) || (source->op() < 4) || (source->op() > 6)) {
+                LOG_WARN("Cheat '{}' has a pointer MOV code without a source block", m_cheat.name);
+                return false;
+            }
+
+            return validate_pointer_level(*source) && validate_length(index);
+        }
+        case CodeType::arm_write:
+            if ((line.op() == 1) || (line.op() == 2))
+                return true;
+            LOG_WARN("Cheat '{}' uses the invalid instruction size of code ${:04X}", m_cheat.name, line.control);
+            return false;
+        case CodeType::relative_base:
+            return validate_relative_base(line);
+        case CodeType::button_pad:
+            return true;
+        case CodeType::condition:
+            if (line.op() <= 0xB)
+                return true;
+            LOG_WARN("Cheat '{}' uses the unsupported condition ${:04X}", m_cheat.name, line.control);
+            return false;
+        default:
+            LOG_WARN("Cheat '{}' uses the unsupported code type ${:04X}", m_cheat.name, line.control);
+            return false;
+        }
+    }
+
+    // `$B2<module> 0000000<segment> 00000000`
+    bool validate_relative_base(const CodeLine &line) const {
+        if (line.op() != 2) {
+            LOG_WARN("Cheat '{}' uses the unsupported code type ${:04X}", m_cheat.name, line.control);
+            return false;
+        }
+
+        const uint8_t module_index = line.param();
+        const uint32_t segment_index = line.first & 0xF;
+        // How VitaCheat numbers the modules after the main executable is undocumented, so guessing could patch the wrong one.
+        if ((module_index != 0) || m_modules.empty()) {
+            LOG_WARN("Cheat '{}' refers to module {}, only module 0 (the main executable) is supported", m_cheat.name, module_index);
+            return false;
+        }
+
+        const CheatModule &module = m_modules[module_index];
+        if (segment_index >= module.segments.size()) {
+            LOG_WARN("Cheat '{}' refers to segment {}, which does not exist", m_cheat.name, segment_index);
+            return false;
+        }
+        if (module.segments[segment_index].size == 0) {
+            LOG_WARN("Cheat '{}' refers to module {} segment {}, which is empty", m_cheat.name, module_index, segment_index);
+            return false;
+        }
+
+        return true;
+    }
+
+    const Cheat &m_cheat;
+    const std::vector<CheatModule> &m_modules;
+};
+
 struct PointerBlock {
     uint32_t address = 0;
     std::vector<uint32_t> offsets;
@@ -122,14 +291,8 @@ public:
         , m_invalidate_jit(invalidate_jit) {}
 
     void run() {
-        size_t executed = 0;
-        while ((m_index < m_cheat.lines.size()) && (executed < max_executed_lines)) {
-            ++executed;
-            if (!execute(m_cheat.lines[m_index])) {
-                m_cheat.broken = true;
-                break;
-            }
-        }
+        while (m_index < m_cheat.lines.size())
+            execute(m_cheat.lines[m_index]);
     }
 
 private:
@@ -138,99 +301,86 @@ private:
         return m_relative_base + address;
     }
 
-    size_t code_line_count(size_t index) const {
-        if (index >= m_cheat.lines.size())
-            return 0;
-
-        const CodeLine &line = m_cheat.lines[index];
-        switch (line.type()) {
-        case CodeType::compression:
-            return 2;
-        case CodeType::pointer_write:
-            return 1 + pointer_block_lines(line);
-        case CodeType::pointer_compression:
-            // The block, then the line holding the count and the gaps.
-            return 1 + pointer_block_lines(line) + 1;
-        case CodeType::pointer_mov: {
-            // A pointer MOV is a destination block followed by a source block.
-            const size_t destination = 1 + pointer_block_lines(line);
-            const size_t source_index = index + destination;
-            if ((source_index >= m_cheat.lines.size()) || (m_cheat.lines[source_index].type() != CodeType::pointer_mov))
-                return destination;
-            return destination + 1 + pointer_block_lines(m_cheat.lines[source_index]);
+    // The byte at `address` before any ARM write patched it, whatever the size of that write or its cheat.
+    uint8_t original_byte(uint32_t address, uint8_t current) const {
+        for (const Cheat &cheat : m_state.file.cheats) {
+            for (const SavedMemory &saved : cheat.saved_memory) {
+                if ((address >= saved.address) && ((address - saved.address) < saved.bytes.size()))
+                    return saved.bytes[address - saved.address];
+            }
         }
-        default:
-            return 1;
-        }
-    }
 
-    static size_t pointer_block_lines(const CodeLine &head) {
-        return std::min<size_t>(head.param(), max_pointer_level);
+        return current;
     }
 
     // A related count is a number of codes, not of lines, and a pointer write spans several.
     void skip_related_codes(uint8_t related) {
         size_t remaining = std::max<size_t>(related, 1);
         while ((remaining > 0) && (m_index < m_cheat.lines.size())) {
-            m_index += std::max<size_t>(code_line_count(m_index), 1);
+            // The base is a directive for what follows, the codes it precedes must still find it set.
+            if (m_cheat.lines[m_index].type() == CodeType::relative_base) {
+                execute_relative_base(m_cheat.lines[m_index]);
+                continue;
+            }
+
+            m_index += std::max<size_t>(code_line_count(m_cheat.lines, m_index), 1);
             --remaining;
         }
     }
 
-    bool execute(const CodeLine &line) {
+    void execute(const CodeLine &line) {
         switch (line.type()) {
         case CodeType::write:
-            return execute_write(line);
+            execute_write(line);
+            break;
         case CodeType::pointer_write:
-            return execute_pointer_write(line);
+            execute_pointer_write(line);
+            break;
         case CodeType::compression:
-            return execute_compression(line);
+            execute_compression(line);
+            break;
         case CodeType::mov:
-            return execute_mov(line);
+            execute_mov(line);
+            break;
         case CodeType::pointer_compression:
-            return execute_pointer_compression(line);
+            execute_pointer_compression(line);
+            break;
         case CodeType::pointer_mov:
-            return execute_pointer_mov(line);
+            execute_pointer_mov(line);
+            break;
         case CodeType::arm_write:
-            return execute_arm_write(line);
+            execute_arm_write(line);
+            break;
         case CodeType::relative_base:
-            return execute_relative_base(line);
+            execute_relative_base(line);
+            break;
         case CodeType::button_pad:
-            return execute_button_pad(line);
-        case CodeType::condition:
-            return execute_condition(line);
+            execute_button_pad(line);
+            break;
         default:
-            LOG_WARN_ONCE("Cheat '{}' uses the unsupported code type ${:04X}", m_cheat.name, line.control);
-            return false;
+            execute_condition(line);
+            break;
         }
     }
 
     // `$0X00 <address> <value>`
-    bool execute_write(const CodeLine &line) {
+    void execute_write(const CodeLine &line) {
         ++m_index;
         write_value(m_mem, resolve(line.first), static_cast<CodeWidth>(line.op()), line.second);
-        return true;
     }
 
     // `$5X00 <destination> <source>`
-    bool execute_mov(const CodeLine &line) {
+    void execute_mov(const CodeLine &line) {
         ++m_index;
 
         const auto width = static_cast<CodeWidth>(line.op());
         uint32_t value = 0;
         if (read_value(m_mem, resolve(line.second), width, value))
             write_value(m_mem, resolve(line.first), width, value);
-
-        return true;
     }
 
     // `$4X01 <address> <value>` followed by `$<count> <address gap> <value gap>`
-    bool execute_compression(const CodeLine &line) {
-        if (m_index + 1 >= m_cheat.lines.size()) {
-            LOG_WARN_ONCE("Cheat '{}' ends with an incomplete compression code", m_cheat.name);
-            return false;
-        }
-
+    void execute_compression(const CodeLine &line) {
         const CodeLine gaps = m_cheat.lines[m_index + 1];
         m_index += 2;
 
@@ -239,167 +389,101 @@ private:
         const uint32_t count = gaps.control;
         for (uint32_t i = 0; i < count; ++i)
             write_value(m_mem, resolve(line.first) + (i * gaps.first), width, line.second + (i * gaps.second));
-
-        return true;
     }
 
     // `$3X<level> <address> <offset>`, one line per further offset, then the value.
-    bool execute_pointer_write(const CodeLine &line) {
-        PointerBlock block;
-        if (!parse_pointer_block(line, block))
-            return false;
+    void execute_pointer_write(const CodeLine &line) {
+        const PointerBlock block = parse_pointer_block(line);
 
         uint32_t address = 0;
         if (follow_pointers(block, address))
             write_value(m_mem, address, static_cast<CodeWidth>(line.op()), block.closing.second);
-
-        return true;
     }
 
     // `$8X<level> ...` writes to `$8<4|5|6><level> ...`, both blocks closed by a `$88` / `$89` line.
-    bool execute_pointer_mov(const CodeLine &line) {
-        PointerBlock destination;
-        if (!parse_pointer_block(line, destination))
-            return false;
-
-        if (m_index >= m_cheat.lines.size()) {
-            LOG_WARN_ONCE("Cheat '{}' ends with an incomplete pointer MOV code", m_cheat.name);
-            return false;
-        }
-
-        const CodeLine source_line = m_cheat.lines[m_index];
-        if ((source_line.type() != CodeType::pointer_mov) || (source_line.op() < 4) || (source_line.op() > 6)) {
-            LOG_WARN_ONCE("Cheat '{}' has a pointer MOV code without a source block", m_cheat.name);
-            return false;
-        }
-
-        PointerBlock source;
-        if (!parse_pointer_block(source_line, source))
-            return false;
+    void execute_pointer_mov(const CodeLine &line) {
+        const PointerBlock destination = parse_pointer_block(line);
+        const PointerBlock source = parse_pointer_block(m_cheat.lines[m_index]);
 
         const auto width = static_cast<CodeWidth>(line.op());
         uint32_t destination_address = 0;
         uint32_t source_address = 0;
         if (!follow_pointers(destination, destination_address) || !follow_pointers(source, source_address))
-            return true;
+            return;
 
         uint32_t value = 0;
         if (read_value(m_mem, source_address, width, value))
             write_value(m_mem, destination_address, width, value);
-
-        return true;
     }
 
     // A `$3` block followed by the `$<count> <address gap> <value gap>` line of a `$4` code.
-    bool execute_pointer_compression(const CodeLine &line) {
-        PointerBlock block;
-        if (!parse_pointer_block(line, block))
-            return false;
-
-        if (m_index >= m_cheat.lines.size()) {
-            LOG_WARN_ONCE("Cheat '{}' ends with an incomplete pointer compression code", m_cheat.name);
-            return false;
-        }
-
+    void execute_pointer_compression(const CodeLine &line) {
+        const PointerBlock block = parse_pointer_block(line);
         const CodeLine gaps = m_cheat.lines[m_index];
         ++m_index;
 
         uint32_t address = 0;
         if (!follow_pointers(block, address))
-            return true;
+            return;
 
         const auto width = static_cast<CodeWidth>(line.op());
         const uint32_t count = gaps.control;
         for (uint32_t i = 0; i < count; ++i)
             write_value(m_mem, address + (i * gaps.first), width, block.closing.second + (i * gaps.second));
-
-        return true;
     }
 
-    // `$AX00 <address> <instruction>`, X is the width digit of every other code: 0, 1 or 2 for 8,
-    // 16 or 32 bits. Databases use the 8-bit form to flip a single byte of an instruction.
-    bool execute_arm_write(const CodeLine &line) {
+    // `$AX00 <address> <instruction>`, X is 1 for a 16-bit and 2 for a 32-bit instruction.
+    void execute_arm_write(const CodeLine &line) {
         ++m_index;
 
-        const auto width = static_cast<CodeWidth>(line.op());
+        const auto width = (line.op() == 1) ? CodeWidth::bits16 : CodeWidth::bits32;
         const uint32_t size = width_size(width);
         const uint32_t address = resolve(line.first);
         const uint32_t value = line.second & width_mask(width);
 
         uint32_t current = 0;
         if (!read_value(m_mem, address, width, current))
-            return true;
+            return;
 
         // Patching guest code once is enough, only pay for the recompiler flush when it changed.
         if (current == value)
-            return true;
+            return;
 
         const bool already_saved = std::any_of(m_cheat.saved_memory.begin(), m_cheat.saved_memory.end(),
-            [address](const SavedMemory &saved) { return saved.address == address; });
+            [address, size](const SavedMemory &saved) { return (saved.address == address) && (saved.bytes.size() == size); });
         if (!already_saved) {
+            // Saving the real original makes the order the cheats are turned off in irrelevant.
             SavedMemory saved;
             saved.address = address;
-            saved.bytes.resize(size);
-            if (!read_bytes(m_mem, address, saved.bytes.data(), size))
-                return true;
+            for (uint32_t i = 0; i < size; ++i)
+                saved.bytes.push_back(original_byte(address + i, static_cast<uint8_t>(current >> (i * 8))));
             m_cheat.saved_memory.push_back(std::move(saved));
         }
 
         if (write_value(m_mem, address, width, value) && m_invalidate_jit)
             m_invalidate_jit(address, size);
-
-        return true;
     }
 
-    // `$B2<module> 0000000<segment> 00000000`
-    bool execute_relative_base(const CodeLine &line) {
+    void execute_relative_base(const CodeLine &line) {
         ++m_index;
-
-        if (line.op() != 2) {
-            LOG_WARN_ONCE("Cheat '{}' uses the unsupported code type ${:04X}", m_cheat.name, line.control);
-            return false;
-        }
-
-        const uint8_t module_index = line.param();
-        const uint32_t segment_index = line.first & 0xF;
-        if ((module_index >= m_state.modules.size()) || (segment_index >= 2)) {
-            LOG_WARN_ONCE("Cheat '{}' refers to module {} segment {}, which is not loaded", m_cheat.name, module_index, segment_index);
-            return false;
-        }
-
-        const auto &segment = m_state.modules[module_index].segments[segment_index];
-        if (segment.size == 0) {
-            LOG_WARN_ONCE("Cheat '{}' refers to module {} segment {}, which is empty", m_cheat.name, module_index, segment_index);
-            return false;
-        }
-
-        m_relative_base = segment.address;
-
-        return true;
+        m_relative_base = m_state.modules[line.param()].segments[line.first & 0xF].address;
     }
 
     // `$C2<lines> <pad type> <button mask>`
-    bool execute_button_pad(const CodeLine &line) {
+    void execute_button_pad(const CodeLine &line) {
         ++m_index;
 
         // The pad type selects between the Vita pad and a DualShock, Vita3K only exposes one pad.
         const uint32_t mask = line.second;
         if ((m_buttons & mask) != mask)
             skip_related_codes(line.param());
-
-        return true;
     }
 
     // `$DX<lines> <address> <value>`
-    bool execute_condition(const CodeLine &line) {
+    void execute_condition(const CodeLine &line) {
         ++m_index;
 
         const uint8_t op = line.op();
-        if (op > 0xB) {
-            LOG_WARN_ONCE("Cheat '{}' uses the unsupported condition ${:04X}", m_cheat.name, line.control);
-            return false;
-        }
-
         const auto width = static_cast<CodeWidth>(op % 3);
         const uint32_t mask = width_mask(width);
         const uint32_t expected = line.second & mask;
@@ -417,23 +501,13 @@ private:
 
         if (!satisfied)
             skip_related_codes(line.param());
-
-        return true;
     }
 
     // Databases word the control field of the follow-up lines freely, so only `second` is read.
-    bool parse_pointer_block(const CodeLine &head, PointerBlock &block) {
+    PointerBlock parse_pointer_block(const CodeLine &head) {
         const uint8_t level = head.param();
-        if ((level == 0) || (level > max_pointer_level)) {
-            LOG_WARN_ONCE("Cheat '{}' uses the invalid pointer level {} of code ${:04X}", m_cheat.name, level, head.control);
-            return false;
-        }
 
-        if (m_index + level >= m_cheat.lines.size()) {
-            LOG_WARN_ONCE("Cheat '{}' ends with an incomplete pointer block", m_cheat.name);
-            return false;
-        }
-
+        PointerBlock block;
         block.address = head.first;
         block.offsets.reserve(level);
         block.offsets.push_back(head.second);
@@ -443,10 +517,10 @@ private:
         block.closing = m_cheat.lines[m_index + level];
         m_index += level + 1;
 
-        return true;
+        return block;
     }
 
-    bool follow_pointers(const PointerBlock &block, uint32_t &address) const {
+    bool follow_pointers(const PointerBlock &block, uint32_t &address) {
         address = resolve(block.address);
         for (const uint32_t offset : block.offsets) {
             uint32_t pointer = 0;
@@ -468,6 +542,10 @@ private:
     uint32_t m_relative_base = 0;
 };
 
+bool overlaps(const SavedMemory &a, const SavedMemory &b) {
+    return (a.address < b.address + b.bytes.size()) && (b.address < a.address + a.bytes.size());
+}
+
 void restore_cheat(Cheat &cheat, MemState &mem, const JitInvalidate &invalidate_jit) {
     for (auto it = cheat.saved_memory.rbegin(); it != cheat.saved_memory.rend(); ++it) {
         const uint32_t size = static_cast<uint32_t>(it->bytes.size());
@@ -483,8 +561,10 @@ void restore_cheat(Cheat &cheat, MemState &mem, const JitInvalidate &invalidate_
 void unload(CheatState &state) {
     const std::lock_guard<std::mutex> lock(state.mutex);
 
+    state.title_id.clear();
     state.file = {};
     state.modules.clear();
+    state.frames_presented.store(0, std::memory_order_relaxed);
     state.buttons.store(0, std::memory_order_relaxed);
 }
 
@@ -493,27 +573,61 @@ bool load(CheatState &state, const fs::path &cheats_dir, const std::string &titl
 }
 
 bool load(CheatState &state, const std::vector<fs::path> &cheats_dirs, const std::string &title_id) {
+    CheatFile file;
     const auto path = find_cheat_file(cheats_dirs, title_id);
     if (path.empty()) {
         LOG_DEBUG("No cheat file found for {}", title_id);
-        return false;
+    } else {
+        file = parse_cheat_file(path, title_id);
+        for (auto &cheat : file.cheats)
+            cheat.enabled = cheat.enabled_on_boot;
     }
 
-    CheatFile file = parse_cheat_file(path, title_id);
-    for (auto &cheat : file.cheats)
-        cheat.enabled = cheat.enabled_on_boot;
-
     const std::lock_guard<std::mutex> lock(state.mutex);
+
+    // Checked here rather than when they run, so that the cheat manager flags a broken cheat before it is turned on.
+    for (auto &cheat : file.cheats) {
+        if (!cheat.broken)
+            cheat.broken = !Validator(cheat, state.modules).validate();
+    }
+
+    state.title_id = title_id;
     state.file = std::move(file);
 
     return !state.file.cheats.empty();
 }
 
-bool reload(CheatState &state, const std::vector<fs::path> &cheats_dirs, const std::string &title_id, MemState &mem, const JitInvalidate &invalidate_jit) {
+bool reload(CheatState &state, const fs::path &cheats_dir, const std::string &title_id, MemState &mem, const JitInvalidate &invalidate_jit) {
     // The saved originals go away with the old cheats, so undo the ARM writes first.
     set_all_cheats_enabled(state, false, mem, invalidate_jit);
 
-    return load(state, cheats_dirs, title_id);
+    return load(state, cheats_dir, title_id);
+}
+
+bool add_cheat(CheatState &state, const fs::path &cheats_dir, const std::string &title_id, const Cheat &cheat, MemState &mem, const JitInvalidate &invalidate_jit) {
+    auto path = find_cheat_file(cheats_dir, title_id);
+    if (path.empty())
+        path = cheats_dir / (string_utils::toupper(title_id) + ".psv");
+    if (!append_cheat(path, title_id, cheat))
+        return false;
+
+    if (loaded_title_id(state) != title_id)
+        return true;
+
+    // Reloading puts every cheat back to its boot state, carry over what was toggled since.
+    const CheatFile before = snapshot(state);
+    reload(state, cheats_dir, title_id, mem, invalidate_jit);
+
+    const std::lock_guard<std::mutex> lock(state.mutex);
+    auto &cheats = state.file.cheats;
+    for (size_t i = 0; i < std::min(cheats.size(), before.cheats.size()); ++i) {
+        if (cheats[i].name == before.cheats[i].name)
+            cheats[i].enabled = before.cheats[i].enabled;
+    }
+    if (cheats.size() == before.cheats.size() + 1)
+        cheats.back().enabled = cheat.enabled;
+
+    return true;
 }
 
 void add_module(CheatState &state, const CheatModule &module) {
@@ -528,6 +642,9 @@ void set_buttons(CheatState &state, uint32_t buttons) {
 
 void apply(CheatState &state, MemState &mem, const JitInvalidate &invalidate_jit) {
     const std::lock_guard<std::mutex> lock(state.mutex);
+
+    if (state.frames_presented.load(std::memory_order_relaxed) < state.launch_delay_frames)
+        return;
 
     const uint32_t buttons = state.buttons.load(std::memory_order_relaxed);
 
@@ -551,8 +668,24 @@ void set_cheat_enabled(CheatState &state, size_t index, bool enabled, MemState &
         return;
 
     cheat.enabled = enabled;
-    if (!enabled)
-        restore_cheat(cheat, mem, invalidate_jit);
+    if (enabled)
+        return;
+
+    const std::vector<SavedMemory> restored = cheat.saved_memory;
+    restore_cheat(cheat, mem, invalidate_jit);
+
+    // The game keeps running, so a patch another cheat still wants must not wait for the next vblank.
+    const uint32_t buttons = state.buttons.load(std::memory_order_relaxed);
+    for (auto &other : state.file.cheats) {
+        if (!state.enabled || !other.enabled || other.broken || (&other == &cheat))
+            continue;
+
+        const bool shares_memory = std::any_of(other.saved_memory.begin(), other.saved_memory.end(), [&restored](const SavedMemory &saved) {
+            return std::any_of(restored.begin(), restored.end(), [&saved](const SavedMemory &old) { return overlaps(saved, old); });
+        });
+        if (shares_memory)
+            Interpreter(state, other, mem, buttons, invalidate_jit).run();
+    }
 }
 
 void set_all_cheats_enabled(CheatState &state, bool enabled, MemState &mem, const JitInvalidate &invalidate_jit) {
@@ -578,17 +711,17 @@ void set_enabled(CheatState &state, bool enabled, MemState &mem, const JitInvali
     }
 }
 
-size_t cheat_count(const CheatState &state) {
-    const std::lock_guard<std::mutex> lock(state.mutex);
-
-    return state.file.cheats.size();
-}
-
 size_t enabled_cheat_count(const CheatState &state) {
     const std::lock_guard<std::mutex> lock(state.mutex);
 
     return std::count_if(state.file.cheats.begin(), state.file.cheats.end(),
         [](const Cheat &cheat) { return cheat.enabled; });
+}
+
+std::string loaded_title_id(const CheatState &state) {
+    const std::lock_guard<std::mutex> lock(state.mutex);
+
+    return state.title_id;
 }
 
 CheatFile snapshot(const CheatState &state) {
@@ -598,25 +731,25 @@ CheatFile snapshot(const CheatState &state) {
 }
 
 bool save(CheatState &state, const fs::path &cheats_dir) {
-    // The write happens outside the lock so that the vblank thread is not held up by the SD card.
-    CheatFile file;
-    {
-        const std::lock_guard<std::mutex> lock(state.mutex);
-        file = state.file;
+    const std::lock_guard<std::mutex> lock(state.mutex);
+
+    if (!cheats_dir.empty() && !state.file.path.empty()) {
+        const fs::path copy = cheats_dir / state.file.path.filename();
+        std::error_code error;
+        if (!fs::equivalent(copy, state.file.path, error)) {
+            if (!fs::copy_file(state.file.path, copy, fs::copy_options::overwrite_existing, error)) {
+                LOG_ERROR("Failed to copy cheat file {} to {}: {}", state.file.path, copy, error.message());
+                return false;
+            }
+            state.file.path = copy;
+        }
     }
 
-    const fs::path written = save_cheat_file(file, cheats_dir);
-    if (written.empty())
+    if (!save_cheat_file(state.file))
         return false;
 
-    const std::lock_guard<std::mutex> lock(state.mutex);
-    // A reload in between replaced the cheats, whose markers are then those of the new file.
-    if ((state.file.path != file.path) || (state.file.cheats.size() != file.cheats.size()))
-        return true;
-
-    state.file.path = written;
-    for (size_t i = 0; i < file.cheats.size(); ++i)
-        state.file.cheats[i].enabled_on_boot = file.cheats[i].enabled;
+    for (auto &cheat : state.file.cheats)
+        cheat.enabled_on_boot = cheat.enabled;
 
     return true;
 }

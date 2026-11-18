@@ -17,7 +17,7 @@
 
 #include "SceProcessmgr.h"
 
-#include <cpu/functions.h>
+#include <cpu/state.h>
 #include <io/functions.h>
 #include <kernel/state.h>
 #include <kernel/thread/thread_state.h>
@@ -101,6 +101,20 @@ EXPORT(int, sceKernelCDialogSetLeaseLimit) {
     return UNIMPLEMENTED();
 }
 
+// The return addresses into loaded modules in the 1 KiB above the stack pointer
+static std::string stack_return_candidates(EmuEnvState &emuenv, CPUState &cpu) {
+    std::string str;
+    const Address sp = cpu.get_sp();
+    for (Address addr = sp; addr <= sp + 1024; addr += 4) {
+        if (!Ptr<uint32_t>(addr).valid(emuenv.mem))
+            continue;
+        const Address value = *Ptr<uint32_t>(addr).get(emuenv.mem);
+        if (const auto mod = emuenv.kernel.find_module_by_addr(value))
+            fmt::format_to(std::back_inserter(str), "0x{:X} (module: {})\n", value, mod->module_name);
+    }
+    return str;
+}
+
 EXPORT(int, sceKernelCallAbortHandler, uint32_t param1, uint32_t param2) {
     TRACY_FUNC(sceKernelCallAbortHandler, param1, param2);
 
@@ -113,12 +127,12 @@ EXPORT(int, sceKernelCallAbortHandler, uint32_t param1, uint32_t param2) {
     if (thread && thread->cpu) {
         auto &cpu = *thread->cpu;
         LOG_ERROR("Guest called sceKernelCallAbortHandler: tid={}, name='{}', param1=0x{:08X}, param2=0x{:08X}, PC=0x{:08X}, LR=0x{:08X}, SP=0x{:08X}, CPSR=0x{:08X}",
-            thread_id, thread->name, param1, param2, read_pc(cpu), read_lr(cpu), read_sp(cpu), read_cpsr(cpu));
+            thread_id, thread->name, param1, param2, cpu.get_pc(), cpu.get_lr(), cpu.get_sp(), cpu.get_cpsr());
         LOG_ERROR("Guest abort registers: r0=0x{:08X} r1=0x{:08X} r2=0x{:08X} r3=0x{:08X} r4=0x{:08X} r5=0x{:08X} r6=0x{:08X} r7=0x{:08X} r8=0x{:08X} r9=0x{:08X} r10=0x{:08X} r11=0x{:08X} r12=0x{:08X}",
-            read_reg(cpu, 0), read_reg(cpu, 1), read_reg(cpu, 2), read_reg(cpu, 3),
-            read_reg(cpu, 4), read_reg(cpu, 5), read_reg(cpu, 6), read_reg(cpu, 7),
-            read_reg(cpu, 8), read_reg(cpu, 9), read_reg(cpu, 10), read_reg(cpu, 11), read_reg(cpu, 12));
-        const std::string stack_candidates = thread->log_stack_traceback();
+            cpu.get_reg(0), cpu.get_reg(1), cpu.get_reg(2), cpu.get_reg(3),
+            cpu.get_reg(4), cpu.get_reg(5), cpu.get_reg(6), cpu.get_reg(7),
+            cpu.get_reg(8), cpu.get_reg(9), cpu.get_reg(10), cpu.get_reg(11), cpu.get_reg(12));
+        const std::string stack_candidates = stack_return_candidates(emuenv, cpu);
         LOG_ERROR("Guest abort stack return-address candidates:\n{}",
             stack_candidates.empty() ? "<none>" : stack_candidates);
     } else {

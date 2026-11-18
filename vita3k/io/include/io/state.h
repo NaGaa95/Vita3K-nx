@@ -21,34 +21,34 @@
 #include <io/types.h>
 #include <io/util.h>
 
-#include <atomic>
 #include <map>
+#include <mutex>
 #include <unordered_map>
 
 // Class for all needed information to access files on Vita3K.
 class FileStats : public VitaStats {
 #ifdef __SWITCH__
+    // The host file, shared by every descriptor of the same path
     SharedFilePtr shared_file;
     mutable SceOff file_offset = 0;
 #else
-    // Shared file pointer
+    // Host file pointer
     FilePtr wrapped_file;
 #endif
 
 public:
+    std::mutex mutex;
+    bool closed = false;
+
     // Constructor used for files
     // Based on https://codereview.stackexchange.com/questions/4679/
-    explicit FileStats(const char *vita, const std::string &t, const fs::path &file, const int open
 #ifdef __SWITCH__
-        , SharedFilePtr shared = {}
-#endif
-    ) {
-#ifdef __SWITCH__
-        shared_file = shared ? std::move(shared) : open_shared_file(file, open);
+    explicit FileStats(const char *vita, const std::string &t, const fs::path &file, const int open, SharedFilePtr shared)
+        : shared_file(std::move(shared)) {
 #else
-        wrapped_file = create_shared_file(file, open);
+    explicit FileStats(const char *vita, const std::string &t, const fs::path &file, const int open, FilePtr stream)
+        : wrapped_file(std::move(stream)) {
 #endif
-
         file_info.vita_loc = vita;
         file_info.translated = t;
         file_info.sys_loc = file;
@@ -82,6 +82,17 @@ public:
     const SharedFilePtr &get_shared_file() const {
         return shared_file;
     }
+
+    // The host file closes with the last descriptor sharing it
+    int close() {
+        shared_file.reset();
+        return 0;
+    }
+#else
+    int close() {
+        FILE *const stream = wrapped_file.release();
+        return stream ? std::fclose(stream) : 0;
+    }
 #endif
 
     // File functions
@@ -98,6 +109,8 @@ class DirStats : public VitaStats {
     DirPtr dir_ptr;
 
 public:
+    std::mutex mutex;
+
     DirStats(const char *vita, const std::string &t, const fs::path &file, DirPtr ptr) {
         dir_ptr = std::move(ptr);
 
@@ -119,8 +132,8 @@ public:
 };
 
 using TtyFiles = std::map<SceUID, TtyType>;
-using StdFiles = std::map<SceUID, FileStats>;
-using DirEntries = std::map<SceUID, DirStats>;
+using StdFiles = std::map<SceUID, std::shared_ptr<FileStats>>;
+using DirEntries = std::map<SceUID, std::shared_ptr<DirStats>>;
 
 struct IOState {
     struct DevicePaths {
@@ -143,15 +156,14 @@ struct IOState {
 
     bool redirect_stdio;
 
-    std::atomic<SceUID> next_fd{ 0 };
+    mutable std::mutex fd_mutex;
+    SceUID next_fd = 0;
     TtyFiles tty_files;
     StdFiles std_files;
     DirEntries dir_entries;
 
     std::unordered_map<std::string, std::string> cachemap;
     bool case_isens_find_enabled = false;
-
-    mutable std::mutex file_mutex;
 
     fs::path memory_path;
 

@@ -67,7 +67,11 @@ SceOff FileStats::read(void *input_data, const int element_size, const SceSize e
     input_addr[requested_bytes - 1] = input_addr[requested_bytes - 1];
 
 #ifdef __SWITCH__
-    const auto bytes = shared_file->read_at(input_data, requested_bytes, file_offset);
+    int64_t bytes;
+    {
+        const std::lock_guard<std::mutex> lock(shared_file->mutex);
+        bytes = shared_file->read_at(input_data, requested_bytes, file_offset);
+    }
     if (bytes < 0)
         return -1;
     file_offset += bytes;
@@ -88,6 +92,7 @@ SceOff FileStats::write(const void *data, const SceSize size, const int count) c
     }
     if (size == 0 || count == 0)
         return 0;
+    const std::lock_guard<std::mutex> lock(shared_file->mutex);
     auto *file = get_file_pointer();
     shared_file->invalidate_read_cache();
     clearerr(file);
@@ -113,6 +118,7 @@ int FileStats::truncate(const SceSize size) const {
         errno = EBADF;
         return -1;
     }
+    const std::lock_guard<std::mutex> lock(shared_file->mutex);
     if (fflush(get_file_pointer()) != 0)
         return -1;
     shared_file->invalidate_read_cache();

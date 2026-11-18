@@ -221,7 +221,12 @@ bool install_vci(const fs::path &vci_path, EmuEnvState &emuenv, const std::funct
         return false;
     }
     vfs::FileBuffer param;
-    fs_utils::read_data(param_sfo, param);
+    if (!fs_utils::read_data(param_sfo, param)) {
+        LOG_ERROR("VCI: failed to read param.sfo at {}", fs_utils::path_to_utf8(param_sfo));
+        fs_utils::remove_path(staging);
+        return false;
+    }
+
     if (!sfo::get_param_info(emuenv.app_info, param, emuenv.cfg.sys_lang) || emuenv.app_info.app_title_id.empty()) {
         LOG_ERROR("VCI: param.sfo at {} is not readable or has no title ID", fs_utils::path_to_utf8(param_sfo));
         fs_utils::remove_path(staging);

@@ -645,6 +645,19 @@ bool is_valid_addr_range_size(const MemState &state, const Address start, const 
     return state.allocator.free_slot_count(start_page, end_page) == 0;
 }
 
+// Whether the len bytes at addr are all mapped
+bool is_valid_addr_len(const MemState &state, Address addr, uint32_t len) {
+    // An empty range reads nothing
+    if (len == 0)
+        return true;
+    const uint64_t end = static_cast<uint64_t>(addr) + len;
+    if (end > (UINT64_C(1) << 32))
+        return false;
+    const uint32_t start_page = addr / STANDARD_PAGE_SIZE;
+    const uint32_t end_page = static_cast<uint32_t>((end + STANDARD_PAGE_SIZE - 1) / STANDARD_PAGE_SIZE);
+    return state.allocator.free_slot_count(start_page, end_page) == 0;
+}
+
 static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_count, const char *name, const bool force) {
     int page_num;
     if (force) {

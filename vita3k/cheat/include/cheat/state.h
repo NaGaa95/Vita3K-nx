@@ -33,7 +33,8 @@ struct CheatModuleSegment {
 
 struct CheatModule {
     std::string name;
-    std::array<CheatModuleSegment, 2> segments;
+    // As many as `SceKernelModuleInfo` has.
+    std::array<CheatModuleSegment, 4> segments;
 };
 
 struct CheatState {
@@ -42,7 +43,19 @@ struct CheatState {
 
     bool enabled = false;
 
-    // Buttons the game last read, kept outside the mutex so that reading the pad stays cheap.
+    // Cheats usually write to memory the game has not set up yet, which corrupts its allocator.
+    // Waiting for the first frames is only a proxy for the game having finished its setup, a better signal is left to improve.
+    std::atomic<uint32_t> frames_presented{ 0 };
+    uint32_t launch_delay_frames = 60;
+
+    void count_frame() {
+        frames_presented.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // Title of the running game, set even when it has no cheat file.
+    std::string title_id;
+
+    // Buttons held at the last vblank, kept outside the mutex so that reading the pad stays cheap.
     std::atomic<uint32_t> buttons{ 0 };
 
     cheat::CheatFile file;

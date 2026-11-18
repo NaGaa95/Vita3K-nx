@@ -112,6 +112,7 @@ void AudioState::set_backend(const std::string &adapter_name) {
 }
 
 AudioOutPortPtr AudioState::open_port(int nb_channels, int freq, int nb_sample) {
+    // Without an audio device the app runs without sound
     if (!adapter)
         return nullptr;
 

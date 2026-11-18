@@ -9,13 +9,29 @@ Support for the cheat databases of the PS Vita plugins [FinalCheat / VitaCheat][
    (`PCSA00147.psv`). `.txt` is accepted as well, some databases ship that extension. A combined
    database covering many games at once (`cheat.db`) works too, see below.
 2. Open **Manage ▸ Cheats**, or right click a game in the app list and pick **Manage Cheats**.
+   The cheat manager lists every game of the cheats folder, the running one first.
 3. Tick the cheats to turn on. While the game is running they take effect immediately, otherwise
-   they take effect the next time it boots. Selecting a cheat shows its codes below the list, so
-   what it writes can be checked before turning it on.
+   press **Save** so that they are on the next time it boots. Selecting a cheat shows its codes
+   below the list, so what it writes can be checked before turning it on.
 4. **Save** writes the cheats that are on back to the file (as `_V1` markers), so that they come
    back on the next time the game boots.
 5. **Open Cheat File** opens the database of the selected game in the default editor, and
    **Reload** reads it back. Editing a cheat file while its game runs does not need a restart.
+
+### Cheat search
+
+While a game runs, **Cheat Search** finds the address of a value the way RPCS3 does: enter the
+value (decimal, or hexadecimal with `0x`), pick its type and press **New Search**. Change the value
+in game, enter the new one and press **Filter Results**, until only a few addresses are left.
+
+- **Apply** writes the value typed in **Current value** to the selected address once.
+- **Add as Cheat...** (or a double click) appends a `$0X00` write code keeping the address at that
+  value to the cheat file of the game, creating `<title id>.psv` when there is none. It is on
+  right away, and **Save** makes it start on boot.
+
+Values are compared at their natural alignment, floats with a relative tolerance of 1e-5 so that
+`3.14` finds `3.1400001`. Only allocated memory is scanned, and a first search keeps at most ten
+million matches.
 
 The **Enable cheats** checkbox is the master switch (`enable-cheats` in `config.yml`). Turning it
 off stops every cheat and puts back the instructions the ARM write codes replaced.
@@ -25,7 +41,9 @@ Switch build bundles one covering several hundred titles. A file in the user's `
 precedence over the bundled one for the same title, and saving the state of bundled cheats writes
 such a file, since the bundled copy is read-only.
 
-Codes run once per vblank, the same way the plugins do on hardware.
+Codes run once per vblank, the same way the plugins do on hardware. They only start once the game
+has presented its first 60 frames: most databases write to heap addresses that the game has not
+set up yet during boot, and writing there corrupts its allocator and hangs it.
 
 ## File format
 
@@ -82,8 +100,8 @@ game's section, the other sections are left untouched.
 | `$5X00` | `<destination> <source>` | Copy the value at `source` to `destination`. |
 | `$7X<level>` | a `$3` block whose closing line is `$77XX`, then `$<count> <address gap> <value gap>` | Follow the pointers as `$3` does, then repeat the write as `$4` does. |
 | `$8X<level>` + `$8<4\|5\|6><level>` | each block is a `$3`-style chain closed by a `$88` / `$89` line | Same as `$5`, with a pointer chain on both sides. The first block is the destination. |
-| `$AX00` | `<address> <instruction>` | Patch guest code (X is the width, `0` for one byte, `1` for a 16-bit and `2` for a 32-bit instruction). The original bytes are restored when the cheat is turned off. |
-| `$B2<module>` | `0000000<segment> 00000000` | Make the addresses of the following codes relative to a segment of a loaded module, so that one cheat works across game versions. Module `0` is the main executable. |
+| `$AX00` | `<address> <instruction>` | Patch guest code (X is `1` for a 16-bit and `2` for a 32-bit instruction). The original instruction is restored when the cheat is turned off. |
+| `$B2<module>` | `0000000<segment> 00000000` | Make the addresses of the following codes relative to a segment of the main executable (module `00`), so that one cheat works across game versions. |
 | `$C2<codes>` | `<pad type> <button mask>` | Run the next `codes` codes only while the buttons of `mask` are held. The mask uses the `SCE_CTRL_*` values, e.g. `0x300` for L+R. |
 | `$DX<codes>` | `<address> <value>` | Run the next `codes` codes only when the comparison holds. X selects both the comparison and the width: `0`-`2` `==`, `3`-`5` `!=`, `6`-`8` `>`, `9`-`B` `<`. |
 
@@ -94,5 +112,8 @@ condition is skipped as a whole. A count of `00` guards the single code right be
 
 - **Pad types.** `$C2` ignores the pad type field, Vita3K exposes a single virtual pad whatever
   the physical controller is.
+- **`$B2` modules other than `00`.** How VitaCheat numbers the modules loaded after the main
+  executable is not documented, so such a cheat is marked as not interpretable instead of patching
+  a module that may be the wrong one.
 
 [db]: https://github.com/r0ah/vitacheat

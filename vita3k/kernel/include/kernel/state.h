@@ -59,10 +59,10 @@ struct KernelModule {
 };
 using SceKernelModulePtr = std::shared_ptr<KernelModule>;
 
-using ThreadStatePtr = std::shared_ptr<ThreadState>;
+using ThreadStateRef = Ref<ThreadState>;
 using CodecEngineBlocks = std::map<SceUID, CodecEngineBlock>;
 using SlotToAddress = std::map<SceUID, Ptr<Ptr<void>>>;
-using ThreadStatePtrs = std::map<SceUID, ThreadStatePtr>;
+using ThreadStateRefs = std::map<SceUID, ThreadStateRef>;
 using SceKernelModuleInfoPtrs = std::map<SceUID, SceKernelModulePtr>;
 using ExportNids = unordered_map_fast<uint32_t, Address>;
 // A NID hashes the function name alone, so same-named exports from different libraries collide.
@@ -74,7 +74,7 @@ constexpr uint64_t lib_export_key(uint32_t library_nid, uint32_t nid) {
 }
 
 using NotFoundVars = std::map<Address, uint32_t>;
-using CallImportFunc = std::function<void(CPUState &cpu, uint32_t nid, SceUID thread_id)>;
+using CallImportFunc = std::function<CallResult(CPUState &cpu, uint32_t nid, SceUID thread_id)>;
 
 struct CodecEngineBlock {
     uint32_t size;
@@ -123,15 +123,12 @@ struct KernelState {
     unsigned int tls_psize = 0;
     unsigned int tls_msize = 0;
 
-    Ptr<const void> thread_event_start = Ptr<const void>(0);
-    Address thread_event_start_arg = 0;
-    Ptr<const void> thread_event_end = Ptr<const void>(0);
-    Address thread_event_end_arg = 0;
-
     // Thread manager objects other than threads, by UID
     KernelObjects objects;
+    // The objects the kernel made for itself, which no guest UID reaches
+    KernelObjects kernel_objects;
 
-    ThreadStatePtrs threads;
+    ThreadStateRefs threads;
     void *jni_env;
     void *jni_activity;
 
@@ -152,9 +149,8 @@ struct KernelState {
     CorenumAllocator corenum_allocator;
     CallImportFunc call_import;
 
-    // Shared NOP+WFI sentinel used by the Dynarmic as the halt return address
+    // Thumb NOP and WFI that guest functions called by the kernel return to
     Block halt_instruction;
-    Address halt_instruction_pc;
 
     ObjectStore obj_store;
 
@@ -166,6 +162,9 @@ struct KernelState {
     Ptr<void> client_vtable = Ptr<void>(0);
     Ptr<Address> shellsvc_client = Ptr<Address>(0);
     Ptr<void> libc_dso_handle_main = Ptr<void>(0);
+    // The stack canary every thread gets in TLS slot 7. The console makes one for each process from
+    // its MT19937. One fixed word keeps runs repeatable.
+    static constexpr SceUInt32 STACK_CHECK_GUARD = 0xC325C2A7;
 
     Debugger debugger;
 
@@ -174,41 +173,45 @@ struct KernelState {
     std::atomic<Address> exception_handlers[EXCEPTION_HANDLER_MAX]{};
     std::condition_variable thread_deleted_cond;
 
+    // The next UID of any kind, memory blocks too, in the Vita's form: positive, odd and with bit 30
+    // set
     SceUID get_next_uid() {
-        return next_uid++;
+        return static_cast<SceUID>(0x40000000 | next_uid++ << 1 | 1);
     }
 
     bool init(MemState &mem, const CallImportFunc &call_import, bool cpu_opt);
     void deinit(MemState &mem);
     void load_process_param(MemState &mem, Ptr<uint32_t> ptr);
-    ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point = Ptr<const void>(0));
-    // Creates a dormant thread with these creation arguments, attr without THREAD_ATTR_USER, or returns null
-    ThreadStatePtr create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr, const SceKernelThreadOptParam *option);
+    // Creates a dormant thread with these creation arguments, attr without
+    // SCE_KERNEL_THREAD_ATTR_USER, or returns null
+    ThreadStateRef create_thread(MemState &mem, const char *name, Ptr<const void> entry_point, int init_priority, SceInt32 affinity_mask, int stack_size, SceUInt32 attr);
 
-    ThreadStatePtr get_thread(SceUID thread_id);
+    ThreadStateRef get_thread(SceUID thread_id);
 
-    // Creates a callback owned by thread and returns its UID.
-    SceUID create_callback(const ThreadStatePtr &thread, const char *name, Ptr<SceKernelCallbackFunction> func, Ptr<void> common);
-    // Deletes the callback with this UID for the thread deleter, so it never runs again. Returns false
-    // if there is none.
-    bool delete_callback(SceUID id, SceUID deleter);
     Ptr<Ptr<void>> get_thread_tls_addr(MemState &mem, SceUID thread_id, int key);
 
-    bool is_threads_paused() {
-        const std::lock_guard<std::mutex> lock(mutex);
-        return threads_paused;
-    }
-    void pause_threads();
-    void resume_threads();
-    // Stops every thread for the debugger, and the threads created until the resume start stopped
-    void suspend_threads();
-    void resume_suspended_threads();
+    // Whether the emulator pause holds every thread. Threads read it without mutex, under their own lock.
+    bool is_threads_paused() const { return threads_paused; }
+    // Pauses every thread, and the threads created until the pause ends, or lets them run again
+    void set_threads_paused(bool paused);
+    // Stops every thread for the debugger, and the threads created until it lets them go, or lets
+    // them run again
+    void set_threads_suspended(bool suspended);
+
+    // Adds handler to the objects and the list under a new UID and returns the UID
+    SceUID register_thread_event_handler(ThreadEventHandlerRef handler);
+    // Deletes handler, false if it is no longer listed. A handler still running is unlisted when
+    // its last run ends.
+    bool unregister_thread_event_handler(ThreadEventHandler &handler);
+
+    // The registered thread event handlers in registration order. A handler stays listed while it runs.
+    std::mutex thread_event_handlers_mutex;
+    RefList<ThreadEventHandler> thread_event_handlers;
 
     // Kill all guest threads and block until they have exited. Must only be called from a host thread.
     void process_exit();
     std::function<void(int, std::optional<AppLaunchRequest>)> process_exit_callback;
-    // Request process exit. Safe to call from a guest thread. Returns immediately.
-    // The registered process_exit_callback is invoked to notify the host layer.
+    // Ends the app from any thread without waiting, with no thread mutex or object lock held
     void request_process_exit(int res, std::optional<AppLaunchRequest> relaunch = std::nullopt);
 
     void set_memory_watch(bool enabled);
@@ -219,7 +222,13 @@ private:
 #ifdef __SWITCH__
     HostThreads host_threads;
 #endif
-    std::atomic<SceUID> next_uid{ 1 };
-    bool threads_paused = false;
+    std::atomic<uint32_t> next_uid{ 1 };
+    std::atomic<bool> threads_paused{ false };
     bool threads_suspended = false;
+    // The process is exiting, so a thread still being created ends as well
+    bool process_exiting = false;
+
+public:
+    // Declared last so the service stops before the tables are destroyed.
+    TimerService timers;
 };

@@ -685,7 +685,7 @@ void lookup_and_get_surface_data(GLState &renderer, MemState &mem, SceGxmColorSu
     std::uint32_t swizzle = 0;
 
     GLint tex_handle = static_cast<GLint>(renderer.surface_cache.retrieve_color_surface_texture_handle(renderer, static_cast<std::uint16_t>(surface.width),
-        static_cast<std::uint16_t>(surface.height), static_cast<std::uint16_t>(surface.strideInPixels),
+        static_cast<std::uint16_t>(surface.height), surface.strideInPixels,
         gxm::get_base_format(surface.colorFormat), surface.data, SurfaceTextureRetrievePurpose::READING, swizzle));
 
     if (tex_handle == 0) {
@@ -952,18 +952,22 @@ std::vector<uint32_t> GLState::dump_frame(DisplayState &display, uint32_t &width
 
 int GLState::get_supported_filters() {
     return static_cast<int>(Filter::NEAREST) | static_cast<int>(Filter::BILINEAR)
-        | static_cast<int>(Filter::BICUBIC) | static_cast<int>(Filter::FXAA);
+        | static_cast<int>(Filter::BICUBIC) | static_cast<int>(Filter::FXAA) | static_cast<int>(Filter::SMAA) | static_cast<int>(Filter::FSR);
 }
 
 void GLState::set_screen_filter(const std::string_view &filter) {
     if (filter == "Nearest")
-        screen_renderer.filter = ScreenRenderer::Filter::Nearest;
+        screen_renderer.set_filter(ScreenFilter::NEAREST);
     else if (filter == "FXAA")
-        screen_renderer.filter = ScreenRenderer::Filter::FXAA;
+        screen_renderer.set_filter(ScreenFilter::FXAA);
+    else if (filter == "SMAA")
+        screen_renderer.set_filter(ScreenFilter::SMAA);
+    else if (filter == "FSR")
+        screen_renderer.set_filter(ScreenFilter::FSR);
     else if (filter == "Bicubic")
-        screen_renderer.filter = ScreenRenderer::Filter::Bicubic;
+        screen_renderer.set_filter(ScreenFilter::BICUBIC);
     else
-        screen_renderer.filter = ScreenRenderer::Filter::Bilinear;
+        screen_renderer.set_filter(ScreenFilter::BILINEAR);
 }
 
 int GLState::get_max_anisotropic_filtering() {

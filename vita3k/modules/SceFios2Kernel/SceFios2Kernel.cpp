@@ -18,6 +18,7 @@
 #include <module/module.h>
 
 #include <io/functions.h>
+#include <io/state.h>
 
 #include <util/tracy.h>
 TRACY_MODULE_NAME(SceFios2Kernel);
@@ -39,6 +40,8 @@ enum SceFiosKernelResult {
     SCE_FIOS_OK = 0,
     SCE_FIOS_ERROR_BAD_PTR = 0x80B4000B,
 };
+
+static constexpr int SCE_FIOS_ERROR_NULL_OUT_ID = 0x80820006;
 
 using SceFiosOverlayID = SceUID;
 
@@ -64,7 +67,9 @@ EXPORT(int, _sceFiosKernelOverlayAdd, SceFiosProcessOverlay *pOverlay, SceFiosOv
 
 EXPORT(int, _sceFiosKernelOverlayAddForProcess, SceUID pid, SceFiosProcessOverlay *pOverlay, SceFiosOverlayID *pOutID) {
     TRACY_FUNC(_sceFiosKernelOverlayAddForProcess, pid, pOverlay, pOutID);
-    if (!pOverlay || !pOutID)
+    if (!pOutID)
+        return SCE_FIOS_ERROR_NULL_OUT_ID;
+    if (!pOverlay)
         return RET_ERROR(SCE_FIOS_ERROR_BAD_PTR);
 
     *pOutID = create_overlay(emuenv.io, pOverlay);

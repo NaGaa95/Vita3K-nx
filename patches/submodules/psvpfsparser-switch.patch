@@ -19,36 +19,40 @@ index a23ff8619ee1cefbfadfea289b2541e4d6177ee6..05bebf705748db58efa5e974b4795a61
 -
  namespace psvpfs = std::filesystem;
 +#endif
-diff --git a/PsvPfsParserConfig.cpp b/PsvPfsParserConfig.cpp
-index 0f4b9ddec8885694bd0d9a1b18db31fc96ed1cc1..7857701fb3e11e2946b74f1a243b4b38e3df8712 100644
---- a/PsvPfsParserConfig.cpp
-+++ b/PsvPfsParserConfig.cpp
-@@ -25,8 +25,9 @@ int execute(std::shared_ptr<ICryptoOperations> cryptops, std::shared_ptr<IF00DKe
+diff --git a/PfsSaveData.cpp b/PfsSaveData.cpp
+index 83eb6563be70cf18311acc956d857747c7e99165..400e618a715383b4c489db44f5414feb82d62cd6 100644
+--- a/PfsSaveData.cpp
++++ b/PfsSaveData.cpp
+@@ -498,7 +498,8 @@ int encrypt_savedata(const psvpfs::path& src, const psvpfs::path& dst, PfsProgre
+    std::uint64_t total_bytes = 0;
+    for(auto it = psvpfs::recursive_directory_iterator(src); it != psvpfs::recursive_directory_iterator(); ++it)
+    {
+-      const psvpfs::path rel = psvpfs::relative(it->path(), src);
++      // lexically_relative is a pure string operation, relative() throws on the "sdmc:" devoptab
++      const psvpfs::path rel = it->path().lexically_relative(src);
+       if(it.depth() == 0 && to_upper(rel.generic_string()) == "SCE_PFS")
+       {
+          it.disable_recursion_pending();
+@@ -517,7 +518,7 @@ int encrypt_savedata(const psvpfs::path& src, const psvpfs::path& dst, PfsProgre
+       e.parent = rel.has_parent_path() ? dir_ids.at(rel.parent_path()) : 0;
+       const bool in_sce_sys = to_upper(rel.parent_path().generic_string()) == "SCE_SYS";
+       e.type = file_type(it->is_directory(), !rel.has_parent_path(), in_sce_sys, e.name);
+-      e.size = it->is_directory() ? DIRECTORY_SIZE : static_cast<std::uint32_t>(it->file_size());
++      e.size = it->is_directory() ? DIRECTORY_SIZE : static_cast<std::uint32_t>(psvpfs::file_size(it->path()));
  
-     std::cout << "keystone sanity check..." << std::endl;
- 
-+    const bool keystone_exists = psvpfs::exists(destTitleIdPath / "sce_sys" / "keystone");
-     if (get_keystone(cryptops, destTitleIdPath) < 0)
--        return -1;
-+        return keystone_exists ? -1 : PFS_EXECUTE_MISSING_KEYSTONE;
- 
-     std::cout << "F00D cache:" << std::endl;
-     iF00D->print_cache(std::cout);
-diff --git a/PsvPfsParserConfig.h b/PsvPfsParserConfig.h
-index 35a82de8eea467e52da93eb15aaa650cce24b10b..6d561d1b8ff2ab1afec33ab4acddfc06d8d79e51 100644
---- a/PsvPfsParserConfig.h
-+++ b/PsvPfsParserConfig.h
-@@ -14,4 +14,8 @@ struct PsvPfsParserConfig {
-     std::string f00d_arg;
- };
- 
-+// execute() completed the PFS mount and file decryption, but the decrypted
-+// output has no keystone. Vita themes intentionally use this layout.
-+constexpr int PFS_EXECUTE_MISSING_KEYSTONE = -2;
-+
- int execute(std::string &zrif, std::string &title_src, std::string &title_dst, F00DEncryptorTypes type, std::string &f00d_arg, PfsProgressCallback progress = nullptr);
+       if(fixed_ids && fixed_ids->count(e.key))
+       {
+@@ -544,7 +545,7 @@ int encrypt_savedata(const psvpfs::path& src, const psvpfs::path& dst, PfsProgre
+    std::uint64_t done = 0;
+    for(auto& e : entries)
+    {
+-      if(!encrypt_file(ctx, e, dst / psvpfs::relative(e.real, src), icv_dir, output))
++      if(!encrypt_file(ctx, e, dst / e.real.lexically_relative(src), icv_dir, output))
+          return -1;
+       if(!(e.type & ATTR_DIR))
+       {
 diff --git a/Utils.cpp b/Utils.cpp
-index 223c32edecb9a593943cc19abb57b33b73e7a3d7..eca8c2f71642fef435340631ff750e92c1303de8 100644
+index 59949cd005c4c99a0cafda62043c29d49ee74448..1cc04d2c142d268389650746517912648b59c915 100644
 --- a/Utils.cpp
 +++ b/Utils.cpp
 @@ -9,6 +9,9 @@
@@ -61,34 +65,7 @@ index 223c32edecb9a593943cc19abb57b33b73e7a3d7..eca8c2f71642fef435340631ff750e92
  #endif
  
  bool isZeroVector(const std::vector<std::uint8_t>& data)
-@@ -70,7 +73,7 @@ void getFileListNoPfs(psvpfs::path root_path, std::set<psvpfs::path>& files, std
-          //skip pfs directory
-          if(cp.filename() == psvpfs::path("sce_pfs")) {
- #ifdef PSVPFS_BOOST
--            i.no_push(true);
-+            i.disable_recursion_pending();
- #endif
-             continue;
-          }
-@@ -78,7 +81,7 @@ void getFileListNoPfs(psvpfs::path root_path, std::set<psvpfs::path>& files, std
-          //skip packages
-          if(cp == (root_path / "sce_sys" / "package")) {
- #ifdef PSVPFS_BOOST
--            i.no_push(true);
-+            i.disable_recursion_pending();
- #endif
-             continue;
-          }
-@@ -88,7 +91,7 @@ void getFileListNoPfs(psvpfs::path root_path, std::set<psvpfs::path>& files, std
-             cp != root_path / psvpfs::path("sce_sys") &&
-                psvpfs::exists(cp / psvpfs::path("keystone"))) {
- #ifdef PSVPFS_BOOST
--            i.no_push(true);
-+            i.disable_recursion_pending();
- #endif
-             continue;
-          }
-@@ -103,7 +106,11 @@ void getFileListNoPfs(psvpfs::path root_path, std::set<psvpfs::path>& files, std
+@@ -97,7 +100,11 @@ void getFileListNoPfs(psvpfs::path root_path, std::set<psvpfs::path>& files, std
  }
  
  psvpfs::path source_path_to_dest_path(const psvpfs::path& source_root, const psvpfs::path& dest_root, const psvpfs::path& source_path) {
@@ -101,7 +78,7 @@ index 223c32edecb9a593943cc19abb57b33b73e7a3d7..eca8c2f71642fef435340631ff750e92
     return psvpfs::path(dest_path.generic_string());
  }
  
-@@ -253,6 +260,32 @@ bool sce_junction::copy_existing_file(const psvpfs::path& source_root, const psv
+@@ -247,6 +254,32 @@ bool sce_junction::copy_existing_file(const psvpfs::path& source_root, const psv
  
     //copy the file
  
@@ -134,7 +111,7 @@ index 223c32edecb9a593943cc19abb57b33b73e7a3d7..eca8c2f71642fef435340631ff750e92
     if(psvpfs::exists(new_path))
        psvpfs::remove(new_path);
  
-@@ -263,6 +296,7 @@ bool sce_junction::copy_existing_file(const psvpfs::path& source_root, const psv
+@@ -257,6 +290,7 @@ bool sce_junction::copy_existing_file(const psvpfs::path& source_root, const psv
        std::cout << "Failed to copy: " << m_real.generic_string() << " to " << new_path.generic_string() << std::endl;
        return false;
     }
@@ -142,7 +119,7 @@ index 223c32edecb9a593943cc19abb57b33b73e7a3d7..eca8c2f71642fef435340631ff750e92
  
     return true;
  }
-@@ -275,7 +309,20 @@ bool sce_junction::copy_existing_file(const psvpfs::path& source_root, const psv
+@@ -269,7 +303,20 @@ bool sce_junction::copy_existing_file(const psvpfs::path& source_root, const psv
  
     // trim size
     psvpfs::path new_path = source_path_to_dest_path(source_root, destination_root, m_real);

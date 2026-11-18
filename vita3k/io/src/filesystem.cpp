@@ -36,8 +36,7 @@ SharedFilePtr open_shared_file(const fs::path &path, int flags) {
         return {};
     // Keep read-ahead across positional reads; newlib discards it on seeks in rb+ mode.
     setvbuf(file, nullptr, _IONBF, 0);
-    auto shared = std::make_shared<SharedFile>(SharedFile{ FilePtr(file, std::fclose), writable });
-    return shared;
+    return std::make_shared<SharedFile>(FilePtr(file, std::fclose), writable);
 }
 
 static int64_t read_host_file(SharedFile &shared, void *data, size_t size, int64_t offset) {

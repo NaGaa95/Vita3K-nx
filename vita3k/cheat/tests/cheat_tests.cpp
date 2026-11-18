@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <cheat/functions.h>
+#include <cheat/search.h>
 
 #include <mem/functions.h>
 #include <mem/ptr.h>
@@ -23,8 +24,13 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <fstream>
+#include <iterator>
+#include <random>
+#include <system_error>
 
 namespace {
 
@@ -34,14 +40,14 @@ class CheatTest : public ::testing::Test {
 protected:
     void SetUp() override {
         ASSERT_TRUE(init(mem, false));
+        state.launch_delay_frames = 0;
 
         scratch = alloc(mem, scratch_size, "cheat-tests");
         ASSERT_NE(scratch, 0u);
         memset(Ptr<uint8_t>(scratch).get(mem), 0, scratch_size);
 
-        directory = fs::temp_directory_path() / "vita3k-cheat-tests";
-        std::error_code error;
-        fs::remove_all(directory, error);
+        // A fixed name would let concurrent test processes delete each other's files.
+        directory = fs::temp_directory_path() / fmt::format("vita3k-cheat-tests-{}-{}", std::chrono::steady_clock::now().time_since_epoch().count(), std::random_device{}());
         fs::create_directories(directory);
     }
 
@@ -140,8 +146,68 @@ TEST_F(CheatTest, drops_malformed_lines_and_empty_cheats) {
 
     ASSERT_EQ(file.cheats.size(), 1u);
     EXPECT_EQ(file.cheats[0].name, "Broken code");
+    EXPECT_TRUE(file.cheats[0].broken);
     ASSERT_EQ(file.cheats[0].lines.size(), 1u);
     EXPECT_EQ(file.cheats[0].lines[0].first, 0x81000004u);
+}
+
+TEST_F(CheatTest, a_malformed_condition_does_not_leave_its_write_unconditional) {
+    run(fmt::format("_V1 Guarded\n"
+                    "$D2OO {:08X} 00000001\n"
+                    "$0200 {:08X} 0000002A\n",
+        at(4), at(0)));
+
+    EXPECT_EQ(read32(0), 0u);
+    EXPECT_TRUE(cheat::snapshot(state).cheats[0].broken);
+}
+
+TEST_F(CheatTest, an_invalid_code_stops_the_whole_cheat_before_any_write) {
+    run(fmt::format("_V1 Incomplete pointer write\n"
+                    "$0200 {:08X} 0000002A\n"
+                    "$3201 {:08X} 00000000\n",
+        at(0), at(4)));
+
+    EXPECT_EQ(read32(0), 0u);
+    EXPECT_TRUE(cheat::snapshot(state).cheats[0].broken);
+}
+
+TEST_F(CheatTest, a_cheat_over_the_line_limit_is_broken_before_any_write) {
+    std::string contents = "_V1 Too long\n";
+    for (int i = 0; i < 4097; i++)
+        contents += fmt::format("$0200 {:08X} 0000002A\n", at(0));
+    run(contents);
+
+    EXPECT_EQ(read32(0), 0u);
+    EXPECT_TRUE(cheat::snapshot(state).cheats[0].broken);
+}
+
+TEST_F(CheatTest, a_cheat_that_cannot_be_interpreted_is_flagged_once_loaded) {
+    write_file(title_id,
+        "_V0 Unsupported code type\n"
+        "$F000 00000000 00000000\n");
+
+    // The cheat manager reads the flag before the cheat is ever turned on.
+    ASSERT_TRUE(cheat::load(state, directory, title_id));
+    EXPECT_TRUE(cheat::snapshot(state).cheats[0].broken);
+}
+
+TEST_F(CheatTest, a_cheat_repeating_too_many_writes_is_broken_before_any_write) {
+    run(fmt::format("_V1 Too many repeats\n"
+                    "$0200 {:08X} 0000002A\n"
+                    "$4201 {:08X} 00000001\n"
+                    "$FFFF 00000000 00000000\n"
+                    "$4201 {:08X} 00000001\n"
+                    "$FFFF 00000000 00000000\n",
+        at(0), at(4), at(8)));
+
+    EXPECT_EQ(read32(0), 0u);
+    EXPECT_TRUE(cheat::snapshot(state).cheats[0].broken);
+}
+
+TEST_F(CheatTest, a_file_only_prefixed_with_the_title_id_is_not_picked) {
+    write_named(title_id + "-backup.psv", "_V0 Backup\n$0200 81000000 0000000A\n");
+
+    EXPECT_TRUE(cheat::find_cheat_file(directory, title_id).empty());
 }
 
 TEST_F(CheatTest, only_boot_cheats_are_on_after_load) {
@@ -428,17 +494,53 @@ TEST_F(CheatTest, arm_write_is_undone_when_the_cheat_is_turned_off) {
     EXPECT_EQ(invalidated, 2u);
 }
 
-TEST_F(CheatTest, arm_write_honours_the_8_bit_width) {
-    write32(0, 0x11223344);
+TEST_F(CheatTest, master_switch_stops_and_restores_every_cheat) {
+    run(fmt::format("_V1 Freeze\n"
+                    "$0200 {:08X} 00000063\n",
+        at(0)));
 
-    run(fmt::format("_V1 Byte patch\n"
-                    "$A000 {:08X} 00000001\n",
-        at(1)));
+    EXPECT_EQ(read32(0), 0x63u);
 
-    EXPECT_EQ(read32(0), 0x11220144u);
+    cheat::set_enabled(state, false, mem, {});
+    write32(0, 0);
+    cheat::apply(state, mem, {});
+    EXPECT_EQ(read32(0), 0u);
+}
 
-    cheat::set_cheat_enabled(state, 0, false, mem, {});
-    EXPECT_EQ(read32(0), 0x11223344u);
+TEST_F(CheatTest, saving_rewrites_the_boot_markers_only) {
+    const auto path = write_file(title_id,
+        "# PCSA00001 Test Game\r\n"
+        "_V0 First\r\n"
+        "$0200 81000000 0000000A\r\n"
+        "_V1 Second\r\n"
+        "$0200 81000004 0000000B\r\n");
+
+    ASSERT_TRUE(cheat::load(state, directory, title_id));
+    cheat::set_cheat_enabled(state, 0, true, mem, {});
+    cheat::set_cheat_enabled(state, 1, false, mem, {});
+    ASSERT_TRUE(cheat::save(state));
+
+    const auto saved = cheat::parse_cheat_file(path, title_id);
+    ASSERT_EQ(saved.cheats.size(), 2u);
+    EXPECT_TRUE(saved.cheats[0].enabled_on_boot);
+    EXPECT_FALSE(saved.cheats[1].enabled_on_boot);
+    EXPECT_EQ(saved.header, "PCSA00001 Test Game");
+    EXPECT_EQ(saved.cheats[0].lines[0].first, 0x81000000u);
+    EXPECT_FALSE(fs::exists(fs::path(path) += ".tmp"));
+}
+
+TEST_F(CheatTest, saving_accepts_lowercase_markers) {
+    const auto path = write_file(title_id,
+        "\xEF\xBB\xBF_v0 Lowercase\n"
+        "$0200 81000000 0000000A\n");
+
+    ASSERT_TRUE(cheat::load(state, directory, title_id));
+    cheat::set_cheat_enabled(state, 0, true, mem, {});
+    ASSERT_TRUE(cheat::save(state));
+
+    const auto saved = cheat::parse_cheat_file(path, title_id);
+    ASSERT_EQ(saved.cheats.size(), 1u);
+    EXPECT_TRUE(saved.cheats[0].enabled_on_boot);
 }
 
 TEST_F(CheatTest, a_later_folder_is_searched_when_the_first_has_no_file) {
@@ -491,46 +593,284 @@ TEST_F(CheatTest, a_file_in_the_cheats_folder_is_saved_in_place) {
     EXPECT_TRUE(cheat::parse_cheat_file(path, title_id).cheats[0].enabled_on_boot);
 }
 
-TEST_F(CheatTest, lowercase_markers_are_saved_too) {
-    const auto path = write_file(title_id, "_v0 Lower\n$0200 81000000 0000000A\n");
+TEST_F(CheatTest, arm_writes_sharing_an_address_restore_the_real_original) {
+    write32(0, 0xE1A00000);
 
-    ASSERT_TRUE(cheat::load(state, directory, title_id));
-    cheat::set_cheat_enabled(state, 0, true, mem, {});
-    ASSERT_TRUE(cheat::save(state));
+    run(fmt::format("_V1 First\n"
+                    "$A200 {:08X} 11111111\n"
+                    "_V1 Second\n"
+                    "$A200 {:08X} 22222222\n",
+        at(0), at(0)));
+    EXPECT_EQ(read32(0), 0x22222222u);
 
-    EXPECT_TRUE(cheat::parse_cheat_file(path, title_id).cheats[0].enabled_on_boot);
+    cheat::set_cheat_enabled(state, 0, false, mem, {});
+    cheat::apply(state, mem, {});
+    EXPECT_EQ(read32(0), 0x22222222u);
+
+    cheat::set_cheat_enabled(state, 1, false, mem, {});
+    EXPECT_EQ(read32(0), 0xE1A00000u);
 }
 
-TEST_F(CheatTest, master_switch_stops_and_restores_every_cheat) {
-    run(fmt::format("_V1 Freeze\n"
-                    "$0200 {:08X} 00000063\n",
-        at(0)));
+TEST_F(CheatTest, overlapping_arm_writes_of_different_sizes_restore_the_real_original) {
+    write32(0, 0xE1A00000);
 
-    EXPECT_EQ(read32(0), 0x63u);
+    run(fmt::format("_V1 Thumb\n"
+                    "$A100 {:08X} 0000BF00\n"
+                    "_V1 ARM\n"
+                    "$A200 {:08X} 22222222\n",
+        at(0), at(0)));
+    EXPECT_EQ(read32(0), 0x22222222u);
 
+    // The 16-bit patch is undone first, the 32-bit one must not bring its bytes back.
     cheat::set_enabled(state, false, mem, {});
+    EXPECT_EQ(read32(0), 0xE1A00000u);
+}
+
+TEST_F(CheatTest, arm_writes_of_different_sizes_in_one_cheat_are_all_undone) {
+    write32(0, 0xE1A00000);
+
+    run(fmt::format("_V1 Both sizes\n"
+                    "$A100 {:08X} 0000BF00\n"
+                    "$A200 {:08X} 22222222\n",
+        at(0), at(0)));
+    EXPECT_EQ(read32(0), 0x22222222u);
+
+    cheat::set_cheat_enabled(state, 0, false, mem, {});
+    EXPECT_EQ(read32(0), 0xE1A00000u);
+}
+
+TEST_F(CheatTest, relative_base_only_resolves_the_main_executable) {
+    CheatModule main_module;
+    main_module.name = "eboot";
+    main_module.segments[1] = { at(0x100), 0x100 };
+    cheat::add_module(state, main_module);
+
+    CheatModule second_module;
+    second_module.name = "second";
+    second_module.segments[0] = { at(0x200), 0x100 };
+    cheat::add_module(state, second_module);
+
+    run("_V1 Main executable\n"
+        "$B200 00000001 00000000\n"
+        "$0200 00000010 0000002A\n"
+        "_V1 Second module\n"
+        "$B201 00000000 00000000\n"
+        "$0200 00000020 0000002B\n");
+
+    EXPECT_EQ(read32(0x110), 0x2Au);
+    EXPECT_EQ(read32(0x120), 0u);
+    EXPECT_EQ(read32(0x220), 0u);
+
+    const auto file = cheat::snapshot(state);
+    EXPECT_FALSE(file.cheats[0].broken);
+    EXPECT_TRUE(file.cheats[1].broken);
+}
+
+TEST_F(CheatTest, relative_base_reaches_every_segment_of_the_module_info) {
+    CheatModule main_module;
+    main_module.name = "eboot";
+    main_module.segments[3] = { at(0x300), 0x100 };
+    cheat::add_module(state, main_module);
+
+    run("_V1 Last segment\n"
+        "$B200 00000003 00000000\n"
+        "$0200 00000010 0000002A\n");
+
+    EXPECT_EQ(read32(0x310), 0x2Au);
+}
+
+TEST_F(CheatTest, a_skipped_guard_still_sets_the_relative_base_it_covers) {
+    CheatModule main_module;
+    main_module.name = "eboot";
+    main_module.segments[1] = { at(0x100), 0x100 };
+    cheat::add_module(state, main_module);
+
+    run("_V1 Guarded base\n"
+        "$C201 00000000 00000100\n"
+        "$B200 00000001 00000000\n"
+        "$0200 00000010 0000002A\n"
+        "$0200 00000020 0000002B\n");
+
+    EXPECT_EQ(read32(0x110), 0u);
+    EXPECT_EQ(read32(0x120), 0x2Bu);
+}
+
+TEST_F(CheatTest, a_held_guard_runs_the_relative_base_and_the_code_it_covers) {
+    CheatModule main_module;
+    main_module.name = "eboot";
+    main_module.segments[1] = { at(0x100), 0x100 };
+    cheat::add_module(state, main_module);
+
+    run("_V1 Guarded base\n"
+        "$C201 00000000 00000100\n"
+        "$B200 00000001 00000000\n"
+        "$0200 00000010 0000002A\n"
+        "$0200 00000020 0000002B\n",
+        0x100);
+
+    EXPECT_EQ(read32(0x110), 0x2Au);
+    EXPECT_EQ(read32(0x120), 0x2Bu);
+}
+
+TEST_F(CheatTest, turning_one_arm_cheat_off_keeps_the_patch_another_one_still_wants) {
+    write32(0, 0xE1A00000);
+
+    run(fmt::format("_V1 First\n"
+                    "$A200 {:08X} 11111111\n"
+                    "_V1 Second\n"
+                    "$A200 {:08X} 22222222\n",
+        at(0), at(0)));
+    EXPECT_EQ(read32(0), 0x22222222u);
+
+    cheat::set_cheat_enabled(state, 1, false, mem, {});
+    EXPECT_EQ(read32(0), 0x11111111u);
+
+    cheat::set_cheat_enabled(state, 0, false, mem, {});
+    EXPECT_EQ(read32(0), 0xE1A00000u);
+}
+
+TEST_F(CheatTest, nothing_is_written_until_the_game_has_presented_enough_frames) {
+    state.launch_delay_frames = 3;
+    write_file(title_id, fmt::format("_V1 Money\n$0200 {:08X} 0000002A\n", at(0)));
+    ASSERT_TRUE(cheat::load(state, directory, title_id));
+    cheat::set_enabled(state, true, mem, {});
+
+    state.count_frame();
+    state.count_frame();
+    cheat::apply(state, mem, {});
+    EXPECT_EQ(read32(0), 0u);
+
+    state.count_frame();
+    cheat::apply(state, mem, {});
+    EXPECT_EQ(read32(0), 0x2Au);
+}
+
+TEST_F(CheatTest, unloading_restarts_the_frame_count) {
+    state.launch_delay_frames = 1;
+    write_file(title_id, fmt::format("_V1 Money\n$0200 {:08X} 0000002A\n", at(0)));
+    ASSERT_TRUE(cheat::load(state, directory, title_id));
+    cheat::set_enabled(state, true, mem, {});
+    state.count_frame();
+    cheat::apply(state, mem, {});
+    ASSERT_EQ(read32(0), 0x2Au);
+
     write32(0, 0);
+    cheat::unload(state);
+    ASSERT_TRUE(cheat::load(state, directory, title_id));
+    cheat::set_enabled(state, true, mem, {});
     cheat::apply(state, mem, {});
     EXPECT_EQ(read32(0), 0u);
 }
 
-TEST_F(CheatTest, saving_rewrites_the_boot_markers_only) {
-    const auto path = write_file(title_id,
-        "# PCSA00001 Test Game\r\n"
-        "_V0 First\r\n"
+TEST_F(CheatTest, lists_every_game_with_the_file_that_wins_for_it) {
+    write_named("cheat.db",
+        "_S PCSA00001 From the database\n"
+        "_V0 Hidden\n"
+        "$0200 81000000 0000000A\n"
+        "_S PCSB00002 Second Game\n"
+        "_V0 Listed\n"
+        "$0200 81000000 0000000A\n");
+    write_file(title_id, "# PCSA00001 First Game\n_V0 Mine\n$0200 81000000 0000000A\n");
+    write_named("notes.psv", "_V0 Not a game\n$0200 81000000 0000000A\n");
+
+    const auto games = cheat::list_cheat_games(directory);
+    ASSERT_EQ(games.size(), 2u);
+    EXPECT_EQ(games[0].title_id, title_id);
+    EXPECT_EQ(games[0].name, "First Game");
+    EXPECT_EQ(games[0].path, cheat::find_cheat_file(directory, title_id));
+    EXPECT_EQ(games[1].title_id, "PCSB00002");
+    EXPECT_EQ(games[1].name, "Second Game");
+    EXPECT_EQ(fs_utils::path_to_utf8(games[1].path.filename()), "cheat.db");
+}
+
+TEST_F(CheatTest, appending_to_a_database_lands_at_the_end_of_the_section) {
+    const auto path = write_named("cheat.db",
+        "_S PCSA00001\r\n"
+        "_V1 First\r\n"
         "$0200 81000000 0000000A\r\n"
-        "_V1 Second\r\n"
+        "\r\n"
+        "_S PCSA00002\r\n"
+        "_V1 Other\r\n"
         "$0200 81000004 0000000B\r\n");
 
-    ASSERT_TRUE(cheat::load(state, directory, title_id));
-    cheat::set_cheat_enabled(state, 0, true, mem, {});
-    cheat::set_cheat_enabled(state, 1, false, mem, {});
-    ASSERT_TRUE(cheat::save(state));
+    cheat::Cheat added;
+    added.name = "Found";
+    added.lines.push_back(cheat::make_write_code(0x81000010, cheat::SearchType::u16, 0x1234));
+    ASSERT_TRUE(cheat::append_cheat(path, title_id, added));
 
-    const auto saved = cheat::parse_cheat_file(path, title_id);
-    ASSERT_EQ(saved.cheats.size(), 2u);
-    EXPECT_TRUE(saved.cheats[0].enabled_on_boot);
-    EXPECT_FALSE(saved.cheats[1].enabled_on_boot);
-    EXPECT_EQ(saved.header, "PCSA00001 Test Game");
-    EXPECT_EQ(saved.cheats[0].lines[0].first, 0x81000000u);
+    const auto mine = cheat::parse_cheat_file(path, title_id);
+    ASSERT_EQ(mine.cheats.size(), 2u);
+    EXPECT_EQ(mine.cheats[1].name, "Found");
+    EXPECT_EQ(cheat::format_code_line(mine.cheats[1].lines[0]), "$0100 81000010 00001234");
+    EXPECT_EQ(cheat::parse_cheat_file(path, "PCSA00002").cheats.size(), 1u);
+
+    std::ifstream stream(path.c_str(), std::ios::binary);
+    const std::string contents((std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+    EXPECT_NE(contents.find("$0200 81000000 0000000A\r\n_V0 Found\r\n$0100 81000010 00001234\r\n\r\n_S PCSA00002"), std::string::npos);
+}
+
+TEST_F(CheatTest, adding_a_cheat_while_running_keeps_the_other_toggles) {
+    write_file(title_id, fmt::format("_V0 First\n$0200 {:08X} 00000001\n_V0 Second\n$0200 {:08X} 00000002\n", at(0), at(4)));
+    ASSERT_TRUE(cheat::load(state, directory, title_id));
+    cheat::set_enabled(state, true, mem, {});
+    cheat::set_cheat_enabled(state, 1, true, mem, {});
+
+    cheat::Cheat added;
+    added.name = "Found";
+    added.enabled = true;
+    added.lines.push_back(cheat::make_write_code(at(8), cheat::SearchType::u32, 3));
+    ASSERT_TRUE(cheat::add_cheat(state, directory, title_id, added, mem, {}));
+    cheat::apply(state, mem, {});
+
+    EXPECT_EQ(read32(0), 0u);
+    EXPECT_EQ(read32(4), 2u);
+    EXPECT_EQ(read32(8), 3u);
+    EXPECT_EQ(cheat::enabled_cheat_count(state), 2u);
+}
+
+TEST_F(CheatTest, adding_a_cheat_creates_the_file_of_a_game_without_one) {
+    cheat::Cheat added;
+    added.name = "Found";
+    added.lines.push_back(cheat::make_write_code(at(0), cheat::SearchType::u8, 0xFF));
+    ASSERT_TRUE(cheat::add_cheat(state, directory, title_id, added, mem, {}));
+
+    const auto file = cheat::parse_cheat_file(directory / (title_id + ".psv"), title_id);
+    ASSERT_EQ(file.cheats.size(), 1u);
+    EXPECT_EQ(file.header, title_id);
+}
+
+TEST_F(CheatTest, search_narrows_down_to_the_value_that_changed) {
+    write32(0x10, 0x13572468);
+    write32(0x20, 0x13572468);
+
+    cheat::MemorySearch search;
+    search.new_search(mem, cheat::SearchType::u32, 0x13572468);
+    const auto &found = search.results();
+    EXPECT_NE(std::ranges::find(found, at(0x10)), found.end());
+    EXPECT_NE(std::ranges::find(found, at(0x20)), found.end());
+
+    write32(0x20, 7);
+    search.filter(mem, 7);
+    ASSERT_EQ(search.results().size(), 1u);
+    EXPECT_EQ(search.results()[0], at(0x20));
+
+    ASSERT_TRUE(cheat::write_search_value(mem, at(0x20), cheat::SearchType::u32, 99));
+    EXPECT_EQ(cheat::read_search_value(mem, at(0x20), cheat::SearchType::u32), 99u);
+}
+
+TEST_F(CheatTest, search_values_parse_as_the_picked_type) {
+    EXPECT_EQ(cheat::parse_search_value("-1", cheat::SearchType::s16), 0xFFFFu);
+    EXPECT_EQ(cheat::parse_search_value("0xFF", cheat::SearchType::u8), 0xFFu);
+    EXPECT_FALSE(cheat::parse_search_value("256", cheat::SearchType::u8));
+    EXPECT_FALSE(cheat::parse_search_value("12abc", cheat::SearchType::s32));
+    EXPECT_EQ(cheat::parse_search_value("1.5", cheat::SearchType::f32), 0x3FC00000u);
+    EXPECT_EQ(cheat::format_search_value(0xFFFFu, cheat::SearchType::s16), "-1");
+}
+
+TEST_F(CheatTest, float_search_tolerates_rounding) {
+    *Ptr<float>(at(0x30)).get(mem) = 3.14159274f;
+
+    cheat::MemorySearch search;
+    search.new_search(mem, cheat::SearchType::f32, *cheat::parse_search_value("3.14159", cheat::SearchType::f32));
+    EXPECT_NE(std::ranges::find(search.results(), at(0x30)), search.results().end());
 }

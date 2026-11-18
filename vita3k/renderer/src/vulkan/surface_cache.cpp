@@ -630,8 +630,8 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
 
             // if this surface has not been rendered to for the last 60 frames, consider it is not safe not to render all shaders to it
             constexpr uint64_t big_delay_between_frames = 60;
-            state.pipeline_cache.can_use_deferred_compilation = context->frame_timestamp - info.last_frame_rendered < big_delay_between_frames;
-            info.last_frame_rendered = context->frame_timestamp;
+            state.pipeline_cache.can_use_deferred_compilation = state.frame_timestamp - info.last_frame_rendered < big_delay_between_frames;
+            info.last_frame_rendered = state.frame_timestamp;
 
             if (state.features.support_shader_interlock && vk_format == vk::Format::eR8G8B8A8Srgb) {
                 return { retrieve_surface_gamma_view(state.device, info), &info.texture, info.raw_image.get(), info.storage_view ? info.storage_view : info.texture.view };
@@ -664,7 +664,7 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
         color_address_lookup.erase(info_added.data.address());
 
     color_surface_queue.set_as_mru(&info_added);
-    info_added.last_frame_rendered = context->frame_timestamp;
+    info_added.last_frame_rendered = state.frame_timestamp;
 
     color_address_lookup[address] = &info_added;
 
@@ -2030,7 +2030,7 @@ bool VKSurfaceCache::check_for_surface(MemState &mem, Address source_address, Ca
     // if the frame is already rendered skip
     // Note: that's not the best behavior but it should be fine
     // also it prevents invalidated surfaces from causing issues
-    if (surface.last_frame_rendered + MAX_FRAMES_RENDERING <= context.frame_timestamp)
+    if (surface.last_frame_rendered + MAX_FRAMES_RENDERING <= state.frame_timestamp)
         return false;
 
     if (surface.gpu_read_sync_only) {
@@ -2193,7 +2193,7 @@ bool VKSurfaceCache::sync_surface_for_gpu_read(Address address, uint32_t size) {
         return false;
 
     VKContext &context = *static_cast<VKContext *>(state.context);
-    if (surface.last_frame_rendered + MAX_FRAMES_RENDERING <= context.frame_timestamp)
+    if (surface.last_frame_rendered + MAX_FRAMES_RENDERING <= state.frame_timestamp)
         return false;
 
     const bool direct_mapping = !format_need_additional_memory(surface.format)
@@ -2536,7 +2536,7 @@ const uint8_t *VKSurfaceCache::prepare_color_transfer(const SceGxmTransferImage 
     if (*surface.dirty || !format_matches
         || surface.tiling != SurfaceTiling::Linear || surface.stride_bytes != uint32_t(source.stride)
         || delta >= surface.total_bytes || delta % pixel_size
-        || surface.last_frame_rendered + MAX_FRAMES_RENDERING <= context.frame_timestamp)
+        || surface.last_frame_rendered + MAX_FRAMES_RENDERING <= state.frame_timestamp)
         return nullptr;
 
     const uint64_t column = (delta % surface.stride_bytes) / pixel_size + source.x;

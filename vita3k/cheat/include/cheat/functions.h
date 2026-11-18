@@ -34,12 +34,16 @@ using JitInvalidate = std::function<void(uint32_t address, size_t size)>;
 
 void unload(CheatState &state);
 
+// The `$B2` codes are checked against the modules added before this.
 bool load(CheatState &state, const fs::path &cheats_dir, const std::string &title_id);
 
 // The first folder holding a file for the title wins.
 bool load(CheatState &state, const std::vector<fs::path> &cheats_dirs, const std::string &title_id);
 
-bool reload(CheatState &state, const std::vector<fs::path> &cheats_dirs, const std::string &title_id, MemState &mem, const JitInvalidate &invalidate_jit);
+bool reload(CheatState &state, const fs::path &cheats_dir, const std::string &title_id, MemState &mem, const JitInvalidate &invalidate_jit);
+
+// Writes `cheat` to the cheat file of the game, and turns it on right away when that game is running.
+bool add_cheat(CheatState &state, const fs::path &cheats_dir, const std::string &title_id, const Cheat &cheat, MemState &mem, const JitInvalidate &invalidate_jit);
 
 // Module index 0 of a `$B2` code is whichever module is registered first.
 void add_module(CheatState &state, const CheatModule &module);
@@ -55,14 +59,15 @@ void set_all_cheats_enabled(CheatState &state, bool enabled, MemState &mem, cons
 // Mirrors the `enable-cheats` setting, turning it off restores every ARM write.
 void set_enabled(CheatState &state, bool enabled, MemState &mem, const JitInvalidate &invalidate_jit);
 
-size_t cheat_count(const CheatState &state);
-
 size_t enabled_cheat_count(const CheatState &state);
+
+// Title of the running game, empty when none is running.
+std::string loaded_title_id(const CheatState &state);
 
 CheatFile snapshot(const CheatState &state);
 
-// Writes the on/off state of every cheat back to its file, or to a copy in `cheats_dir` when the
-// file lives elsewhere, see save_cheat_file().
+// Writes the on/off state of every cheat back to its file. A file outside `cheats_dir` is read-only
+// (bundled with the emulator), so its markers go into a copy there, which is found first from then on.
 bool save(CheatState &state, const fs::path &cheats_dir = {});
 
 } // namespace cheat

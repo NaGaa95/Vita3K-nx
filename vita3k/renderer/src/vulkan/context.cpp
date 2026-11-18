@@ -56,7 +56,7 @@ static void copy_readback_to_guest(const MemState &mem, Address address, const u
 }
 #endif
 
-void VKContext::wait_thread_function(const MemState &mem) {
+void VKState::wait_thread_function(const MemState &mem) {
     switch_pin_to_hardware_priority("Vulkan wait thread", 45);
 
     // try to wait for multiple fences at the same time if possible
@@ -64,14 +64,14 @@ void VKContext::wait_thread_function(const MemState &mem) {
 
     auto wait_for_fences = [&]() {
         while (!fences.empty()) {
-            if (state.device_lost.load(std::memory_order_acquire)) {
+            if (device_lost.load(std::memory_order_acquire)) {
                 fences.clear();
                 return;
             }
             // timeout so we can check for shutdown
             vk::Result result;
             try {
-                result = state.device.waitForFences(fences, VK_TRUE, 100'000'000ULL);
+                result = device.waitForFences(fences, VK_TRUE, 100'000'000ULL);
             } catch (const vk::SystemError &) {
                 result = vk::Result::eErrorDeviceLost;
             }
@@ -81,7 +81,7 @@ void VKContext::wait_thread_function(const MemState &mem) {
                 return;
             }
             if (result == vk::Result::eTimeout) {
-                if (state.request_queue.is_aborted()) {
+                if (request_queue.is_aborted()) {
                     fences.clear();
                     return;
                 }
@@ -91,14 +91,14 @@ void VKContext::wait_thread_function(const MemState &mem) {
             // alive so queued requests still complete and unblock the guest;
             // the frontend closes the session once it sees the flag.
             LOG_CRITICAL("Vulkan wait thread: the device was lost.");
-            state.device_lost.store(true, std::memory_order_release);
+            device_lost.store(true, std::memory_order_release);
             fences.clear();
             return;
         }
     };
 
     while (true) {
-        auto wait_request = state.request_queue.pop();
+        auto wait_request = request_queue.pop();
 
         if (!wait_request)
             break;
@@ -112,7 +112,7 @@ void VKContext::wait_thread_function(const MemState &mem) {
                                wait_for_fences();
 
                                // same as in handle_sync_surface_data
-                               std::unique_lock<std::mutex> lock(state.notification_mutex);
+                               std::unique_lock<std::mutex> lock(notification_mutex);
 
                                if (request.notifications[0].address)
                                    *request.notifications[0].address.get(mem) = request.notifications[0].value;
@@ -121,7 +121,7 @@ void VKContext::wait_thread_function(const MemState &mem) {
 
                                // unlocking before a notify should be faster
                                lock.unlock();
-                               state.notification_ready.notify_all();
+                               notification_ready.notify_all();
                            }
                        },
                        [&](FrameDoneRequest &request) {
@@ -141,8 +141,8 @@ void VKContext::wait_thread_function(const MemState &mem) {
                                LOG_ERROR("Invalid surface readback range");
                                return;
                            }
-                           auto mem_it = state.mapped_memories.lower_bound(request.location);
-                           if (mem_it == state.mapped_memories.end()
+                           auto mem_it = mapped_memories.lower_bound(request.location);
+                           if (mem_it == mapped_memories.end()
                                || !renderer::texture::readback_range_fits(mem_it->first, mem_it->second.size, request.location, request.size)) {
                                LOG_ERROR("Surface readback range is not fully mapped");
                                return;
@@ -177,7 +177,7 @@ void VKContext::wait_thread_function(const MemState &mem) {
                        [&](PostSurfaceSyncRequest &request) {
                            wait_for_fences();
 
-                           state.surface_cache.perform_post_surface_sync(mem, request.cache_info);
+                           surface_cache.perform_post_surface_sync(mem, request.cache_info);
                        },
                        [&](SyncSignalRequest &request) {
                            wait_for_fences();
@@ -364,10 +364,10 @@ void VKContext::start_recording(bool first_in_scene) {
         return;
     }
 
-    if (render_target->last_used_frame != frame_timestamp) {
+    if (render_target->last_used_frame != state.frame_timestamp) {
         // reset idx if we are in a new frame
         render_target->cmd_buffer_idx = 0;
-        render_target->last_used_frame = frame_timestamp;
+        render_target->last_used_frame = state.frame_timestamp;
     }
 
     // safety check
@@ -903,47 +903,48 @@ void VKContext::check_for_macroblock_change(bool is_draw) {
 }
 
 void new_frame(VKContext &context) {
+    VKState &state = context.state;
     const auto abort_requested = [&]() {
-        if (!context.state.render_abort.load(std::memory_order_relaxed)
-            && !context.state.request_queue.is_aborted()
-            && !context.state.device_lost.load(std::memory_order_acquire))
+        if (!state.render_abort.load(std::memory_order_relaxed)
+            && !state.request_queue.is_aborted()
+            && !state.device_lost.load(std::memory_order_acquire))
             return false;
         {
-            const std::lock_guard<std::mutex> lock(context.state.command_finish_one_mutex);
-            context.state.render_abort.store(true, std::memory_order_relaxed);
+            const std::lock_guard<std::mutex> lock(state.command_finish_one_mutex);
+            state.render_abort.store(true, std::memory_order_relaxed);
         }
-        context.state.command_finish_one.notify_all();
+        state.command_finish_one.notify_all();
         return true;
     };
     if (abort_requested())
         return;
 
-    if (context.state.features.enable_memory_mapping) {
-        FrameDoneRequest request = { context.frame_timestamp };
-        context.state.request_queue.push(request);
+    if (state.features.enable_memory_mapping) {
+        FrameDoneRequest request = { state.frame_timestamp };
+        state.request_queue.push(request);
 
-        context.state.surface_cache.clear_surfaces_changed();
+        state.surface_cache.clear_surfaces_changed();
     }
 
-    context.frame_timestamp++;
-    context.state.current_frame_idx = context.frame_timestamp % MAX_FRAMES_RENDERING;
+    state.frame_timestamp++;
+    state.current_frame_idx = state.frame_timestamp % MAX_FRAMES_RENDERING;
 
-    vk::Device device = context.state.device;
-    FrameObject &frame = context.state.frame();
+    vk::Device device = state.device;
+    FrameObject &frame = state.frame();
 
     // wait on all fences still present to make sure
     if (!frame.rendered_fences.empty()) {
         // wait for the fences, then reset them
 
-        if (context.state.features.enable_memory_mapping) {
+        if (state.features.enable_memory_mapping) {
             // this will underflow for the first MAX_FRAMES_RENDERING frames
             // but that's not an issue as frame.rendered_fences will be empty
-            uint64_t previous_frame_timestamp = context.frame_timestamp - MAX_FRAMES_RENDERING;
+            uint64_t previous_frame_timestamp = state.frame_timestamp - MAX_FRAMES_RENDERING;
 
             // the wait is done by the wait thread
-            std::unique_lock<std::mutex> lock(context.new_frame_mutex);
-            while (!abort_requested() && context.last_frame_waited < previous_frame_timestamp)
-                context.new_frame_condv.wait_for(lock, std::chrono::milliseconds(100));
+            std::unique_lock<std::mutex> lock(state.new_frame_mutex);
+            while (!abort_requested() && state.last_frame_waited < previous_frame_timestamp)
+                state.new_frame_condv.wait_for(lock, std::chrono::milliseconds(100));
         } else {
             while (!abort_requested()) {
                 const auto result = device.waitForFences(frame.rendered_fences, VK_TRUE, 100'000'000ULL);
@@ -983,7 +984,7 @@ void new_frame(VKContext &context) {
     context.last_vert_texture_count = ~0;
     context.last_frag_texture_count = ~0;
 
-    frame.frame_timestamp = context.frame_timestamp;
+    frame.frame_timestamp = state.frame_timestamp;
 }
 
 void signal_sync_object(VKState &state, SceGxmSyncObject *sync_object, uint32_t timestamp) {

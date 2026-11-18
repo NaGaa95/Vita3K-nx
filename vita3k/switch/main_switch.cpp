@@ -27,7 +27,7 @@
 
 #include <app/functions.h>
 #include <app/state.h>
-#include <cpu/functions.h>
+#include <cpu/state.h>
 #include <ctrl/functions.h>
 #include <emuenv/state.h>
 #include <ime/keyboard.h>
@@ -1485,7 +1485,7 @@ static std::shared_ptr<overlay::pause_overlay> show_switch_quick_menu(EmuEnvStat
         lsfg_available,
         lsfg_available && renderer::vulkan::lsfg::is_enabled(),
         virtual_mouse);
-    menu->set_switch_menu_cheats(cheat::cheat_count(emuenv.cheat) > 0);
+    menu->set_switch_menu_cheats(!cheat::snapshot(emuenv.cheat).cheats.empty());
     clear_switch_controller_input(emuenv);
     emuenv.touch.finger_count = 0;
     touch_tracker.reset();
@@ -1785,7 +1785,7 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
             } else if (quick_menu_open) {
                 const bool lsfg_available = emuenv->backend_renderer == renderer::Backend::Vulkan
                     && renderer::vulkan::lsfg::is_available();
-                const bool cheats_available = cheat::cheat_count(emuenv->cheat) > 0;
+                const bool cheats_available = !cheat::snapshot(emuenv->cheat).cheats.empty();
                 const bool in_list = quick_menu_screen != QuickMenuScreen::Menu;
                 const QuickMenuScreen entry_screen = quick_menu_screen;
 

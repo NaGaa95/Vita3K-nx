@@ -29,14 +29,17 @@
 #include <cstdint>
 #ifdef __SWITCH__
 #include <array>
+#include <mutex>
 #endif
 
-using FilePtr = std::shared_ptr<FILE>;
+using FilePtr = std::unique_ptr<FILE, decltype(&std::fclose)>;
 
 #ifdef __SWITCH__
 struct SharedFile {
     FilePtr stream;
     bool writable;
+    // Guards the stream and the read cache for the descriptors sharing them
+    std::mutex mutex;
 
     static constexpr size_t read_cache_capacity = 256 * 1024;
     static constexpr size_t read_cache_block_size = 4 * 1024;
@@ -67,9 +70,9 @@ SharedFilePtr open_shared_file(const fs::path &path, int flags);
 #ifdef _WIN32
 const wchar_t *translate_open_mode(const int flags);
 
-inline FilePtr create_shared_file(const fs::path &path, const int open_mode) {
+inline FilePtr create_file(const fs::path &path, const int open_mode) {
     const auto file = _wfopen(path.generic_wstring().c_str(), translate_open_mode(open_mode));
-    return file ? FilePtr(file, std::fclose) : FilePtr();
+    return FilePtr(file, std::fclose);
 }
 
 using DirPtr = std::shared_ptr<_WDIR>;
@@ -88,7 +91,7 @@ inline _wdirent *get_system_dir_ptr(const DirPtr &dir) {
 #else
 const char *translate_open_mode(const int flags);
 
-inline FilePtr create_shared_file(const fs::path &path, const int open_mode) {
+inline FilePtr create_file(const fs::path &path, const int open_mode) {
     const auto file = fopen(path.generic_string().c_str(), translate_open_mode(open_mode));
 #ifdef __SWITCH__
     // fsdev reports no st_blksize, so newlib leaves stdio nearly unbuffered and
@@ -97,7 +100,7 @@ inline FilePtr create_shared_file(const fs::path &path, const int open_mode) {
     if (file)
         setvbuf(file, nullptr, _IOFBF, 256 * 1024);
 #endif
-    return file ? FilePtr(file, std::fclose) : FilePtr();
+    return FilePtr(file, std::fclose);
 }
 
 using DirPtr = std::shared_ptr<DIR>;

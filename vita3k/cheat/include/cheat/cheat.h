@@ -36,8 +36,8 @@ enum class CodeType : uint8_t {
     pointer_mov = 0x8, //!< `$8X<level> ... $88XX` (destination) then `$8<4|5|6><level> ... $89XX` (source)
     arm_write = 0xA, //!< `$AX00 <address> <instruction>`, restored when the cheat is turned off
     relative_base = 0xB, //!< `$B2<module> 0000000<segment> 00000000`
-    button_pad = 0xC, //!< `$C2<codes> <pad type> <button mask>`
-    condition = 0xD, //!< `$DX<codes> <address> <value>`
+    button_pad = 0xC, //!< `$C2<lines> <pad type> <button mask>`
+    condition = 0xD, //!< `$DX<lines> <address> <value>`
 };
 
 // Value width used by most code types, the second hexadecimal digit of the control word.
@@ -91,17 +91,30 @@ struct CheatFile {
     std::vector<Cheat> cheats;
 };
 
+// A game the cheats folder holds cheats for, `path` is what find_cheat_file() picks for it.
+struct CheatGame {
+    std::string title_id;
+    // From the `_S` line or the first comment of the file, empty when neither names the game.
+    std::string name;
+    fs::path path;
+};
+
 fs::path find_cheat_file(const fs::path &cheats_dir, const std::string &title_id);
 
 // The folders are searched in order, so the first can shadow a database bundled with the emulator.
 fs::path find_cheat_file(const std::vector<fs::path> &cheats_dirs, const std::string &title_id);
 
-// Parse a cheat file. Malformed lines are logged and skipped, they never abort the parsing.
+std::vector<CheatGame> list_cheat_games(const fs::path &cheats_dir);
+
+// Parse a cheat file. A malformed line marks its cheat as broken, it never aborts the parsing.
 CheatFile parse_cheat_file(const fs::path &path, const std::string &title_id);
 
 // Rewrite only the `_V0`/`_V1` markers of `file`, so that cheats on now are on again at next boot.
-// A file outside `cheats_dir` is read-only (bundled with the emulator), so its markers go into a
-// copy there, which is the one found first from then on. Returns the path written, empty on failure.
-fs::path save_cheat_file(const CheatFile &file, const fs::path &cheats_dir = {});
+bool save_cheat_file(const CheatFile &file);
+
+// Add `cheat` after the other cheats of `title_id` in `path`, creating the file when it is missing.
+bool append_cheat(const fs::path &path, const std::string &title_id, const Cheat &cheat);
+
+std::string format_code_line(const CodeLine &code);
 
 } // namespace cheat

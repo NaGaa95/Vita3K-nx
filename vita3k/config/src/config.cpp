@@ -33,14 +33,10 @@
 
 #include <algorithm>
 #include <cctype>
-#ifdef __SWITCH__
-#include <cerrno>
-#include <cstring>
-#include <dirent.h>
-#endif
 #include <exception>
 #include <iostream>
 #include <map>
+#include <system_error>
 #include <vector>
 
 namespace config {
@@ -239,52 +235,57 @@ static bool load_new_config(Config &self, const fs::path &path) {
     return legacy_keyboard_bindings;
 }
 
-static std::set<std::string> get_file_set(const fs::path &loc, bool dirs_only = true) {
-    std::set<std::string> cur_set{};
+static std::string transform_installed_app_id(std::string &value, const fs::path &installed_apps_path) {
+    std::vector<std::string> installed_apps;
+    std::error_code err{};
+    const bool installed_apps_path_exists = fs::exists(installed_apps_path, err);
+    if (err)
+        return "Failed to inspect installed apps directory: " + err.message();
 
-#ifdef __SWITCH__
-    DIR *directory = opendir(loc.generic_string().c_str());
-    if (!directory) {
-        if (errno != ENOENT)
-            LOG_WARN("Could not open config validation directory '{}': {}", loc, std::strerror(errno));
-        return cur_set;
+    if (installed_apps_path_exists) {
+        fs::directory_iterator it{ installed_apps_path, err };
+        if (err)
+            return "Failed to open installed apps directory: " + err.message();
+
+        while (it != fs::directory_iterator{}) {
+            const auto app_path = it->path();
+            if (!app_path.empty()) {
+                const bool is_app_directory = fs::is_directory(app_path, err);
+                if (err == std::errc::no_such_file_or_directory)
+                    err.clear();
+                else if (err)
+                    return "Failed to inspect installed app directory: " + err.message();
+                const auto app_name{ app_path.filename().string() };
+                if (is_app_directory && !app_name.ends_with("_dec"))
+                    installed_apps.push_back(app_name);
+            }
+
+            it.increment(err);
+            if (err)
+                return "Failed to scan installed apps directory: " + err.message();
+        }
     }
 
-    while (dirent *entry = readdir(directory)) {
-        const std::string name = entry->d_name;
-        if (name.empty() || name == "." || name == "..")
+    for (const auto &app : installed_apps) {
+        if (app == value)
+            return {};
+    }
+
+    const auto key = string_utils::toupper(value);
+    const std::string *matched_app = nullptr;
+    for (const auto &app : installed_apps) {
+        if (string_utils::toupper(app) != key)
             continue;
-
-        const fs::path candidate = loc / name;
-        if (dirs_only) {
-            std::error_code type_error;
-            if (!fs::is_directory(candidate, type_error) || type_error)
-                continue;
-        }
-        cur_set.insert(fs::path(name).stem().string());
+        if (matched_app)
+            return "Ambiguous installed app ID " + value + ", use the exact directory name";
+        matched_app = &app;
     }
-    closedir(directory);
-#else
-    std::error_code error;
-    if (!fs::is_directory(loc, error) || error)
-        return cur_set;
 
-    fs::directory_iterator entry(loc, error);
-    const fs::directory_iterator end;
-    for (; !error && entry != end; entry.increment(error)) {
-        bool include = true;
-        if (dirs_only) {
-            std::error_code type_error;
-            include = fs::is_directory(entry->path(), type_error) && !type_error;
-        }
-        if (include)
-            cur_set.insert(entry->path().stem().string());
-    }
-    if (error)
-        LOG_WARN("Stopped scanning config validation directory '{}': {}", loc, error.message());
-#endif
+    if (!matched_app)
+        return "No installed app matches " + value;
 
-    return cur_set;
+    value = *matched_app;
+    return {};
 }
 
 static fs::path check_path(const fs::path &output_path) {
@@ -403,15 +404,18 @@ ExitCode init_config(Config &cfg, int argc, char **argv, const Root &root_paths,
         ->transform(CLI::CheckedTransformer(frontends, CLI::ignore_case))->default_str("qt")->group("Input");
     input->add_option("--self,-S", command_line.self_path, "Path to the self to run inside Title ID")
         ->default_str("eboot.bin")->group("Input");
-    // Both validators use the same installed-title set. On Switch this avoids a
-    // second SD directory scan during every bootstrap.
-    const auto installed_app_ids = get_file_set(cfg.get_vita_fs_path() / "ux0/app");
+    const CLI::Validator installed_app_transformer{
+        [&cfg](std::string &value) {
+            return transform_installed_app_id(value, cfg.get_vita_fs_path() / "ux0/app");
+        },
+        "installed app title ID"
+    };
     input->add_option("--installed-path,-r", command_line.run_app_path, "Path to the installed app to run")
-        ->default_str({})->check(CLI::IsMember(installed_app_ids))->group("Input");
+        ->default_str({})->transform(installed_app_transformer)->group("Input");
     input->add_option("--recompile-shader,-s", command_line.recompile_shader_path, "Recompile the given PS Vita shader (GXP format) to SPIR_V / GLSL and quit")
         ->default_str({})->group("Input");
     input->add_option("--deleted-id,-d", command_line.delete_title_id, "Title ID of installed app to delete")
-        ->default_str({})->check(CLI::IsMember(installed_app_ids))->group("Input");
+        ->default_str({})->transform(installed_app_transformer)->group("Input");
     input->add_option("--firmware", command_line.pup_path, "Path to the firmware file (.pup extension) to install");
     auto input_pkg = input->add_option("--pkg", command_line.pkg_path, "Path to the app file (.pkg extension) to install")
         ->default_str({})->group("Input");

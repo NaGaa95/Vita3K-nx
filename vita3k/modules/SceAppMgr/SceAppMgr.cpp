@@ -453,7 +453,7 @@ EXPORT(SceInt32, _sceAppMgrLoadExec, const char *appPath, Ptr<char> const argv[]
         // On hardware this replaces the process and never returns. Letting the
         // caller run the code that follows sends it into unmapped memory, where
         // it can no longer be exited and the teardown above never completes.
-        if (const ThreadStatePtr thread = emuenv.kernel.get_thread(thread_id))
+        if (const ThreadStateRef thread = emuenv.kernel.get_thread(thread_id))
             thread->exit(0);
 
         return SCE_KERNEL_OK;

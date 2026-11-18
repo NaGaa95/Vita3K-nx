@@ -218,15 +218,10 @@ bool decrypt_install_nonpdrm(EmuEnvState &emuenv, const fs::path &drmlicpath, co
             progress_callback(total ? static_cast<float>(processed) / static_cast<float>(total) : 1.f);
     };
 
-    const int decrypt_result = execute(zRIF, title_id_src, title_id_dst, f00d_enc_type, f00d_arg, pfs_progress);
-    const bool theme_without_keystone = emuenv.app_info.app_category == "theme"
-        && decrypt_result == PFS_EXECUTE_MISSING_KEYSTONE;
-    if (decrypt_result < 0 && !theme_without_keystone) {
+    if (execute(zRIF, title_id_src, title_id_dst, f00d_enc_type, f00d_arg, pfs_progress) < 0) {
         remove_path_checked(title_id_dst, "failed NoNpDrm output");
         return false;
     }
-    if (theme_without_keystone)
-        LOG_INFO("Theme PFS decrypted successfully; accepting the expected missing-keystone result");
 
     if (!emuenv.app_info.app_category.contains("gp") && !copy_license(emuenv, drmlicpath)) {
         remove_path_checked(title_id_dst, "uncommitted NoNpDrm output");
@@ -680,16 +675,11 @@ bool install_pkg(const fs::path &pkg_path, EmuEnvState &emuenv, std::string &p_z
         if (progress_callback && total)
             progress_callback(80.f + static_cast<float>(processed) / static_cast<float>(total) * 10.f);
     };
-    const int decrypt_result = execute(zRIF, title_id_src, title_id_dst, f00d_enc_type, f00d_arg, pfs_progress);
-    const bool theme_without_keystone = type == PkgType::PKG_TYPE_VITA_THEME
-        && decrypt_result == PFS_EXECUTE_MISSING_KEYSTONE;
-    if (decrypt_result < 0 && !theme_without_keystone) {
+    if (execute(zRIF, title_id_src, title_id_dst, f00d_enc_type, f00d_arg, pfs_progress) < 0) {
         remove_path_checked(title_id_src, "failed PKG staging directory");
         remove_path_checked(title_id_dst, "failed decrypted PKG output");
         return false;
     }
-    if (theme_without_keystone)
-        LOG_INFO("Theme PFS decrypted successfully; accepting the expected missing-keystone result");
 
     std::error_code fs_error;
     if (!fs::is_directory(title_id_dst, fs_error) || fs_error) {

@@ -19,7 +19,6 @@
 #include <ctrl/functions.h>
 #include <ctrl/state.h>
 
-#include <cheat/functions.h>
 #include <config/state.h>
 #include <display/functions.h>
 #include <display/state.h>
@@ -264,7 +263,6 @@ static void retrieve_ctrl_data(EmuEnvState &emuenv, int port, bool is_v2, bool n
     };
 
     if (state.overlay_input_intercepted.load(std::memory_order_relaxed) || emuenv.drop_inputs) {
-        cheat::set_buttons(emuenv.cheat, 0);
         reset_axes();
         return;
     }
@@ -287,18 +285,14 @@ static void retrieve_ctrl_data(EmuEnvState &emuenv, int port, bool is_v2, bool n
         }
     }
 
-    // Hand the pad over in positive logic, the cheat engine needs it to evaluate `$C2` codes. Their
-    // masks are written for a handheld, whose L and R the extended API reports as L1 and R1.
-    if (port == 1) {
-        uint32_t cheat_buttons = buttons;
-        if (buttons & SCE_CTRL_L1)
-            cheat_buttons |= SCE_CTRL_L;
-        if (buttons & SCE_CTRL_R1)
-            cheat_buttons |= SCE_CTRL_R;
-        cheat::set_buttons(emuenv.cheat, cheat_buttons);
-    }
-
     reset_axes();
+}
+
+SceUInt32 ctrl_peek_buttons(EmuEnvState &emuenv, int port) {
+    SceUInt32 buttons = 0;
+    SceUInt8 lx, ly, rx, ry;
+    retrieve_ctrl_data(emuenv, port, false, false, false, buttons, lx, ly, rx, ry);
+    return buttons;
 }
 
 int ctrl_get(const SceUID thread_id, EmuEnvState &emuenv, int port, SceCtrlData2 *pData, SceUInt32 count, bool negative, bool is_peek, bool is_v2, bool from_ext) {
@@ -326,7 +320,7 @@ int ctrl_get(const SceUID thread_id, EmuEnvState &emuenv, int port, SceCtrlData2
             // sceCtrlRead is blocking, wait for the next vsync for the buffer to be updated
             auto thread = emuenv.kernel.get_thread(thread_id);
 
-            wait_vblank(emuenv.display, thread, state.last_vcount[port] + 1, false);
+            wait_until_vblank(emuenv, *thread, state.last_vcount[port] + 1, false);
         }
         uint64_t vblank_count = emuenv.display.vblank_count.load();
         nb_returned_data = std::min<int32_t>(count, vblank_count - state.last_vcount[port]);
