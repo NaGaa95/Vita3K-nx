@@ -18,10 +18,18 @@
 # This file only adds Vita3K-specific pieces: the unified Mesa NVK, Nouveau,
 # and Zink graphics stack, a few global gating switches, and portlib
 # include/lib visibility.
+#
+# The Nintendo Switch 2 build (ouncebrew's libounce toolchain, which also sets
+# NINTENDO_SWITCH2 and __SWITCH2__) shares everything up to the Mesa section;
+# cmake/switch2.cmake replaces that section.
 # ---------------------------------------------------------------------------
 
 message(STATUS "================================================================")
-message(STATUS " Vita3K: configuring for Nintendo Switch (libnx / devkitA64)")
+if(NINTENDO_SWITCH2)
+	message(STATUS " Vita3K: configuring for Nintendo Switch 2 (libounce / devkitA64)")
+else()
+	message(STATUS " Vita3K: configuring for Nintendo Switch (libnx / devkitA64)")
+endif()
 message(STATUS "================================================================")
 
 # DEVKITPRO is exported by the aarch64-none-elf-cmake wrapper; fall back to the
@@ -36,6 +44,11 @@ endif()
 
 set(SWITCH_PORTLIBS "${DEVKITPRO}/portlibs/switch")
 set(LIBNX          "${DEVKITPRO}/libnx")
+if(NINTENDO_SWITCH2)
+	# libounce stands in for libnx (the toolchain's NX_ROOT); the Switch
+	# portlibs still provide the libraries that only use the C library.
+	set(LIBNX "${NX_ROOT}")
+endif()
 
 # Make the portlib + libnx headers/libs visible to plain find_path/find_library
 # and to targets that just #include <...> without going through a portlib target.
@@ -50,11 +63,30 @@ link_directories("${SWITCH_PORTLIBS}/lib" "${LIBNX}/lib")
 # Re-assert them here so every __SWITCH__ guard works and the correct Cortex-A57
 # TLS/crypto codegen is used regardless of how CMAKE_*_FLAGS was set.
 add_compile_definitions(__SWITCH__ VITA3K_SWITCH)
+if(NINTENDO_SWITCH2)
+	# The Switch 2's Cortex-A78C flags, from libounce's switch2_cpu.mk (the
+	# toolchain's OUNCE_SWITCH2_CPU).
+	set(_switch2_cpu "${OUNCE_SWITCH2_CPU}")
+	if(NOT _switch2_cpu)
+		file(STRINGS "${NX_ROOT}/switch2_cpu.mk" _switch2_cpu REGEX "^SWITCH2_CPU[ \t]*:=")
+		string(REGEX REPLACE "^SWITCH2_CPU[ \t]*:=[ \t]*" "" _switch2_cpu "${_switch2_cpu}")
+	endif()
+	if(NOT _switch2_cpu)
+		message(FATAL_ERROR "No SWITCH2_CPU in ${NX_ROOT}/switch2_cpu.mk")
+	endif()
+	separate_arguments(_switch2_cpu UNIX_COMMAND "${_switch2_cpu}")
+	add_compile_definitions(__SWITCH2__ VITA3K_SWITCH2)
+	add_compile_options(
+		${_switch2_cpu}
+		-mtp=soft
+		-ftls-model=local-exec)
+else()
 add_compile_options(
 	-march=armv8-a+crc+crypto
 	-mtune=cortex-a57
 	-mtp=soft
 	-ftls-model=local-exec)
+endif()
 
 # devkitPro's NintendoSwitch platform uses -O2 for Release builds. Vita3K's
 # CPU translation, dispatch, and renderer hot paths benefit from the regular
@@ -156,6 +188,12 @@ set(USE_LTO RELEASE_ONLY CACHE STRING "" FORCE)
 # Bound the Release link to eight workers explicitly. This changes build
 # parallelism only; the objects remain regular GCC LTO objects.
 add_link_options("$<$<CONFIG:Release>:-flto=8>")
+
+# The Switch 2 uses its own Mesa SDK (and nx2_platform): cmake/switch2.cmake.
+if(NINTENDO_SWITCH2)
+	include("${CMAKE_CURRENT_LIST_DIR}/switch2.cmake")
+	return()
+endif()
 
 # ---------------------------------------------------------------------------
 # Unified Mesa NVK/Nouveau/Zink static graphics SDK

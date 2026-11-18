@@ -3,6 +3,9 @@
  * Vita3K config, and chainloads the emulator (Vita3K.nro) with "-r <TITLEID>".
  */
 #include <switch.h>
+#ifdef __SWITCH2__
+#include <nx2_platform.h>
+#endif
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 #include <SDL2/SDL_image.h>
@@ -73,11 +76,24 @@ static const char *INSTALL_DIR = "sdmc:/switch/vita3k/install";
 static const char *LSFG_DIR    = "sdmc:/switch/vita3k/lsfg";
 static const char *LSFG_DLL_FILE = "sdmc:/switch/vita3k/lsfg/Lossless.dll";
 static const char *EMU_HOST_DIR= "sdmc:/switch/vita3k/.emu";
+#ifdef __SWITCH2__
+// The Switch 2 core has names of its own, so one SD card can serve both consoles.
+static const char *EMU_NRO     = "sdmc:/switch/vita3k/.emu/Vita3K-NX2.nro";
+static const char *EMU_NRO_SRC = "romfs:/emu/Vita3K-NX2.nro";
+static const char *EMU_HASH_SRC= "romfs:/emu/Vita3K-NX2.sha256";
+#else
 static const char *EMU_NRO     = "sdmc:/switch/vita3k/.emu/Vita3K.nro"; // extracted emulator core, chainloaded with "-r <TITLEID>"
 static const char *EMU_NRO_SRC = "romfs:/emu/Vita3K.nro";           // emulator bundled inside THIS .nro (self-contained build)
 static const char *EMU_HASH_SRC= "romfs:/emu/Vita3K.sha256";        // build-time identity of the bundled emulator
+#endif
 static const char *INSTALL_TARGET = "sdmc:/switch/vita3k/install_target.txt"; // SD browser writes the picked .pkg path here; emulator reads it on --install
 static const char *INSTALL_ZRIF = "sdmc:/switch/vita3k/install_zrif.txt";     // optional typed license key for that package; the installer consumes it once
+// The release each build last installed: the two consoles' builds can share one SD card.
+#ifdef __SWITCH2__
+static const char *INSTALLED_RELEASE_TAG_KEY = "Wrapper/InstalledReleaseTagNX2";
+#else
+static const char *INSTALLED_RELEASE_TAG_KEY = "Wrapper/InstalledReleaseTag";
+#endif
 static const char *FRONTEND_REQUEST = "sdmc:/switch/vita3k/.frontend_request"; // one-shot request surviving a clean Application restart
 
 // ---------------------------------------------------------------------------
@@ -209,6 +225,9 @@ static bool regularFileExists(const std::string &path) {
 // launched us decides it: a shortcut built by the installer grants all four,
 // while the album-applet path grants three and leaves core 3 unused.
 static int allowedCpuCores() {
+#ifdef __SWITCH2__
+  return nx2CoreCount();
+#else
   u64 mask = 0;
   if (R_FAILED(svcGetInfo(&mask, InfoType_CoreMask, CUR_PROCESS_HANDLE, 0)))
     return 3;
@@ -216,6 +235,7 @@ static int allowedCpuCores() {
   for (int core = 0; core < 4; core++)
     if (mask & (UINT64_C(1) << core)) cores++;
   return cores ? cores : 3;
+#endif
 }
 
 static bool lsfgDllInstalled() {
@@ -2509,7 +2529,11 @@ static void optValue(const Opt &o, char *out, int n) {
   }
   else if (o.type==OT_SUBMENU) snprintf(out,n,">");
   else if (o.type==OT_STATUS) {
+#ifdef __SWITCH2__
+    if(o.key && !strcmp(o.key,"cpu-cores")) snprintf(out,n,"%d / 6",allowedCpuCores());
+#else
     if(o.key && !strcmp(o.key,"cpu-cores")) snprintf(out,n,"%d / 4",allowedCpuCores());
+#endif
     else {const std::string_view shown=LauncherLocalization::Translate(lsfgDllInstalled()?"Installed":"Missing");snprintf(out,n,"%s",shown.data());}
   }
 }
@@ -2520,7 +2544,11 @@ static void optValue(const Opt &o, char *out, int n) {
 static bool optValueVerdictColor(const Opt &o, SDL_Color *out) {
   if(o.type!=OT_STATUS || !o.key) return false;
   if(!strcmp(o.key,"cpu-cores")) {
+#ifdef __SWITCH2__
+    *out = allowedCpuCores()>=6 ? (SDL_Color){120,215,130,255} : (SDL_Color){235,125,125,255};
+#else
     *out = allowedCpuCores()>=4 ? (SDL_Color){120,215,130,255} : (SDL_Color){235,125,125,255};
+#endif
     return true;
   }
   if(!strcmp(o.key,"lsfg-dll")) {
@@ -2557,7 +2585,11 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"lle-modules","Compatibility","Chooses which decrypted firmware modules are loaded natively instead of being emulated. It needs Modules mode set to something other than Automatic, and installed firmware. Picking nothing in Manual mode loads no modules at all, which is usually worse than Automatic."},
   {"cpu-opt","Performance","Enables Vita3K CPU optimisations. Disable only when diagnosing a title-specific CPU emulation problem."},
   {"accurate-thread-scheduling","Compatibility","Runs the game's threads the way a PS Vita schedules them: threads left at the default CPU affinity take turns by priority instead of all running at once. Fixes games that freeze or misbehave from threads running out of order; slower, so leave it off unless a game needs it."},
+#ifdef __SWITCH2__
+  {"cpu-cores","Performance","How many of the console's six CPU cores this session may use. Six is correct: the emulator keeps vblank, audio and rendering on the last core, so the other five stay free for the emulated Vita and its shader compilers."},
+#else
   {"cpu-cores","Performance","How many of the console's four CPU cores this session may use. Four is correct: the emulator keeps vblank, audio and rendering on the fourth core so all three others stay free for the emulated Vita. Three means the launcher was started without a shortcut, and that work has to share the game's cores. Create a shortcut from the installer to get the fourth."},
+#endif
   {"file-loading-delay","Compatibility","Adds a delay to file reads for games that depend on storage timing. 0 ms disables it."},
   {"switch-lsfg-enabled","Frame generation","Prepares Vulkan LSFG 2x support for this game. Open the in-game quick menu with L + R + Plus to turn generated frames on or off. It does not increase emulation speed."},
   {"switch-lsfg-flow-scale","Frame generation quality","Sets the optical-flow resolution. Quarter is recommended on Switch; Half can improve motion detail but costs more GPU time and memory."},
@@ -3490,10 +3522,12 @@ static std::vector<Vita3KLauncher::Storage::Location> importLocations(std::strin
   std::string smbWarning;
   appendConfiguredSmb(locations,smbWarning);
   warning.clear();
+#ifndef __SWITCH2__
   if(!g_usbReady.load(std::memory_order_acquire)){
     if(!g_storageWorkerComplete.load(std::memory_order_acquire))warning="USB storage is still being initialized";
     else if(!g_usbError.empty())warning=g_usbError;
   }
+#endif
   if(!smbWarning.empty()){
     if(!warning.empty())warning+="  ";
     warning+=smbWarning;
@@ -4236,10 +4270,16 @@ static void startStorageWorker(){
   const auto shares=loadSmbSharesFromStore();
   const bool networkReady=g_networkReady;
   g_storageWorker=std::thread([shares,networkReady]{
+#ifdef __SWITCH2__
+    // (no USB host on the Switch 2: kaiHEN never answers usb:hs)
+    g_usbError.clear();
+    g_usbReady.store(false,std::memory_order_release);
+#else
     std::string usbError;
     const bool usbReady=Vita3KLauncher::Storage::InitializeUsb(&usbError);
     g_usbError=std::move(usbError);
     g_usbReady.store(usbReady,std::memory_order_release);
+#endif
     if(networkReady)for(const auto &share:shares){
       if(g_storageWorkerCancel.load(std::memory_order_acquire))break;
       if(!share.auto_mount)continue;
@@ -5146,7 +5186,11 @@ static void launcherSettingsScreen() {
       } else if(event.cbutton.button==BTN_SETTINGS){
         if(sel<optionCount) showOptionHelp("Launcher",S_launcher[sel],"Launcher setting");
         else showHelpCard("Launcher","Check for Updates","Launcher updates",
+#ifdef __SWITCH2__
+          "Checks NaGaa95/Vita3K-nx releases, displays their notes, verifies the exact Vita3K-NX2.nro asset (the Switch 2 build), and replaces this launcher transactionally.",nullptr,"Launcher action");
+#else
           "Checks NaGaa95/Vita3K-nx releases, displays their notes, verifies the exact Vita3K.nro asset, and replaces this launcher transactionally.",nullptr,"Launcher action");
+#endif
         beginScreenFx();
       } else if(event.cbutton.button==SDL_CONTROLLER_BUTTON_X&&sel<optionCount){
         if(resetOption(S_launcher[sel])){applyChange();toastStatic("Setting reset to default");}
@@ -5922,7 +5966,7 @@ static bool confirmBoxStatic(const char *title,std::initializer_list<const char*
 
 static std::string installedReleaseTag(){
   const std::string built=LauncherUpdate_BuiltReleaseTag();
-  const std::string stored=trim(storeGet(g_global,"Wrapper/InstalledReleaseTag",""));
+  const std::string stored=trim(storeGet(g_global,INSTALLED_RELEASE_TAG_KEY,""));
   if(stored.empty()||LauncherUpdate_IsNewer(built,stored))return built;
   return stored;
 }
@@ -6559,6 +6603,11 @@ static bool pickIcon(Game &g, char *outPath, size_t outSize) {
 // name on the right (auto-filled, A edits), and a Create button. Author and
 // version are preserved from the launcher's bundled NACP.
 static void forwarderWizard(Game &g) {
+#ifdef __SWITCH2__
+  // Installing a forwarder needs ns, ncm and spl, which kaiHEN does not provide (forwarder.cpp).
+  modalMessage("Shortcut unavailable", { g.title, "", uiText("HOME menu shortcuts are not available on the Switch 2.") });
+  return;
+#endif
   char name[256]; snprintf(name,sizeof(name),"%s",g.title.c_str());
   char icon[300]={0};
   // Same candidates and the same rule the library grid uses: take the first
@@ -6749,6 +6798,9 @@ static int perGameMenu(Game &g, SDL_GameController *pad) {
           else if(sel==6){
             if(confirmBox("Clear cache?", { g.title, "", uiText("Deletes compiled shaders and shader logs."), uiText("Save data and game files are not changed.") })){
               rmrf(std::string(CACHE_DIR)+"/shaders/"+g.title_id);
+#ifdef __SWITCH2__
+              rmrf(std::string(CACHE_DIR)+"/shaders-nx2/"+g.title_id);
+#endif
               rmrf(std::string(CACHE_DIR)+"/shaderlog/"+g.title_id); // compatibility with older layouts
               rmrf(std::string(DATA_DIR)+"/shaderlog/"+g.title_id);
               toastStatic("Cache cleared"); beginScreenFx();
@@ -7405,7 +7457,11 @@ static bool readEmbeddedEmulatorHash(std::array<u8, SHA256_HASH_SIZE> &hash,
 }
 
 static bool ensureEmu() {
+#ifdef __SWITCH2__
+  std::string marker = std::string(EMU_HOST_DIR) + "/.core_build-nx2";
+#else
   std::string marker = std::string(EMU_HOST_DIR) + "/.core_build";
+#endif
   const std::string tmp = std::string(EMU_NRO) + ".tmp";
   const std::string old = std::string(EMU_NRO) + ".old";
   bool destinationExists=false,oldExists=false,tmpExists=false;
@@ -7573,8 +7629,12 @@ static int earlyStartupFailure(const char *message,Result result){
 
 
 static bool isAppletMode(){
+#ifdef __SWITCH2__
+  return false; // (its only use is offering a HOME forwarder)
+#else
   const AppletType type=appletGetAppletType();
   return type!=AppletType_Application&&type!=AppletType_SystemApplication;
+#endif
 }
 
 static void runAppletInstaller(){
@@ -7630,6 +7690,9 @@ static void runAppletInstaller(){
 }
 
 int main(int argc, char **argv){
+#ifdef __SWITCH2__
+  nx2DisplayInit();
+#endif
   std::string positionalForwarderArgument,directGameArgument;
   if(argc>=2&&argv[1]&&argv[1][0]&&argv[1][0]!='-')
     positionalForwarderArgument=argv[1];
@@ -7999,7 +8062,7 @@ int main(int argc, char **argv){
     const bool installed=LauncherUpdate_InstallDownloaded(g_launcherNroPath);
     if(installed){
       if(!updateToInstall.release.tag.empty()){
-        storeSet(g_global,"Wrapper/InstalledReleaseTag",updateToInstall.release.tag.c_str());
+        storeSet(g_global,INSTALLED_RELEASE_TAG_KEY,updateToInstall.release.tag.c_str());
         storeSave(g_global,LAUNCHER_INI);
       }
         return 0;

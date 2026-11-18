@@ -230,6 +230,18 @@ elseif(SWITCH)
 		-Wl,--wrap=pthread_key_delete
 		-Wl,--wrap=pthread_getspecific
 		-Wl,--wrap=pthread_setspecific)
+	if(SWITCH2)
+		# nx2_platform.c and the link wraps it needs (see nx2_platform.h); libounce's
+		# exit calls Mesa's __nx_gpu_exit only when it is linked in.
+		target_sources(vita3k PRIVATE switch/nx2/nx2_platform.c switch/nx2/nx2_platform.h)
+		target_link_options(vita3k PRIVATE
+			-Wl,--wrap=hidInitializeKeyboard
+			-Wl,--wrap=hidInitializeMouse
+			-Wl,--wrap=hidInitializeTouchScreen
+			-Wl,--wrap=__syscall_thread_create
+			-Wl,--wrap=smGetServiceWrapper
+			-Wl,-u,__nx_gpu_exit)
+	endif()
 else()
 	add_executable(vita3k MACOSX_BUNDLE main.cpp interface.cpp interface.h performance.cpp)
 endif()
@@ -251,6 +263,10 @@ if(SWITCH)
 	# Link libnx last and package the ELF into a .nro. The NintendoSwitch platform
 	# already appends -lnx via NX_STANDARD_LIBRARIES, but the renderer/JIT also use
 	# libnx APIs (nwindow, jit, applet), so make the dependency explicit.
+	if(SWITCH2)
+		# kaiHEN's JIT provider: libounce's Jit API references its hooks weakly.
+		target_link_libraries(vita3k PRIVATE kaihen)
+	endif()
 	target_link_libraries(vita3k PRIVATE nx)
 	if(SWITCH_VULKAN_LINK_DEPENDS)
 		set_property(TARGET vita3k APPEND PROPERTY LINK_DEPENDS ${SWITCH_VULKAN_LINK_DEPENDS})
@@ -276,11 +292,17 @@ if(SWITCH)
 		AUTHOR "Vita3K team"
 		VERSION "${VITA3K_APP_VERSION}")
 
+	# The Switch 2 core is Vita3K-NX2.nro, so both builds can share one SD card.
+	if(SWITCH2)
+		set(VITA3K_SWITCH_NRO_NAME "Vita3K-NX2")
+	else()
+		set(VITA3K_SWITCH_NRO_NAME "Vita3K")
+	endif()
 	nx_create_nro(vita3k
 		NACP "${CMAKE_CURRENT_BINARY_DIR}/vita3k.nacp"
 		ICON "${CMAKE_CURRENT_SOURCE_DIR}/Vita3K.jpg"  # elf2nro requires a 256x256 JPEG
 		ROMFS "${VITA3K_SWITCH_ROMFS}"
-		OUTPUT "${CMAKE_BINARY_DIR}/Vita3K.nro")
+		OUTPUT "${CMAKE_BINARY_DIR}/${VITA3K_SWITCH_NRO_NAME}.nro")
 endif()
 if(USE_DISCORD_RICH_PRESENCE)
 	target_link_libraries(vita3k PRIVATE discord-rpc)
@@ -563,9 +585,4 @@ endif()
 if(TRACY_ENABLE_ON_CORE_COMPONENTS)
 	# Enable Tracy profiling on the main compilation target
 	target_link_libraries(vita3k PRIVATE tracy)
-endif()
-
-if(SWITCH)
-	include("${CMAKE_SOURCE_DIR}/cmake/switch_pgo.cmake")
-	vita3k_switch_configure_pgo(vita3k)
 endif()

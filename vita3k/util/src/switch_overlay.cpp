@@ -4,7 +4,7 @@
 
 #include <util/switch_overlay.h>
 
-#ifdef __SWITCH__
+#if defined(__SWITCH__) && !defined(__SWITCH2__)
 #include <switch.h>
 #include <util/switch_thread.h>
 

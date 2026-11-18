@@ -70,6 +70,9 @@
 #include <EGL/egl.h>
 
 #include <switch.h>
+#ifdef __SWITCH2__
+#include <nx2_platform.h>
+#endif
 
 #include <cstdio>
 #include <cstdlib>
@@ -98,6 +101,10 @@ public:
     bool initialize_for_backend(renderer::Backend backend, const std::string &configured_backend, bool want_gl_spirv, bool gl_thread) {
         if (m_display != EGL_NO_DISPLAY || m_surface != EGL_NO_SURFACE || m_context != EGL_NO_CONTEXT)
             destroy_render_context();
+#ifdef __SWITCH2__
+        // (after the launcher, a previous session or the Vulkan device probe)
+        nx2MesaGpuRecover();
+#endif
 
         if (backend != renderer::Backend::OpenGL) {
             unsetenv("MESA_SWITCH_GLTHREAD");
@@ -119,9 +126,16 @@ public:
         // serialized NIR ABI is not versioned, so keep an app-owned versioned
         // one and never delete the global cache. Without it nouveau re-runs the
         // whole nv50_ir compile for every shader on every launch.
+#ifdef __SWITCH2__
+        // (the Switch 2's GPU and Mesa, apart from the Switch's)
+        const char *const cache_dir = use_zink
+            ? "sdmc:/switch/vita3k/cache/mesa-zink-nx2-v1"
+            : "sdmc:/switch/vita3k/cache/mesa-nvc0-nx2-v1";
+#else
         const char *const cache_dir = use_zink
             ? "sdmc:/switch/vita3k/cache/mesa-zink-v1"
             : "sdmc:/switch/vita3k/cache/mesa-nvc0-v1";
+#endif
         errno = 0;
         if (::mkdir(cache_dir, 0777) == 0 || errno == EEXIST) {
             setenv("MESA_SHADER_CACHE_DIR", cache_dir, 1);
@@ -179,6 +193,11 @@ public:
             destroy_render_context();
             return false;
         }
+#ifdef __SWITCH2__
+        // (Mesa set its own swap interval with the surface, which withdraws the
+        // 120 Hz request)
+        nx2DisplayReapply();
+#endif
 
         const EGLint compatibility_45[] = {
             EGL_CONTEXT_MAJOR_VERSION, 4,
@@ -217,6 +236,9 @@ public:
     // the panel, so it does not follow the operation mode. Reporting the docked
     // mode's 1920x1080 here instead made surface_matches_window_size() false on
     // every frame while docked, which rebuilt the swapchain once per frame.
+    // On the Switch 2, libounce sizes the default window per mode
+    // (nx2DisplayInit): the drawable follows docking, and the renderer rebuilds
+    // its swapchain once per change.
     void drawable_size(int &width, int &height) const {
         u32 w = 0, h = 0;
         if (m_nwindow && R_SUCCEEDED(nwindowGetDimensions(m_nwindow, &w, &h)) && w && h) {
@@ -224,8 +246,13 @@ public:
             height = static_cast<int>(h);
             return;
         }
+#ifdef __SWITCH2__
+        width = 1920;
+        height = 1080;
+#else
         width = 1280;
         height = 720;
+#endif
     }
 
     int drawable_width() const override {
@@ -271,7 +298,14 @@ public:
     bool set_vsync(bool enabled) override {
         if (m_display == EGL_NO_DISPLAY)
             return false;
+#ifdef __SWITCH2__
+        // (eglSwapInterval withdraws the 120 Hz request)
+        const bool set = eglSwapInterval(m_display, enabled ? 1 : 0) == EGL_TRUE;
+        nx2DisplayApply(enabled ? 1 : 0);
+        return set;
+#else
         return eglSwapInterval(m_display, enabled ? 1 : 0) == EGL_TRUE;
+#endif
     }
 
     void prepare_for_render_thread() override {
@@ -959,6 +993,7 @@ struct SwitchRunResult {
     std::string title_id;
 };
 
+#ifndef __SWITCH2__ // (the Switch 2 has no HOME forwarders and never restarts the program)
 constexpr const char *SWITCH_FRONTEND_REQUEST_PATH = "sdmc:/switch/vita3k/.frontend_request";
 constexpr const char *SWITCH_FRONTEND_REQUEST_TMP_PATH = "sdmc:/switch/vita3k/.frontend_request.tmp";
 // Must match EXIT_DETECTION_STR in switch-launcher/fwd/main.c, which is the
@@ -1047,6 +1082,7 @@ static bool write_frontend_request(SwitchFrontendAction action, const std::strin
     }
     return true;
 }
+#endif
 
 struct SwitchLifecycleState {
     std::atomic<int> focus_state{ -1 };
@@ -1544,8 +1580,12 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
             return result;
         }
 
-        if (emuenv->backend_renderer == renderer::Backend::Vulkan && !emuenv->vulkan_device_info)
+        if (emuenv->backend_renderer == renderer::Backend::Vulkan && !emuenv->vulkan_device_info) {
+#ifdef __SWITCH2__
+            nx2MesaGpuRecover();
+#endif
             emuenv->vulkan_device_info = std::make_unique<renderer::VulkanDeviceInfo>(renderer::enumerate_vulkan_devices());
+        }
 
         switch_configure_touch(*emuenv);
 
@@ -1662,6 +1702,10 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
                 const bool background = focus != static_cast<int>(AppletFocusState_InFocus);
                 session_controller->set_pause_reason(app::AppSessionPauseReason::Background, background);
                 LOG_INFO("Applet focus changed: {}", background ? "background (paused)" : "foreground (resumed)");
+#ifdef __SWITCH2__
+                if (!background)
+                    nx2DisplayReapply();
+#endif
             }
 
             {
@@ -1677,12 +1721,24 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
                 session_was_paused = session_paused;
             }
             if (lifecycle.operation_mode_changed.exchange(false, std::memory_order_acq_rel)) {
+#ifdef __SWITCH2__
+                // libounce resized the window for the new mode: the forced present
+                // rebuilds the swapchain at the new size.
+                nx2DisplayUpdate();
+                nx2DisplayReapply();
+#else
                 // VI rescales the unchanged NWindow to the new panel, so the
                 // swapchain does not have to be rebuilt. Force a present so the
                 // first frame on the new output is current.
+#endif
                 if (emuenv->renderer)
                     emuenv->renderer->async_flip_requested.store(true, std::memory_order_release);
             }
+#ifdef __SWITCH2__
+            // A TV resolution change (docked) resizes the window too.
+            if (nx2DisplayUpdate() && emuenv->renderer)
+                emuenv->renderer->async_flip_requested.store(true, std::memory_order_release);
+#endif
             if (lifecycle.performance_mode_changed.exchange(false, std::memory_order_acq_rel))
                 LOG_INFO("Applet performance mode changed: {}", static_cast<int>(appletGetPerformanceMode()));
             if (lifecycle.exit_requested.exchange(false, std::memory_order_acq_rel)) {
@@ -1995,9 +2051,13 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
 } // namespace
 
 int main(int argc, char *argv[]) {
+#ifdef __SWITCH2__
+    nx2DisplayInit();
+#endif
     // Keep everything off core 3 (Horizon reserves it for the OS: HID, fs, display,
     // scheduler). A title-takeover homebrew is otherwise allowed to use it, and any
     // busy thread there starves the system and hard-locks the console.
+    // (The Switch 2 gives the process six application cores: switch_thread.cpp.)
     switch_pin_to_app_cores("main thread");
 
     // libnx runtime: romfs (bundled static assets) + sockets (net/http).
@@ -2075,6 +2135,8 @@ int main(int argc, char *argv[]) {
 
         // Restart the application to prevent the next NRO from reusing the installer's process.
         bool application_relaunch_queued = false;
+#ifndef __SWITCH2__
+        // (Switch 2: no restart; the loader runs the launcher in this process)
         if (current_forwarder_targets(return_path)
             && write_frontend_request(SwitchFrontendAction::ReturnToLauncher, std::string())) {
             if (auto logger = spdlog::default_logger())
@@ -2095,6 +2157,7 @@ int main(int argc, char *argv[]) {
                     log_hex(request_rc));
             }
         }
+#endif
 
         if (!application_relaunch_queued && !return_path.empty()) {
             if (envHasNextLoad()) {
@@ -2188,6 +2251,16 @@ int main(int argc, char *argv[]) {
     const bool wants_launcher = run_result.action == SwitchFrontendAction::ReturnToLauncher
         || (run_result.action == SwitchFrontendAction::None && !run_result.title_id.empty());
 
+#ifdef __SWITCH2__
+    // The homebrew loader runs the next program in this same process: the
+    // launcher through envSetNextLoad, otherwise (Exit) its own menu. The
+    // program is never restarted (that would start the game kaiHEN runs the
+    // homebrew in) and the Application is never exited.
+    if (wants_launcher && !return_path.empty() && envHasNextLoad()) {
+        LOG_INFO("Returning to the launcher through the homebrew loader: {}", return_path);
+        envSetNextLoad(return_path.c_str(), return_path.c_str());
+    }
+#else
     if (wants_launcher) {
         bool clean_restart_ready = current_forwarder_targets(return_path);
         if (clean_restart_ready)
@@ -2235,6 +2308,7 @@ int main(int argc, char *argv[]) {
         if (!return_path.empty() && envHasNextLoad())
             envSetNextLoad(return_path.c_str(), HBLOADER_EXIT_SENTINEL);
     }
+#endif
 
     // Make the teardown diagnostics durable before hbloader replaces this NRO.
     if (auto logger = spdlog::default_logger())
@@ -2243,6 +2317,7 @@ int main(int argc, char *argv[]) {
     socketExit();
     romfsExit();
 
+#ifndef __SWITCH2__
     if (run_result.action == SwitchFrontendAction::ExitApplication) {
         // Terminate the Application ourselves. Any hbloader regaining control
         // maps its next NRO with svcSetProcessMemoryPermission, which fails with
@@ -2257,6 +2332,7 @@ int main(int argc, char *argv[]) {
         }
         LOG_ERROR("ISelfController::Exit failed (rc=0x{:X}); falling back to hbloader", exit_rc);
     }
+#endif
 
     return exit_code;
 }

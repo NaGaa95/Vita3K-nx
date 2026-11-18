@@ -39,6 +39,9 @@
 // (the unsafe pool is unavailable in this memory config) can back it. Instead we
 // commit pages by aliasing them, via svcMapMemory, out of a physically-backed
 // pool carved from the newlib heap — the same primitive libnx's JIT uses.
+// The Switch 2 skips the aliases: its GPU service registers only plain heap
+// memory, so the page table points straight at the pool's own pages and guest
+// mappings can be imported into Vulkan instead of double-buffered.
 // Access-violation-driven features (fault-based lazy commit, GPU write-protection
 // sync) are unavailable — memory is committed explicitly at allocation time.
 #include <switch.h>
@@ -86,6 +89,19 @@ static bool g_switch_pool_ready = false;
 // If a per-session alias cannot be removed, a new title must not reuse the
 // surviving mapping with a fresh allocator/page table.
 static bool g_switch_pool_cleanup_failed = false;
+
+#ifdef __SWITCH2__
+// The host page behind guest page 0 while init() keeps it inaccessible. It is a pool page,
+// which keeps that permission until it is given back (see switch_restore_null_page).
+static void *g_switch_null_host = nullptr;
+
+static void switch_restore_null_page() {
+    if (g_switch_null_host) {
+        svcSetMemoryPermission(g_switch_null_host, 0x1000, Perm_Rw);
+        g_switch_null_host = nullptr;
+    }
+}
+#endif
 
 // Entry for a guest page with no host backing. Must be null: Dynarmic only diverts
 // to the checked memory callbacks on a zero entry, and the desktop "identity" entry
@@ -206,9 +222,13 @@ static bool switch_decommit_range(MemState &state, uint64_t start, uint64_t size
         uint32_t runlen = 1;
         while (i + runlen < npages && g_switch_guest_pool[gp0 + i + runlen] == pp + static_cast<int32_t>(runlen))
             runlen++;
+#ifdef __SWITCH2__
+        const Result rc = 0; // (the guest page is the pool page itself)
+#else
         uint8_t *const host = state.memory.get() + static_cast<size_t>(pp) * 0x1000;
         void *const src = g_switch_pool + static_cast<size_t>(pp) * 0x1000;
         const Result rc = svcUnmapMemory(host, src, static_cast<size_t>(runlen) * 0x1000);
+#endif
         if (R_FAILED(rc)) {
             // The kernel alias is still live. Keep both maps and keep the pool
             // run allocated; recycling it would give two guest ranges the same
@@ -297,6 +317,10 @@ bool switch_reserve_guest_region() {
         }
         return true;
     }
+    constexpr u64 ALIGN = 0x200000; // 2 MiB
+#ifdef __SWITCH2__
+    u64 want = TOTAL_MEM_SIZE;
+#else
     u64 stack_a = 0, stack_s = 0;
     svcGetInfo(&stack_a, InfoType_StackRegionAddress, CUR_PROCESS_HANDLE, 0);
     svcGetInfo(&stack_s, InfoType_StackRegionSize, CUR_PROCESS_HANDLE, 0);
@@ -326,11 +350,11 @@ bool switch_reserve_guest_region() {
         addr = blk_end;
     }
 
-    constexpr u64 ALIGN = 0x200000; // 2 MiB
     const u64 base = (best_addr + ALIGN - 1) & ~(ALIGN - 1);
     u64 avail = (base < best_addr + best_size) ? (best_addr + best_size - base) : 0;
     avail &= ~(ALIGN - 1);
     u64 want = avail < TOTAL_MEM_SIZE ? avail : TOTAL_MEM_SIZE;
+#endif
 
     // The full Vita address space remains reserved virtually, but eagerly backing
     // every byte would waste unified RAM and starve NVK. Scale physical backing
@@ -354,6 +378,17 @@ bool switch_reserve_guest_region() {
     LOG_INFO("Guest backing plan: total={} MiB, committed host heap={} MiB, preferred pool={} MiB, selected={} MiB, host reserve={} MiB",
         total_memory >> 20, committed_heap >> 20, preferred_pool >> 20, want >> 20, HOST_HEAP_RESERVE >> 20);
 
+#ifdef __SWITCH2__
+    if (want < MIN_POOL) {
+        LOG_CRITICAL("Too little memory for the guest pool: 0x{:X} bytes", want);
+        return false;
+    }
+    if (!switch_pool_init(want, static_cast<uint32_t>(TOTAL_MEM_SIZE / STANDARD_PAGE_SIZE)))
+        return false;
+    g_switch_base = g_switch_pool;
+    g_switch_host_size = want;
+    return true;
+#else
     if (want < MIN_POOL) {
         LOG_CRITICAL("Stack region [0x{:X}+0x{:X}] largest free chunk 0x{:X} is too small", stack_a, stack_s, best_size);
         return false;
@@ -383,6 +418,7 @@ bool switch_reserve_guest_region() {
     g_switch_base = nullptr;
     g_switch_host_size = 0;
     return false;
+#endif
 }
 
 bool switch_release_page_table_region() {
@@ -394,6 +430,9 @@ bool switch_release_page_table_region() {
     // NRO's stacks there and faults (0xD401) on a leftover alias. host and src are
     // both indexed by pool slot, so a contiguous run of committed slots unmaps in a
     // single call. Install runs no guest code, so in practice this loop is empty.
+#ifdef __SWITCH2__
+    switch_restore_null_page();
+#else
     if (g_switch_base && g_switch_pool) {
         const size_t pool_pages = g_switch_pool_guest.size();
         for (size_t pp = 0; pp < pool_pages;) {
@@ -422,6 +461,7 @@ bool switch_release_page_table_region() {
             pp += runlen;
         }
     }
+#endif
 
     if (!aliases_released) {
         LOG_ERROR("Guest page-table pool retained because one or more aliases are still live");
@@ -549,6 +589,9 @@ bool init(MemState &state, const bool use_page_table) {
     DWORD old_protect = 0;
     const BOOL ret = VirtualProtect(state.memory.get(), state.host_page_size, PAGE_NOACCESS, &old_protect);
     LOG_CRITICAL_IF(!ret, "VirtualAlloc failed: {}", get_error_msg());
+#elif defined(__SWITCH2__)
+    g_switch_null_host = state.page_table[0];
+    svcSetMemoryPermission(g_switch_null_host, state.host_page_size, Perm_None);
 #elif defined(__SWITCH__)
     svcSetMemoryPermission(state.memory.get(), state.host_page_size, Perm_None);
 #else
@@ -665,6 +708,10 @@ static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_c
         uint32_t run = UINT32_MAX;
         bool mapped = false;
         int total_blocked = 0;
+#ifdef __SWITCH2__
+        run = switch_pool_alloc_run(need);
+        mapped = run != UINT32_MAX;
+#else
         for (int attempt = 0; attempt < 128 && !mapped; attempt++) {
             run = switch_pool_alloc_run(need);
             if (run == UINT32_MAX)
@@ -710,6 +757,7 @@ static Address alloc_inner(MemState &state, uint32_t start_page, uint32_t page_c
                 break;
             }
         }
+#endif
         if (!mapped) {
             LOG_CRITICAL("Guest pool: could not map {} pages for guest 0x{:X} (free {} pages) after blocking {} stray reservation slot(s)",
                 need, gp0 * STANDARD_PAGE_SIZE, g_switch_pool_free_pages, total_blocked);
@@ -1295,6 +1343,9 @@ void deinit_mem(MemState &state) {
         state.protect_tree.clear();
     }
 
+#ifdef __SWITCH2__
+    switch_restore_null_page();
+#endif
 #ifdef __SWITCH__
     if (g_switch_pool_ready) {
         g_switch_pool_cleanup_failed = !switch_decommit_range(state, 0, TOTAL_MEM_SIZE);

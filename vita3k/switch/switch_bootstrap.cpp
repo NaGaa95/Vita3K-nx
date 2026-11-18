@@ -73,7 +73,7 @@ static constexpr u64 align_heap_up(u64 size) {
 // Size newlib's heap from the memory the kernel says this process has rather
 // than whatever hbloader committed: it can leave memory uncommitted on one unit
 // and over-commit on another, so resizing in either direction matters.
-static void switch_configure_heap() {
+[[maybe_unused]] static void switch_configure_heap() {
     u64 total = 0, heap_base = 0, heap_region_size = 0, used_before = 0;
     const Result total_rc = svcGetInfo(&total, InfoType_TotalMemorySize, CUR_PROCESS_HANDLE, 0);
     const Result heap_base_rc = svcGetInfo(&heap_base, InfoType_HeapRegionAddress, CUR_PROCESS_HANDLE, 0);
@@ -273,9 +273,11 @@ bool init_switch_session(const fs::path &storage_path, Root &root_paths,
         // Bound the newlib heap so the process leaves headroom; the guest memory
         // pool is later carved from this heap. Install mode never runs guest code,
         // so it reserves nothing - leaving the address space clean for the chainload.
+#ifndef __SWITCH2__ // (libounce's allocator owns the Switch 2 heap)
         if (!install_mode) {
             switch_configure_heap();
         }
+#endif
 
         // OpenSSL 3.x on Horizon does not auto-activate its built-in providers,
         // so EVP_*_fetch("AES-...") returns null and all SCE/PKG decryption fails.

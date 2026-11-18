@@ -1,0 +1,152 @@
+--- a/externals/oaknut/include/oaknut/code_block.hpp
++++ b/externals/oaknut/include/oaknut/code_block.hpp
+@@ -32,6 +32,12 @@
+ #    ifdef BITL
+ #        undef BITL
+ #    endif
++#    if defined(__SWITCH2__)
++// Switch 2 (kaiHEN): a Jit's RW address is a staging copy, not an alias of its
++// RX view. Code becomes executable only once published (nx2_platform), which
++// invalidate() does for every range dynarmic writes.
++#        include <nx2_platform.h>
++#    endif
+ #    include <chrono>
+ #    include <condition_variable>
+ #    include <iterator>
+@@ -77,8 +83,12 @@
+         // Jit is a libnx C object, so destroying the struct alone does not
+         // release its source allocation or RW/RX aliases. This fallback also
+         // covers shutdown paths that do not explicitly drain the shared pool.
+-        if (open)
++        if (open) {
++#if defined(__SWITCH2__)
++            nx2JitUnregister(&jit);
++#endif
+             (void)jitClose(&jit);
++        }
+     }
+ };
+ 
+@@ -121,11 +131,17 @@
+     auto r = std::make_unique<CodeRegion>();
+     const ::Result rc = jitCreate(&r->jit, kCodeRegionSize);
+     ::g_switch_last_jit_rc = static_cast<unsigned int>(rc);
+     if (R_FAILED(rc)) {
+         p.no_more_regions = true; // don't hammer Horizon on every alloc
+         return nullptr;
+     }
+ 
++#if defined(__SWITCH2__)
++    // kaiHEN keeps separate RW (staging) and RX views whatever type it reports,
++    // and the RX view is mapped from the start: invalidate() publishes every
++    // written range, so the region is never transitioned (which would publish
++    // all of it).
++#else
+     // The shared-pool implementation depends on CodeMemory's distinct RW and
+     // RX aliases. The SetProcessMemoryPermission fallback exposes one mapping
+     // whose permission must be toggled, so it cannot safely back concurrent
+@@ -143,6 +163,7 @@
+         p.no_more_regions = true;
+         return nullptr;
+     }
++#endif
+ 
+     r->open = true;
+     r->rw = static_cast<std::uint8_t*>(jitGetRwAddr(&r->jit));
+@@ -153,6 +174,10 @@
+         p.no_more_regions = true;
+         return nullptr;
+     }
++#if defined(__SWITCH2__)
++    // (the unique_ptr keeps the Jit at this address until the region is closed)
++    nx2JitRegister(&r->jit);
++#endif
+     r->total = kCodeRegionSize;
+     r->free_runs.emplace(std::size_t{ 0 }, kCodeRegionSize);
+     p.regions.push_back(std::move(r));
+@@ -249,8 +274,14 @@
+             continue;
+         }
+ 
++#if defined(__SWITCH2__)
++        nx2JitUnregister(&region.jit);
++#endif
+         const ::Result rc = jitClose(&region.jit);
+         if (R_FAILED(rc)) {
++#if defined(__SWITCH2__)
++            nx2JitRegister(&region.jit);
++#endif
+             if (result.close_rc == 0)
+                 result.close_rc = static_cast<unsigned int>(rc);
+             ++it;
+@@ -364,6 +395,13 @@
+         pthread_jit_write_protect_np(1);
+ #elif defined(__APPLE__) || defined(__NetBSD__) || defined(__OpenBSD__)
+         mprotect(m_memory, m_size, PROT_READ | PROT_EXEC);
++#elif defined(__SWITCH2__)
++        // The end of a write scope: dynarmic (DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT)
++        // brackets the prelude, each block emission with its links and each
++        // invalidation with unprotect()/protect(). The ranges invalidate()
++        // published inside it go to kaiHEN in one request, before the thread
++        // runs any of them.
++        nx2JitBatchEnd();
+ #elif defined(__SWITCH__)
+         // No-op: the shared code region's rw and rx aliases are permanently
+         // mapped (writable and executable respectively), so there is no
+@@ -378,6 +416,9 @@
+         pthread_jit_write_protect_np(0);
+ #elif defined(__APPLE__) || defined(__NetBSD__) || defined(__OpenBSD__)
+         mprotect(m_memory, m_size, PROT_READ | PROT_WRITE);
++#elif defined(__SWITCH2__)
++        // The start of a write scope (see protect()); nestable per thread.
++        nx2JitBatchBegin();
+ #elif defined(__SWITCH__)
+         // No-op: the rw alias is always writable (see protect()).
+ #endif
+@@ -423,8 +464,16 @@
+                 || rw_base > std::uintptr_t(-1) - off
+                 || rx_base > std::uintptr_t(-1) - off)
+                 return;
++#    if defined(__SWITCH2__)
++            // kaiHEN: publish the staging range to the RX view (one request per
++            // write scope, see protect()). Publishing also invalidates this
++            // thread's instruction cache for the range; for a real RW/RX alias
++            // nx2_platform does the plain cache maintenance instead.
++            nx2JitPublish(reinterpret_cast<void*>(rw_base + off), size);
++#    else
+             armDCacheFlush(reinterpret_cast<void*>(rw_base + off), size);
+             armICacheInvalidate(reinterpret_cast<void*>(rx_base + off), size);
++#    endif
+         }
+ #else
+         static std::size_t icache_line_size = 0x10000, dcache_line_size = 0x10000;
+--- a/src/dynarmic/backend/arm64/a32_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a32_address_space.cpp
+@@ -383,7 +383,12 @@
+ 
+     prelude_info.end_of_prelude = code.offset();
+ 
++#ifdef __SWITCH2__
++    // kaiHEN publishes what it is given: only the prelude has been written.
++    mem.invalidate(mem.ptr(), static_cast<std::size_t>(prelude_info.end_of_prelude));
++#else
+     mem.invalidate_all();
++#endif
+     ProtectCodeMemory();
+ }
+ 
+--- a/src/dynarmic/backend/arm64/a64_address_space.cpp
++++ b/src/dynarmic/backend/arm64/a64_address_space.cpp
+@@ -543,7 +543,12 @@
+ 
+     prelude_info.end_of_prelude = code.offset();
+ 
++#ifdef __SWITCH2__
++    // kaiHEN publishes what it is given: only the prelude has been written.
++    mem.invalidate(mem.ptr(), static_cast<std::size_t>(prelude_info.end_of_prelude));
++#else
+     mem.invalidate_all();
++#endif
+     ProtectCodeMemory();
+ }
+ 

@@ -542,6 +542,11 @@ void delete_app(EmuEnvState &emuenv, const std::string &app_path) {
         const auto shader_cache{ emuenv.cache_path / "shaders" / app_entry.title_id };
         if (fs::exists(shader_cache))
             fs::remove_all(shader_cache);
+#ifdef __SWITCH2__
+        const auto shader_cache_nx2{ emuenv.cache_path / "shaders-nx2" / app_entry.title_id };
+        if (fs::exists(shader_cache_nx2))
+            fs::remove_all(shader_cache_nx2);
+#endif
 
         const auto shader_log{ emuenv.cache_path / "shaderlog" / app_entry.title_id };
         if (fs::exists(shader_log))

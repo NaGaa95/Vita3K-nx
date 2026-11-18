@@ -29,6 +29,21 @@ FetchContent_MakeAvailable(libsmb2)
 target_compile_options(smb2 PRIVATE -UNEED_READV -UNEED_WRITEV)
 target_compile_definitions(smb2 PRIVATE AES128_ECB_encrypt=smb2_AES128_ECB_encrypt)
 
+# The Switch 2 build (ouncebrew's libounce toolchain) has no USB drives: kaiHEN
+# never answers usb:hs, and every later program's services then hang until a
+# reboot. It gets libsmb2 alone, and the launcher a stand-in usbhsfs.h.
+if(NINTENDO_SWITCH2)
+    file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/include/smb2")
+    file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/include")
+    file(COPY "${libsmb2_SOURCE_DIR}/include/smb2"
+        DESTINATION "${CMAKE_BINARY_DIR}/include")
+    add_library(vita3k_launcher_storage_dependencies INTERFACE)
+    target_link_libraries(vita3k_launcher_storage_dependencies INTERFACE smb2)
+    add_library(Vita3KLauncher::StorageDependencies ALIAS
+        vita3k_launcher_storage_dependencies)
+    return()
+endif()
+
 # FAT/exFAT and NTFS cover the import browser. NTFS is enabled on its own:
 # USBHSFS_GPL would also pull in EXT2/3/4. The obsolete SX OS backend stays
 # disabled.

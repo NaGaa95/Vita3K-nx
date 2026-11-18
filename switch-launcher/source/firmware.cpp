@@ -16,6 +16,13 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __SWITCH__
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#endif
 
 #ifndef VITA3K_NX_VERSION
 #error "VITA3K_NX_VERSION must come from switch-launcher/version.mk"
@@ -235,6 +242,127 @@ static bool activateDownloadedPup(const std::string &temporary, const std::strin
   return true;
 }
 
+#ifdef __SWITCH__
+// When the console's DNS blocks Sony's update hosts (90DNS, Pi-hole...), resolve them through public DNS for curl
+// (CURLOPT_RESOLVE); the pinned PUP size and SHA-256 still guard the data.
+static std::string firmware_url_host(const std::string &url) {
+  size_t start = url.find("://");
+  start = start == std::string::npos ? 0 : start + 3;
+  const size_t end = url.find_first_of(":/?", start);
+  return url.substr(start, end == std::string::npos ? std::string::npos : end - start);
+}
+
+static std::string ipv4_text(std::uint32_t address) {
+  char text[16];
+  snprintf(text, sizeof(text), "%u.%u.%u.%u", address >> 24, (address >> 16) & 255, (address >> 8) & 255,
+           address & 255);
+  return text;
+}
+
+// Skips a (possibly compressed) DNS name; returns the offset after it, or 0 when malformed.
+static size_t dns_skip_name(const std::uint8_t *packet, size_t size, size_t at) {
+  while (at < size) {
+    const std::uint8_t length = packet[at];
+    if (length == 0) return at + 1;
+    if ((length & 0xC0) == 0xC0) return at + 2 <= size ? at + 2 : 0;
+    at += 1u + length;
+  }
+  return 0;
+}
+
+// One A query to `server` (dotted IPv4) on UDP port 53, 3 s timeout. The first usable IPv4 answer, or 0.
+static std::uint32_t dns_query_a(const char *server, const std::string &host) {
+  std::uint8_t query[512];
+  size_t n = 0;
+  const std::uint16_t id = static_cast<std::uint16_t>(armGetSystemTick());
+  const std::uint8_t header[12] = {static_cast<std::uint8_t>(id >> 8), static_cast<std::uint8_t>(id), 0x01, 0x00,
+                                   0, 1, 0, 0, 0, 0, 0, 0}; // recursion desired, one question
+  memcpy(query, header, sizeof(header));
+  n = sizeof(header);
+  for (size_t start = 0; start < host.size();) {
+    size_t dot = host.find('.', start);
+    if (dot == std::string::npos) dot = host.size();
+    const size_t length = dot - start;
+    if (!length || length > 63 || n + length + 6 > sizeof(query)) return 0;
+    query[n++] = static_cast<std::uint8_t>(length);
+    memcpy(query + n, host.data() + start, length);
+    n += length;
+    start = dot + 1;
+  }
+  const std::uint8_t tail[5] = {0, 0, 1, 0, 1}; // root, type A, class IN
+  memcpy(query + n, tail, sizeof(tail));
+  n += sizeof(tail);
+
+  const int s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (s < 0) return 0;
+  struct timeval timeout{};
+  timeout.tv_sec = 3;
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+  struct sockaddr_in to{};
+  to.sin_family = AF_INET;
+  to.sin_port = htons(53);
+  std::uint32_t found = 0;
+  if (inet_pton(AF_INET, server, &to.sin_addr) == 1 &&
+      sendto(s, query, n, 0, reinterpret_cast<struct sockaddr *>(&to), sizeof(to)) == static_cast<ssize_t>(n)) {
+    std::uint8_t reply[1024];
+    const ssize_t got = recv(s, reply, sizeof(reply), 0);
+    if (got >= 12 && reply[0] == query[0] && reply[1] == query[1] && (reply[2] & 0x80) && (reply[3] & 0x0F) == 0) {
+      const size_t size = static_cast<size_t>(got);
+      const unsigned questions = (reply[4] << 8) | reply[5];
+      const unsigned answers = (reply[6] << 8) | reply[7];
+      size_t at = 12;
+      for (unsigned i = 0; i < questions && at; i++) {
+        at = dns_skip_name(reply, size, at);
+        at = at && at + 4 <= size ? at + 4 : 0;
+      }
+      for (unsigned i = 0; i < answers && at && !found; i++) {
+        at = dns_skip_name(reply, size, at);
+        if (!at || at + 10 > size) break;
+        const unsigned type = (reply[at] << 8) | reply[at + 1];
+        const unsigned klass = (reply[at + 2] << 8) | reply[at + 3];
+        const unsigned length = (reply[at + 8] << 8) | reply[at + 9];
+        at += 10;
+        if (at + length > size) break;
+        if (type == 1 && klass == 1 && length == 4)
+          found = (std::uint32_t(reply[at]) << 24) | (std::uint32_t(reply[at + 1]) << 16) |
+                  (std::uint32_t(reply[at + 2]) << 8) | reply[at + 3];
+        at += length;
+      }
+    }
+  }
+  close(s);
+  // (an answer in 127/8 or 0.0.0.0 is a block too)
+  return found && (found >> 24) != 127 ? found : 0;
+}
+
+// "host:80:address" for CURLOPT_RESOLVE when the console's DNS blocks the host (no answer, or only loopback or
+// null addresses), else empty.
+static std::string firmware_dns_bypass(const std::string &url) {
+  const std::string host = firmware_url_host(url);
+  if (host.empty()) return {};
+  struct addrinfo hints{};
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  struct addrinfo *result = nullptr;
+  const int error = getaddrinfo(host.c_str(), nullptr, &hints, &result);
+  bool blocked = true;
+  for (const struct addrinfo *entry = error ? nullptr : result; entry; entry = entry->ai_next) {
+    if (!entry->ai_addr) continue;
+    const std::uint32_t address =
+        ntohl(reinterpret_cast<const struct sockaddr_in *>(entry->ai_addr)->sin_addr.s_addr);
+    if (address != 0 && (address >> 24) != 127) blocked = false;
+  }
+  if (result) freeaddrinfo(result);
+  if (!blocked) return {};
+  static const char *const kResolvers[] = {"1.1.1.1", "8.8.8.8"};
+  for (const char *resolver : kResolvers) {
+    const std::uint32_t answer = dns_query_a(resolver, host);
+    if (answer) return host + ":80:" + ipv4_text(answer);
+  }
+  return {};
+}
+#endif
+
 // GET `url` -> `destPath`. Streams to <destPath>.part and renames on success so a
 // partial/aborted transfer never looks like a complete PUP.
 static bool http_download_file(const std::string &url, const std::string &destPath,
@@ -253,6 +381,14 @@ static bool http_download_file(const std::string &url, const std::string &destPa
   sha256ContextCreate(&sink.hash);
   CURL *c = curl_easy_init();
   if (!c) { fclose(f); remove(tmp.c_str()); return false; }
+#ifdef __SWITCH__
+  struct curl_slist *resolve = nullptr;
+  const std::string bypass = firmware_dns_bypass(url);
+  if (!bypass.empty()) {
+    resolve = curl_slist_append(nullptr, bypass.c_str());
+    curl_easy_setopt(c, CURLOPT_RESOLVE, resolve);
+  }
+#endif
   curl_easy_setopt(c, CURLOPT_URL, url.c_str());
   curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, write_file_cb);
   curl_easy_setopt(c, CURLOPT_WRITEDATA, &sink);
@@ -280,6 +416,9 @@ static bool http_download_file(const std::string &url, const std::string &destPa
   long code = 0;
   curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
   curl_easy_cleanup(c);
+#ifdef __SWITCH__
+  if (resolve) curl_slist_free_all(resolve);
+#endif
   std::array<u8, SHA256_HASH_SIZE> actualHash{};
   sha256ContextGetHash(&sink.hash, actualHash.data());
   bool ok = (rc == CURLE_OK) && (code >= 200 && code < 300) && !sink.failed &&

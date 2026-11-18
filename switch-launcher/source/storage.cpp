@@ -5,7 +5,12 @@
 #include "storage.h"
 
 #include <switch.h>
+#ifdef __SWITCH2__
+// No USB host on the Switch 2: kaiHEN never answers usb:hs.
+#include "usbhsfs_switch2_stub.h"
+#else
 #include <usbhsfs.h>
+#endif
 
 // libsmb2.h uses constants and types declared by smb2.h.
 // clang-format off

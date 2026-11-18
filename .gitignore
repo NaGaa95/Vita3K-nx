@@ -100,7 +100,9 @@ fastlane/readme.md
 /Vita3K.nro
 /Vita3K-Launcher.nro
 /switch-launcher/build/
+/switch-launcher/build-switch2/
 /switch-launcher/dependencies/build/
+/switch-launcher/dependencies/build-switch2/
 /switch-launcher/*.elf
 /switch-launcher/*.nro
 /switch-launcher/*.nacp

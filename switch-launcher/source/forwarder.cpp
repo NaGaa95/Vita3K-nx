@@ -26,6 +26,31 @@
 
 std::string g_forwarderSelfPath;
 
+#ifdef __SWITCH2__
+// The Switch 2 (kaiHEN) has no HOME menu forwarders: installing one needs ns, ncm
+// and spl, which kaiHEN does not provide, and kaiHEN starts homebrew only from
+// its loader. Both entry points refuse with a message.
+namespace {
+bool forwarder_refuse(char *err, std::size_t errSize)
+{
+    if (err && errSize)
+        snprintf(err, errSize, "%s", "HOME menu shortcuts are not available on the Switch 2.");
+    return false;
+}
+} // namespace
+
+bool forwarder_create(const std::string &, const std::string &, const std::string &, char *err,
+                      std::size_t errSize)
+{
+    return forwarder_refuse(err, errSize);
+}
+
+bool forwarder_create_launcher(const std::string &, char *err, std::size_t errSize)
+{
+    return forwarder_refuse(err, errSize);
+}
+#else
+
 namespace {
 
 constexpr const char *kLauncherNro = "sdmc:/switch/vita3k/Vita3K.nro";
@@ -1385,3 +1410,4 @@ bool forwarder_create(const std::string &gameKey, const std::string &name,
 bool forwarder_create_launcher(const std::string &iconImgPath,char *err,std::size_t errSize){
     return forwarder_create("launcher","Vita3K",iconImgPath,err,errSize);
 }
+#endif // __SWITCH2__

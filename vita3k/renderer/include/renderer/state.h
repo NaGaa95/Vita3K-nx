@@ -247,7 +247,13 @@ struct State {
     }
 
     void set_app(const char *title_id, const char *self_name) {
+#ifdef __SWITCH2__
+        // The Switch 2's translated shaders and Vulkan pipeline cache are its
+        // own (another GPU and Mesa build), so one SD card can serve both consoles.
+        shaders_path = cache_path / "shaders-nx2" / title_id / self_name;
+#else
         shaders_path = cache_path / "shaders" / title_id / self_name;
+#endif
         shaders_log_path = log_path / "shaderlog" / title_id / self_name;
     }
 };

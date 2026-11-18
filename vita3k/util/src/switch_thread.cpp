@@ -11,6 +11,9 @@
 #ifdef __SWITCH__
 
 #include <switch.h>
+#ifdef __SWITCH2__
+#include <nx2_platform.h>
+#endif
 
 #include <util/log.h>
 
@@ -18,9 +21,38 @@
 namespace {
 
 constexpr int32_t IDEAL_CORE_DONT_CARE = -1;
+#ifdef __SWITCH2__
+// The Switch 2 gives the process six application cores (mask 0x3F), none of
+// them the OS's. The last one plays the Switch's core 3: the hardware threads
+// (audio, vblank, display) run there above the guest band, rendering below
+// them, and the guest gets the other five.
+uint32_t all_core_mask() {
+    return static_cast<uint32_t>(nx2CoreMask());
+}
+int32_t helper_core() {
+    return nx2CoreAt(static_cast<unsigned>(nx2CoreCount() - 1));
+}
+uint32_t helper_core_mask() {
+    const int32_t core = helper_core();
+    return core >= 0 ? (1u << core) : 0u;
+}
+uint32_t app_core_mask() {
+    const uint32_t mask = all_core_mask() & ~helper_core_mask();
+    return mask ? mask : all_core_mask();
+}
+#define APP_CORE_MASK app_core_mask()
+#define HELPER_CORE_MASK helper_core_mask()
+#define HELPER_CORE helper_core()
+// Background workers stay off the helper core, which the render thread shares
+// with the hardware threads.
+#define WORKER_CORE_MASK app_core_mask()
+#else
 constexpr uint32_t APP_CORE_MASK = 0b0111u;
 constexpr uint32_t ALL_CORE_MASK = 0b1111u;
 constexpr uint32_t HELPER_CORE_MASK = 0b1000u;
+constexpr int32_t HELPER_CORE = 3;
+constexpr uint32_t WORKER_CORE_MASK = ALL_CORE_MASK;
+#endif
 
 // Vita user priorities run 64 (highest) to 191 (lowest); Horizon runs 0 to 63 the
 // same way round. Guest threads map into a band that preserves the game's own
@@ -30,10 +62,21 @@ constexpr int32_t GUEST_PRIORITY_LOWEST = 56;
 constexpr int32_t VITA_PRIORITY_HIGHEST = 64;
 constexpr int32_t VITA_PRIORITY_LOWEST = 191;
 
+#ifdef __SWITCH2__
+// The lowest priority the process may use: kaiHEN's host title refuses 63.
+int32_t background_priority() {
+    u64 mask = 0;
+    if (R_SUCCEEDED(svcGetInfo(&mask, InfoType_PriorityMask, CUR_PROCESS_HANDLE, 0)) && mask != 0)
+        return 63 - __builtin_clzll(mask);
+    return 63;
+}
+#define BACKGROUND_PRIORITY background_priority()
+#else
 // Core 3 uses priority 63 for preemptive multithreading (cores 0..2 use 59).
 // Workers allowed on every core must use the lower class so they cannot starve
 // Horizon when the scheduler places them on core 3.
 constexpr int32_t BACKGROUND_PRIORITY = 63;
+#endif
 
 } // namespace
 
@@ -42,9 +85,14 @@ void switch_pin_to_app_cores(const char *what) {
     if (R_SUCCEEDED(rc))
         return;
 
-    rc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, 0, APP_CORE_MASK);
+    rc = svcSetThreadCoreMask(CUR_THREAD_HANDLE, __builtin_ctz(APP_CORE_MASK), APP_CORE_MASK);
+#ifdef __SWITCH2__
+    if (R_FAILED(rc))
+        LOG_WARN("Could not restrict {} to the application cores 0x{:X} (rc=0x{:X})", what, APP_CORE_MASK, rc);
+#else
     if (R_FAILED(rc))
         LOG_WARN("Could not restrict {} to cores 0/1/2 (rc=0x{:X}); it may run on the OS-reserved core 3", what, rc);
+#endif
 }
 
 
@@ -55,8 +103,9 @@ bool switch_pin_to_helper_core(const char *what, const int32_t helper_priority) 
     // per wakeup: audio 43, vblank 44, Vulkan wait 45, GXM display 46, render
     // 47. The priority is applied only once the pin succeeded - on the app cores
     // these would outrank the guest itself.
-    if (R_SUCCEEDED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, 3, HELPER_CORE_MASK))) {
-        const int32_t priority = helper_priority;
+    if (HELPER_CORE >= 0 && R_SUCCEEDED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, HELPER_CORE, HELPER_CORE_MASK))) {
+        const int32_t lowest = BACKGROUND_PRIORITY;
+        const int32_t priority = helper_priority > lowest ? lowest : helper_priority;
         if (R_SUCCEEDED(svcSetThreadPriority(CUR_THREAD_HANDLE, priority)))
             LOG_INFO("[switch] {} runs on the helper core at priority {}", what, priority);
         else
@@ -82,7 +131,21 @@ void switch_apply_guest_thread_affinity(const int32_t affinity_mask) {
     if (requested == 0 || requested == VITA_USER_CORE_ALL)
         return;
 
+#ifdef __SWITCH2__
+    // Vita user core n runs on the n-th application core.
+    uint32_t host_mask = 0;
+    for (unsigned core = 0; core < 3; ++core) {
+        if (requested & (1 << (VITA_USER_CORE_SHIFT + core))) {
+            const int host_core = nx2CoreAt(core);
+            if (host_core >= 0)
+                host_mask |= 1u << host_core;
+        }
+    }
+    if (host_mask == 0)
+        return;
+#else
     const uint32_t host_mask = static_cast<uint32_t>(requested) >> VITA_USER_CORE_SHIFT;
+#endif
     const int32_t ideal_core = __builtin_ctz(host_mask);
     if (R_SUCCEEDED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, ideal_core, host_mask)))
         LOG_INFO("[switch] guest thread restricted to core mask 0b{:03b} at the game's request", host_mask);
@@ -119,7 +182,7 @@ void switch_pin_to_hardware_priority(const char *what, const int32_t helper_prio
 void switch_allow_helper_core(const char *what) {
     // Permits the helper core without moving the thread there: the scheduler
     // uses core 3's idle time, but the tenants above always preempt it.
-    if (R_FAILED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, IDEAL_CORE_DONT_CARE, ALL_CORE_MASK)))
+    if (R_FAILED(svcSetThreadCoreMask(CUR_THREAD_HANDLE, IDEAL_CORE_DONT_CARE, WORKER_CORE_MASK)))
         switch_pin_to_app_cores(what);
 
     // libnx gives a new thread the priority of its creator, so without this a

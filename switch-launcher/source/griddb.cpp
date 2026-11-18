@@ -261,10 +261,25 @@ static bool json_object_number(const std::string &object, const char *field, lon
   return true;
 }
 
+#ifdef __SWITCH2__
+// libounce doesn't refcount socketInitialize: share main's sockets and let main exit them.
+static bool g_ownsSockets = true;
+#endif
+
 bool griddb_global_init(void) {
   if (g_networkReady) return true;
-  if (R_FAILED(socketInitializeDefault())) return false;
+  const Result socket_rc = socketInitializeDefault();
+#ifdef __SWITCH2__
+  const bool shared = socket_rc == MAKERESULT(Module_Libnx, LibnxError_AlreadyInitialized);
+  g_ownsSockets = !shared;
+  if (R_FAILED(socket_rc) && !shared) return false;
+#else
+  if (R_FAILED(socket_rc)) return false;
+#endif
   if (curl_global_init(CURL_GLOBAL_ALL) != CURLE_OK) {
+#ifdef __SWITCH2__
+    if (g_ownsSockets)
+#endif
     socketExit();
     return false;
   }
@@ -274,6 +289,9 @@ bool griddb_global_init(void) {
 void griddb_global_exit(void) {
   if (!g_networkReady) return;
   curl_global_cleanup();
+#ifdef __SWITCH2__
+  if (g_ownsSockets)
+#endif
   socketExit();
   g_networkReady = false;
 }

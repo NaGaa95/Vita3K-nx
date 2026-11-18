@@ -26,6 +26,9 @@
 #include <unistd.h>
 
 #include <switch.h>
+#ifdef __SWITCH2__
+#include <nx2_platform.h>
+#endif
 
 uid_t getuid(void) { return 0; }
 uid_t geteuid(void) { return 0; }
@@ -75,7 +78,11 @@ long sysconf(int name) {
 #ifdef _SC_NPROCESSORS_CONF
     case _SC_NPROCESSORS_CONF:
 #endif
+#ifdef __SWITCH2__
+        return nx2CoreCount(); // Switch 2: 6 CPU cores available to the process.
+#else
         return 3; // Switch: 3 CPU cores available to applications.
+#endif
 #ifdef _SC_PAGESIZE
     case _SC_PAGESIZE:
 #endif

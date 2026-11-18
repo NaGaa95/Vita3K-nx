@@ -44,6 +44,10 @@
 #endif
 #endif
 
+#ifdef __SWITCH2__
+#include <nx2_platform.h>
+#endif
+
 #ifdef __ANDROID__
 #include <jni.h>
 
@@ -333,6 +337,11 @@ void ScreenRenderer::create_swapchain() {
         };
 
         swapchain = state.device.createSwapchainKHR(swapchain_info);
+#ifdef __SWITCH2__
+        // (Mesa set its own swap interval with the swapchain, which withdraws
+        // the 120 Hz request)
+        nx2DisplayReapply();
+#endif
     }
 
     // Get Swapchain Images

@@ -295,7 +295,14 @@ void PipelineCache::init(bool support_rasterized_order_access) {
     // Three app cores plus the helper core's slack, and these workers sit
     // below the guest band, so a third one consumes leftover CPU rather than
     // competing for what emulation needs.
+#ifdef __SWITCH2__
+    // The Switch 2 has five application cores (the sixth is the helper's) and
+    // the guest gate runs at most three guest threads at once: a fourth worker
+    // takes the remaining slack.
+    nb_worker_threads = 4;
+#else
     nb_worker_threads = 3;
+#endif
     (void)nb_logical_threads;
 #else
     // took this from RPCS3 (slightly modified)

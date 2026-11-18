@@ -161,7 +161,9 @@ bool arm_has_sve2() {
 namespace util {
 
 std::string get_cpu_brand() {
-#if defined(__SWITCH__)
+#if defined(__SWITCH2__)
+    return "NVIDIA Tegra T239 (Cortex-A78C)";
+#elif defined(__SWITCH__)
     return "ARM Cortex-A57 (Nintendo Switch)";
 #elif defined(__APPLE__)
     // Works for both Intel and Apple Silicon ("Apple M2" etc.)

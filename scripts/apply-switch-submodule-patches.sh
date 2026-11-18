@@ -40,9 +40,23 @@ apply_one() {
 apply_one "external/concurrentqueue" \
     "concurrentqueue-switch.patch" \
     "9afb99746f0f5fc94ac8aef737053ae0481ba8d1"
-apply_one "external/dynarmic" \
-    "dynarmic-switch.patch" \
-    "86458a0bd369d63ba4c2ef812cacbb6c9080c065"
+# dynarmic-switch2.patch (the Switch 2's kaiHEN JIT: RX views published from RW
+# staging, guarded by __SWITCH2__) applies on top of dynarmic-switch.patch. Once
+# both are in, only the newer one reverse-applies; it carries the older one's
+# lines as context, so it reverse-applying means both are applied.
+DYNARMIC_HEAD="86458a0bd369d63ba4c2ef812cacbb6c9080c065"
+if [[ "$(git -C "$ROOT/external/dynarmic" rev-parse HEAD)" == "$DYNARMIC_HEAD" ]] &&
+    git -C "$ROOT/external/dynarmic" apply --reverse --check \
+        "$PATCH_DIR/dynarmic-switch2.patch" >/dev/null 2>&1; then
+    printf 'already applied: external/dynarmic (dynarmic-switch.patch, dynarmic-switch2.patch)\n'
+else
+    apply_one "external/dynarmic" \
+        "dynarmic-switch.patch" \
+        "$DYNARMIC_HEAD"
+    git -C "$ROOT/external/dynarmic" apply --check "$PATCH_DIR/dynarmic-switch2.patch"
+    git -C "$ROOT/external/dynarmic" apply "$PATCH_DIR/dynarmic-switch2.patch"
+    printf 'applied: external/dynarmic (dynarmic-switch2.patch)\n'
+fi
 apply_one "external/ffmpeg" \
     "ffmpeg-switch.patch" \
     "671860a3d70b1fa60b988fc725cebbebef729367"
