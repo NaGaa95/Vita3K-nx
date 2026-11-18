@@ -415,6 +415,10 @@ static const Opt S_framegen[] = {
             LSFG_DEFAULT_FLOW, "switch-lsfg-enabled", "false"),
   O_CHOICEG("Performance mode", "switch-lsfg-performance", C_bool,
             "true", "switch-lsfg-enabled", "false"),
+#ifdef __SWITCH2__
+  O_CHOICEG("120 Hz Docked Mode", "switch-lsfg-120hz", C_bool,
+            "false", "switch-lsfg-enabled", "false"),
+#endif
   O_STATUS("Lossless.dll", "lsfg-dll"),
 };
 
@@ -512,6 +516,9 @@ static const Opt S_launcher[] = {
   O_CHOICE("Show compatibility badges", "Wrapper/ShowCompatBadges", C_bool, "true"),
   O_CHOICE("UI animations",     "Wrapper/UiAnimations",   C_bool,          "true"),
   O_CHOICE("Sound effects",     "Wrapper/UiSounds",       C_bool,          "true"),
+#ifdef __SWITCH2__
+  O_CHOICE("Joy-Con mouse",     "Wrapper/JoyConMouse",    C_bool,          "true"),
+#endif
   O_CHOICE("Check updates at boot", "Wrapper/CheckUpdatesOnStartup", C_bool, "true"),
   O_TEXT("SteamGridDB API key", "Wrapper/SteamGridDBKey", ""),
 };
@@ -683,8 +690,151 @@ static bool configureLauncherOrientation(int rotation) {
   return true;
 }
 
+#ifdef __SWITCH2__
+// --- Joy-Con mouse (Switch 2): the merged Nmouse pointer drives a cursor; a click is sent as an SDL finger.
+static constexpr SDL_FingerID JOYCON_MOUSE_FINGER=0x4A434D53;
+static constexpr Uint32 JOYCON_MOUSE_SHOWN_MS=4000;
+static std::atomic_int g_mouseX{-1},g_mouseY{-1};
+static std::atomic<Uint32> g_mouseMovedAt{0};
+static std::atomic_bool g_mouseDown{false},g_mouseStop{false};
+static std::thread g_mouseThread;
+static Uint32 g_mouseWakeEvent=(Uint32)-1;
+
+static bool joyConMouseInUse(){
+  return g_mouseDown.load(std::memory_order_relaxed)||
+         (g_mouseMovedAt.load(std::memory_order_relaxed)&&
+          SDL_GetTicks()-g_mouseMovedAt.load(std::memory_order_relaxed)<JOYCON_MOUSE_SHOWN_MS);
+}
+
+// Inverse of touchUiPoint.
+static void joyConMouseFinger(int x,int y,float &normalizedX,float &normalizedY){
+  const float ux=std::clamp((float)x/std::max(1,SW),0.f,1.f),uy=std::clamp((float)y/std::max(1,SH),0.f,1.f);
+  switch(g_launcherRotation){
+    case 1: normalizedX=1.f-uy; normalizedY=ux; break;
+    case 2: normalizedX=1.f-ux; normalizedY=1.f-uy; break;
+    case 3: normalizedX=uy; normalizedY=1.f-ux; break;
+    default: normalizedX=ux; normalizedY=uy; break;
+  }
+}
+
+static void pushJoyConMouseFinger(Uint32 type,int x,int y){
+  SDL_Event event{};
+  event.type=type;
+  event.tfinger.timestamp=SDL_GetTicks();
+  event.tfinger.touchId=JOYCON_MOUSE_FINGER;
+  event.tfinger.fingerId=JOYCON_MOUSE_FINGER;
+  joyConMouseFinger(x,y,event.tfinger.x,event.tfinger.y);
+  event.tfinger.pressure=type==SDL_FINGERUP?0.f:1.f;
+  SDL_PushEvent(&event);
+}
+
+static void joyConMouseThread(){
+  if(R_FAILED(hidInitializeNmouse(nullptr,0,std::max(1,SW),std::max(1,SH),HidNmousePointerType_Default))) return;
+  hidSetMergedNmouseSourceTypes(HidNmouseType_JoyLeft|HidNmouseType_JoyRight|HidNmouseType_StandardMouse);
+  int rangeW=SW,rangeH=SH,lastX=-1,lastY=-1;
+  u64 lastSample=0;
+  Uint32 lastWake=0;
+  bool hideWakeSent=true;
+  while(!g_mouseStop.load(std::memory_order_acquire)){
+    if(SW!=rangeW||SH!=rangeH){
+      rangeW=SW;rangeH=SH;
+      hidSetNmousePointerRanges(std::max(1,rangeW),std::max(1,rangeH));
+    }
+    HidNmouseHandle handle{};
+    HidNmouseState state{};
+    size_t total=0;
+    const bool present=R_SUCCEEDED(hidGetMergedNmouseHandle(&handle))&&
+                       R_SUCCEEDED(hidGetNmouseStates(handle,&state,1,&total))&&total;
+    if(present&&state.sampling_number!=lastSample){
+      lastSample=state.sampling_number;
+      const int x=std::clamp((int)state.x,0,std::max(0,rangeW-1)),y=std::clamp((int)state.y,0,std::max(0,rangeH-1));
+      const bool moved=lastX>=0&&(x!=lastX||y!=lastY);
+      const bool held=(state.buttons&HidMouseButton_Left)!=0;
+      const bool wasDown=g_mouseDown.load(std::memory_order_relaxed);
+      const Uint32 now=SDL_GetTicks();
+      if(moved){
+        g_mouseMovedAt.store(now?now:1,std::memory_order_relaxed);
+        hideWakeSent=false;
+      }
+      g_mouseX.store(x,std::memory_order_relaxed);
+      g_mouseY.store(y,std::memory_order_relaxed);
+      // A click counts only while the cursor shows: L/ZL and R/ZR stay shoulder buttons for a Joy-Con in hand.
+      if(held&&!wasDown&&joyConMouseInUse()){
+        g_mouseDown.store(true,std::memory_order_relaxed);
+        pushJoyConMouseFinger(SDL_FINGERDOWN,x,y);
+      } else if(!held&&wasDown){
+        g_mouseDown.store(false,std::memory_order_relaxed);
+        pushJoyConMouseFinger(SDL_FINGERUP,x,y);
+      } else if(wasDown&&moved){
+        pushJoyConMouseFinger(SDL_FINGERMOTION,x,y);
+      }
+      // A static screen sleeps until an SDL event: wake it to draw the cursor where it went.
+      if(moved&&g_mouseWakeEvent!=(Uint32)-1&&now-lastWake>=16){
+        SDL_Event wake{}; wake.type=g_mouseWakeEvent; SDL_PushEvent(&wake);
+        lastWake=now;
+      }
+      lastX=x;lastY=y;
+    }
+    // Wake once more when the cursor times out, so a static screen erases it.
+    if(!hideWakeSent&&!joyConMouseInUse()&&g_mouseWakeEvent!=(Uint32)-1){
+      SDL_Event wake{}; wake.type=g_mouseWakeEvent; SDL_PushEvent(&wake);
+      hideWakeSent=true;
+    }
+    svcSleepThread(present?4000000ULL:50000000ULL);
+  }
+  hidFinalizeNmouse();
+}
+
+// While the cursor is in use, L/R/ZL/ZR only click.
+static int SDLCALL joyConMouseEventFilter(void*,SDL_Event *event){
+  if(!joyConMouseInUse()) return 1;
+  if((event->type==SDL_CONTROLLERBUTTONDOWN||event->type==SDL_CONTROLLERBUTTONUP)&&
+     (event->cbutton.button==SDL_CONTROLLER_BUTTON_LEFTSHOULDER||event->cbutton.button==SDL_CONTROLLER_BUTTON_RIGHTSHOULDER))
+    return 0;
+  if(event->type==SDL_CONTROLLERAXISMOTION&&
+     (event->caxis.axis==SDL_CONTROLLER_AXIS_TRIGGERLEFT||event->caxis.axis==SDL_CONTROLLER_AXIS_TRIGGERRIGHT))
+    return 0;
+  return 1;
+}
+
+static void startJoyConMouse(){
+  if(g_mouseThread.joinable()) return;
+  if(g_mouseWakeEvent==(Uint32)-1){
+    g_mouseWakeEvent=SDL_RegisterEvents(1);
+    // Once: SDL_SetEventFilter drops the queued events, and the filter passes everything while the mouse is off.
+    SDL_SetEventFilter(joyConMouseEventFilter,nullptr);
+  }
+  g_mouseStop.store(false,std::memory_order_release);
+  g_mouseThread=std::thread(joyConMouseThread);
+}
+
+static void stopJoyConMouse(){
+  if(!g_mouseThread.joinable()) return;
+  g_mouseStop.store(true,std::memory_order_release);
+  g_mouseThread.join();
+  g_mouseDown.store(false,std::memory_order_relaxed);
+  g_mouseMovedAt.store(0,std::memory_order_relaxed);
+  g_mouseX.store(-1,std::memory_order_relaxed);
+}
+
+static void drawJoyConMouseCursor(){
+  const int x=g_mouseX.load(std::memory_order_relaxed),y=g_mouseY.load(std::memory_order_relaxed);
+  if(x<0||!joyConMouseInUse()) return;
+  SDL_RenderSetClipRect(g_ren,nullptr);
+  const float fx=(float)x,fy=(float)y;
+  const SDL_Color edge={20,24,32,235},fill={250,252,255,255};
+  const SDL_Vertex outline[]={{{fx-1.5f,fy-2.5f},edge,{0,0}},{{fx-1.5f,fy+21.f},edge,{0,0}},{{fx+16.f,fy+15.5f},edge,{0,0}}};
+  const SDL_Vertex arrow[]={{{fx,fy},fill,{0,0}},{{fx,fy+17.f},fill,{0,0}},{{fx+12.5f,fy+13.f},fill,{0,0}}};
+  SDL_RenderGeometry(g_ren,nullptr,outline,3,nullptr,0);
+  SDL_RenderGeometry(g_ren,nullptr,arrow,3,nullptr,0);
+}
+#endif
+
 static void presentUi() {
   drawToastOverlay();
+#ifdef __SWITCH2__
+  drawJoyConMouseCursor();
+#endif
   if(!g_uiTarget){ SDL_RenderPresent(g_ren); return; }
   SDL_RenderSetClipRect(g_ren,nullptr);
   SDL_SetRenderTarget(g_ren,nullptr);
@@ -804,7 +954,7 @@ static std::unordered_map<EllipsisKey, EllipsisEntry, EllipsisKeyHash> g_ellipsi
 static size_t g_textCacheBytes = 0;
 static Uint64 g_textUseSerial = 0;
 static constexpr size_t TEXT_CACHE_LIMIT = 512;
-static constexpr size_t TEXT_CACHE_BYTES = 12 * 1024 * 1024;
+static constexpr size_t TEXT_CACHE_BYTES = 12 * 1024 * 1024;   // for text up to 1080p: see textCacheBytes
 static constexpr size_t METRIC_CACHE_LIMIT = 2048;
 static constexpr size_t ELLIPSIS_CACHE_LIMIT = 512;
 
@@ -829,9 +979,15 @@ static void rememberTextMetric(TTF_Font *font, const std::string &text, int widt
   g_metricCache.emplace(std::move(key), MetricEntry{width, ++g_textUseSerial});
 }
 
+// Text textures are at output resolution: scale the 1080p budget by area.
+static size_t textCacheBytes() {
+  const float scale = std::max(1.5f, g_fontScale) / 1.5f;
+  return (size_t)((float)TEXT_CACHE_BYTES * scale * scale);
+}
 static void evictTextEntries(size_t incomingBytes) {
+  const size_t budget = textCacheBytes();
   while (!g_textCache.empty() &&
-         (g_textCache.size() >= TEXT_CACHE_LIMIT || g_textCacheBytes > TEXT_CACHE_BYTES - incomingBytes)) {
+         (g_textCache.size() >= TEXT_CACHE_LIMIT || g_textCacheBytes > budget - incomingBytes)) {
     auto victim = g_textCache.begin();
     for (auto it = std::next(g_textCache.begin()); it != g_textCache.end(); ++it)
       if (it->second.use < victim->second.use) victim = it;
@@ -864,6 +1020,10 @@ static void applyLauncherAppearance() {
   g_showCompatBadges = strcmp(storeGet(g_global, "Wrapper/ShowCompatBadges", "true"), "false") != 0;
   g_gridColumns = std::max(3, std::min(8, atoi(storeGet(g_global, "Wrapper/GridColumns", "5"))));
   g_gridRows = std::max(1, std::min(3, atoi(storeGet(g_global, "Wrapper/GridRows", "2"))));
+#ifdef __SWITCH2__
+  if(strcmp(storeGet(g_global, "Wrapper/JoyConMouse", "true"), "false") != 0) startJoyConMouse();
+  else stopJoyConMouse();
+#endif
   int requestedRotation=atoi(storeGet(g_global,"Wrapper/LauncherRotation","0"));
   if(requestedRotation<0||requestedRotation>3) requestedRotation=0;
   if(g_ren && requestedRotation!=g_launcherRotation && !configureLauncherOrientation(requestedRotation)){
@@ -922,36 +1082,58 @@ static float xmbWaveY(float x,float time,float center,float amplitude,float freq
   return center+slope*(x-0.5f)+amplitude*(primary+detail*0.24f);
 }
 
+// Triangle strips: SDL draws a scaled line one rectangle per pixel.
 static void drawXmbRibbon(float time,float center,float amplitude,float frequency,float slope,float phase,
                           int halfWidth,SDL_Color color) {
-  constexpr int pointCount=121;
-  std::array<SDL_Point,pointCount> base{},points{};
+  // Rows from the centre line to each edge; alpha falls off as (1 - d)^1.45.
+  constexpr int pointCount=121, rows=8;
+  static std::array<SDL_Vertex,pointCount*(2*rows+1)> vertices;
+  static std::array<int,(pointCount-1)*2*rows*6> indices;
+  static bool indicesReady=false;
+  if(!indicesReady){
+    int index=0;
+    for(int row=0;row<2*rows;row++)
+      for(int point=0;point<pointCount-1;point++){
+        const int a=row*pointCount+point,b=a+1,c=a+pointCount,d=c+1;
+        for(const int corner:{a,b,c,c,b,d}) indices[index++]=corner;
+      }
+    indicesReady=true;
+  }
+  std::array<float,pointCount> xs{},ys{};
   for(int point=0;point<pointCount;point++){
     const float x=(float)point/(pointCount-1);
-    base[point]={(int)(x*SW),(int)(xmbWaveY(x,time,center,amplitude,frequency,slope,phase)*SH)};
+    xs[point]=x*SW;
+    ys[point]=xmbWaveY(x,time,center,amplitude,frequency,slope,phase)*SH;
   }
-  for(int offset=-halfWidth;offset<=halfWidth;offset++){
-    float distance=halfWidth?fabsf((float)offset/halfWidth):0.f;
-    Uint8 alpha=(Uint8)(color.a*powf(std::max(0.f,1.f-distance),1.45f));
-    if(alpha<2) continue;
-    for(int point=0;point<pointCount;point++){
-      points[point]={base[point].x,base[point].y+offset};
-    }
-    SDL_SetRenderDrawColor(g_ren,color.r,color.g,color.b,alpha);
-    SDL_RenderDrawLines(g_ren,points.data(),pointCount);
+  int vertex=0;
+  for(int row=-rows;row<=rows;row++){
+    const float distance=(float)std::abs(row)/rows;
+    const Uint8 alpha=(Uint8)(color.a*powf(std::max(0.f,1.f-distance),1.45f));
+    const float offset=(float)row/rows*(halfWidth+0.5f);
+    for(int point=0;point<pointCount;point++)
+      vertices[vertex++]={{xs[point],ys[point]+offset},{color.r,color.g,color.b,alpha},{0,0}};
   }
+  SDL_RenderGeometry(g_ren,nullptr,vertices.data(),(int)vertices.size(),indices.data(),(int)indices.size());
 }
 
 static void drawXmbFilament(float time,float center,float amplitude,float frequency,float slope,float phase,
                             SDL_Color color) {
   constexpr int pointCount=161;
-  std::array<SDL_Point,pointCount> points{};
+  std::array<SDL_Vertex,pointCount*2> vertices{};
+  std::array<int,(pointCount-1)*6> indices{};
   for(int point=0;point<pointCount;point++){
-    float x=(float)point/(pointCount-1);
-    points[point]={(int)(x*SW),(int)(xmbWaveY(x,time,center,amplitude,frequency,slope,phase)*SH)};
+    const float x=(float)point/(pointCount-1);
+    const float px=x*SW,py=xmbWaveY(x,time,center,amplitude,frequency,slope,phase)*SH;
+    vertices[point*2]={{px,py-0.5f},color,{0,0}};
+    vertices[point*2+1]={{px,py+0.5f},color,{0,0}};
   }
-  SDL_SetRenderDrawColor(g_ren,color.r,color.g,color.b,color.a);
-  SDL_RenderDrawLines(g_ren,points.data(),pointCount);
+  for(int point=0;point<pointCount-1;point++){
+    const int a=point*2,b=a+1,c=a+2,d=a+3;
+    const int base=point*6;
+    indices[base]=a;indices[base+1]=c;indices[base+2]=b;
+    indices[base+3]=b;indices[base+4]=c;indices[base+5]=d;
+  }
+  SDL_RenderGeometry(g_ren,nullptr,vertices.data(),(int)vertices.size(),indices.data(),(int)indices.size());
 }
 
 static void drawXmbSparkles(float time) {
@@ -1112,7 +1294,7 @@ static void drawText(TTF_Font*f,int x,int y,const char*s,SDL_Color c){
   SDL_FreeSurface(sf);
   if(!t) return;
   rememberTextMetric(f,s,(int)std::ceil(w));
-  if(bytes<=TEXT_CACHE_BYTES){
+  if(bytes<=textCacheBytes()){
     evictTextEntries(bytes);
     TextEntry entry{t,w,h,bytes,++g_textUseSerial};
     auto inserted=g_textCache.emplace(std::move(key),entry);
@@ -2601,6 +2783,9 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"switch-lsfg-enabled","Frame generation","Prepares Vulkan LSFG 2x support for this game. Open the in-game quick menu with L + R + Plus to turn generated frames on or off. It does not increase emulation speed."},
   {"switch-lsfg-flow-scale","Frame generation quality","Sets the optical-flow resolution. Quarter uses the least GPU time and memory and suits the Switch; Half keeps more motion detail and is the Switch 2 default; Full keeps the most and costs the most."},
   {"switch-lsfg-performance","Frame generation performance","Uses LSFG's lighter performance-oriented path. Disable it only when image quality matters more than GPU headroom."},
+#ifdef __SWITCH2__
+  {"switch-lsfg-120hz","Frame generation output","Docked, switches the TV to 120 Hz (1440p or 1080p, the TV's 120 Hz mode) while frame generation runs for a 50/60 FPS game, so it is doubled to 120 FPS. Off, the TV keeps its resolution (up to 4K) at 60 Hz and frame generation doubles 30 FPS games only."},
+#endif
   {"backend-renderer","Display backend","Chooses the Switch renderer. Vulkan (NVK) is recommended and supports LSFG. OpenGL uses native NVC0, while Zink runs OpenGL on NVK as an additional compatibility path."},
   {"switch-gl-thread","Graphics","Runs OpenGL commands on a Mesa worker thread. Applies on next game launch."},
   {"resolution-multiplier","Graphics","Scales the Vita render resolution. Higher values sharpen the image but increase GPU and memory cost."},
@@ -2662,6 +2847,9 @@ static const SettingHelpEntry SETTING_HELP[] = {
   {"Wrapper/ShowCompatBadges","Library layout","Shows or hides the coloured compatibility dot in the bottom-left corner of each cover. Download the database from Library & storage first."},
   {"Wrapper/UiAnimations","Launcher appearance","Enables animated backgrounds, fades, highlight easing, and cover transitions."},
   {"Wrapper/UiSounds","Launcher audio","Enables navigation, confirmation, and back sound effects in the launcher."},
+#ifdef __SWITCH2__
+  {"Wrapper/JoyConMouse","Launcher input","Lets a Joy-Con set down on a surface move a cursor in the launcher. Turn it off to keep the Joy-Con's shoulder buttons for the launcher only."},
+#endif
   {"Wrapper/CheckUpdatesOnStartup","Launcher updates","Checks the official Vita3K-nx GitHub releases in the background when the library opens. Direct HOME shortcut launches skip the check."},
   {"Wrapper/Language","Launcher language","Changes only the SDL launcher's language. Vita system language is configured separately under System."},
   {"Wrapper/SteamGridDBKey","Artwork service","Sets the SteamGridDB API key used for cover and HOME shortcut artwork searches. Leave it empty to remove the key."},
@@ -6283,7 +6471,11 @@ static int chooseCoverArtwork(const std::vector<GridDbArtwork> &artworks,const c
       if(sel!=previous) loadPreview(sel);
     }
     drawArtworkPicker(artworks,gameName,background,sel,top,loaded==sel?preview:nullptr,loaded==sel&&previewFailed);
-    drawFadeIn(); SDL_RenderPresent(g_ren); waitForNextFrame();
+    drawFadeIn();
+#ifdef __SWITCH2__
+    drawJoyConMouseCursor();
+#endif
+    SDL_RenderPresent(g_ren); waitForNextFrame();
   }
 }
 
@@ -7202,7 +7394,11 @@ static void renderGrid(int selection,int top){
       drawFooterHints(hints,2,SH-50);
     }
   }
-  drawFadeIn(); SDL_RenderPresent(g_ren);
+  drawFadeIn();
+#ifdef __SWITCH2__
+  drawJoyConMouseCursor();
+#endif
+  SDL_RenderPresent(g_ren);
 }
 
 
@@ -7563,6 +7759,10 @@ static bool ensureDirectory(const char *path) {
 }
 
 static void cleanupLauncher() {
+#ifdef __SWITCH2__
+  // (before a game starts: its process opens the Joy-Con mouse itself)
+  stopJoyConMouse();
+#endif
   stopGameScan();
   stopCoverDecodeWorker();
   stopStorageWorker();

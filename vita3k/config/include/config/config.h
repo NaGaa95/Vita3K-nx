@@ -206,6 +206,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(bool, "switch-lsfg-enabled", false, switch_lsfg_enabled)                                       \
     code(float, "switch-lsfg-flow-scale", VITA3K_DEFAULT_LSFG_FLOW_SCALE, switch_lsfg_flow_scale)                                \
     code(bool, "switch-lsfg-performance", true, switch_lsfg_performance)                                \
+    code(bool, "switch-lsfg-120hz", false, switch_lsfg_120hz)                                           \
     code(std::string, "pref-path", std::string{}, vita_fs_path)                                         \
     code(bool, "discord-rich-presence", true, discord_rich_presence)                                    \
     code(bool, "wait-for-debugger", false, wait_for_debugger)                                           \

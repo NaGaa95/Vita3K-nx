@@ -53,10 +53,11 @@ struct pause_overlay : public overlay {
     // for desktop/Android and for lifecycle pauses on Switch.
     void set_switch_menu(bool enabled, int selected = 0,
         bool lsfg_available = false, bool lsfg_enabled = false,
-        bool virtual_mouse = false);
+        int virtual_mouse = 0);
     void set_switch_menu_selection(int selected);
     void set_switch_menu_lsfg(bool available, bool enabled);
-    void set_switch_menu_virtual_mouse(bool enabled);
+    // 0 off, 1 stick, 2 Joy-Con mouse (Switch 2).
+    void set_switch_menu_virtual_mouse(int mode);
     // Only the colour: a game with no cheat file greys the entry out, like frame generation.
     void set_switch_menu_cheats(bool available);
 
@@ -103,7 +104,7 @@ private:
     bool m_switch_menu = false;
     bool m_list_mode = false;
     bool m_lsfg_available = false;
-    bool m_virtual_mouse = false;
+    int m_virtual_mouse = 0;
     bool m_lsfg_enabled = false;
     int m_selected = 0;
     int m_list_selected = 0;

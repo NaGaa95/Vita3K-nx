@@ -321,8 +321,16 @@ void pause_overlay::refresh_elements() {
     }
 }
 
+static const char *virtual_mouse_label(int mode) {
+#ifdef __SWITCH2__
+    return mode == 2 ? "Virtual mouse: Mouse" : mode ? "Virtual mouse: Joystick" : "Virtual mouse: Off";
+#else
+    return mode ? "Virtual mouse: On" : "Virtual mouse: Off";
+#endif
+}
+
 void pause_overlay::set_switch_menu(bool enabled, int selected,
-    bool lsfg_available, bool lsfg_enabled, bool virtual_mouse) {
+    bool lsfg_available, bool lsfg_enabled, int virtual_mouse) {
     {
         std::lock_guard lock(m_mutex);
         m_switch_menu = enabled;
@@ -339,7 +347,7 @@ void pause_overlay::set_switch_menu(bool enabled, int selected,
                     ? (m_lsfg_enabled ? "Frame generation: On" : "Frame generation: Off")
                     : "Frame generation: unavailable");
             m_menu_labels[1].fore_color = m_lsfg_available ? k_text : k_text_disabled;
-            m_menu_labels[2].set_text(m_virtual_mouse ? "Virtual mouse: On" : "Virtual mouse: Off");
+            m_menu_labels[2].set_text(virtual_mouse_label(m_virtual_mouse));
         } else {
             m_title_label.set_text(lang::get(lang::str::emulation_paused));
             m_subtitle_label.set_text(lang::get(lang::str::press_ps_to_continue));
@@ -364,11 +372,11 @@ void pause_overlay::set_switch_menu_lsfg(bool available, bool enabled) {
     overlay::refresh();
 }
 
-void pause_overlay::set_switch_menu_virtual_mouse(bool enabled) {
+void pause_overlay::set_switch_menu_virtual_mouse(int mode) {
     {
         std::lock_guard lock(m_mutex);
-        m_virtual_mouse = enabled;
-        m_menu_labels[2].set_text(enabled ? "Virtual mouse: On" : "Virtual mouse: Off");
+        m_virtual_mouse = mode;
+        m_menu_labels[2].set_text(virtual_mouse_label(mode));
         m_menu_labels[2].refresh();
     }
     overlay::refresh();

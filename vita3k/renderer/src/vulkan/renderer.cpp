@@ -696,7 +696,8 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
 #ifdef __SWITCH__
         lsfg::begin_session(config.current_config.switch_lsfg_enabled,
             config.current_config.switch_lsfg_flow_scale,
-            config.current_config.switch_lsfg_performance);
+            config.current_config.switch_lsfg_performance,
+            config.current_config.switch_lsfg_120hz);
 #endif
         instance = vk::createInstance(instance_info);
         VULKAN_HPP_DEFAULT_DISPATCHER.init(instance);

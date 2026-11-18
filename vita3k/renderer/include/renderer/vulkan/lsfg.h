@@ -26,7 +26,8 @@ namespace lsfg {
 constexpr const char *DLL_PATH = "/switch/vita3k/lsfg/Lossless.dll";
 constexpr const char *DLL_DISPLAY_PATH = "sdmc:/switch/vita3k/lsfg/Lossless.dll";
 
-void begin_session(bool requested, float flow_scale, bool performance_mode);
+// output_120hz: allow the docked 120 Hz mode for 50/60 FPS games.
+void begin_session(bool requested, float flow_scale, bool performance_mode, bool output_120hz);
 void end_session();
 
 bool is_session_prepared();
@@ -42,7 +43,6 @@ vk::Result present(VKState &state, const vk::PresentInfoKHR &present_info);
 bool is_dll_installed();
 bool is_available();
 bool is_enabled();
-bool is_high_fps_passthrough();
 bool request_enabled(bool enabled);
 std::string get_status();
 

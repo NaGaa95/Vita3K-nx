@@ -507,10 +507,94 @@ struct VirtualMouseState {
     bool pressed = false;
     bool was_pressed = false;
     std::shared_ptr<VirtualMouseCursor> cursor;
+#ifdef __SWITCH2__
+    // Mouse mode (Switch 2): both detached Joy-Cons as a pointer (HID Nmouse).
+    bool mouse_mode = false;
+    bool mouse_available = false;
+    bool nmouse_open = false;
+    u64 last_sample = 0;
+    u64 mouse_moved_tick = 0;
+
+    ~VirtualMouseState() {
+        if (nmouse_open)
+            hidFinalizeNmouse();
+    }
+#endif
+
+    // The left stick drives the pointer and is hidden from the game.
+    bool uses_stick() const {
+#ifdef __SWITCH2__
+        return enabled && !mouse_mode;
+#else
+        return enabled;
+#endif
+    }
+
+    // The quick menu's entry: 0 off, 1 the stick, 2 the Joy-Con mouse.
+    int menu_mode() const {
+#ifdef __SWITCH2__
+        if (enabled && mouse_mode)
+            return 2;
+#endif
+        return enabled ? 1 : 0;
+    }
 
     // Well above the panel's own finger ids, which libnx numbers from zero.
     static constexpr uint32_t finger_id = 0x4000;
 };
+
+#ifdef __SWITCH2__
+// Mouse mode opens Nmouse for the merged pointer of both Joy-Cons (and a USB mouse), starting where the cursor is.
+static void switch_set_mouse_mode(VirtualMouseState &vmouse, bool on) {
+    if (on && !vmouse.nmouse_open) {
+        const Result result = hidInitializeNmouse(nullptr, 0, 1280, 720, HidNmousePointerType_Default);
+        vmouse.nmouse_open = R_SUCCEEDED(result);
+        if (vmouse.nmouse_open) {
+            hidSetMergedNmouseSourceTypes(HidNmouseType_JoyLeft | HidNmouseType_JoyRight | HidNmouseType_StandardMouse);
+            HidNmouseHandle handle{};
+            if (R_SUCCEEDED(hidGetMergedNmouseHandle(&handle)))
+                hidSetNmousePointerPosition(handle, static_cast<s32>(vmouse.x * 1279.0f), static_cast<s32>(vmouse.y * 719.0f));
+        } else {
+            LOG_WARN("The Joy-Con mouse is unavailable (Nmouse {:#x})", result);
+        }
+    } else if (!on && vmouse.nmouse_open) {
+        hidFinalizeNmouse();
+        vmouse.nmouse_open = false;
+    }
+    vmouse.mouse_mode = on && vmouse.nmouse_open;
+    vmouse.last_sample = 0;
+    vmouse.mouse_moved_tick = 0;
+    vmouse.pressed = false;
+}
+
+// Clicks with the triggers that aren't the Vita's L/R; they leave the game only while the mouse is in use (moved in
+// the last 4 s, or a click held).
+static void switch_poll_joycon_mouse(VirtualMouseState &vmouse, u64 &held, bool swap_shoulders) {
+    const u64 click = swap_shoulders ? HidNpadButton_L | HidNpadButton_R : HidNpadButton_ZL | HidNpadButton_ZR;
+    constexpr u64 in_use_ns = 4'000'000'000ull;
+    HidNmouseHandle handle{};
+    HidNmouseState state{};
+    size_t total = 0;
+    if (R_SUCCEEDED(hidGetMergedNmouseHandle(&handle)) && R_SUCCEEDED(hidGetNmouseStates(handle, &state, 1, &total))
+        && total) {
+        if (state.sampling_number != vmouse.last_sample) {
+            const float x = std::clamp(static_cast<float>(state.x) / std::max(1, state.width - 1), 0.0f, 1.0f);
+            const float y = std::clamp(static_cast<float>(state.y) / std::max(1, state.height - 1), 0.0f, 1.0f);
+            // (only when the sensor tracked the movement: flag bit 1, clear for a Joy-Con in hand)
+            if (vmouse.last_sample && (state.flags & BIT(1)) && (x != vmouse.x || y != vmouse.y))
+                vmouse.mouse_moved_tick = armGetSystemTick();
+            vmouse.last_sample = state.sampling_number;
+            vmouse.x = x;
+            vmouse.y = y;
+        }
+    }
+    const bool recently_moved = vmouse.mouse_moved_tick
+        && armTicksToNs(armGetSystemTick() - vmouse.mouse_moved_tick) < in_use_ns;
+    vmouse.pressed = (held & click) != 0 && (recently_moved || vmouse.pressed);
+    if (recently_moved || vmouse.pressed)
+        held &= ~click;
+}
+#endif
 
 struct SwitchTouchTracker {
     std::array<uint32_t, 8> previous{};
@@ -853,6 +937,13 @@ static SwitchControllerFrame switch_poll_controller(EmuEnvState &emuenv, PadStat
         status.style = style;
     }
 
+#ifdef __SWITCH2__
+    // Mouse mode needs both Joy-Cons off the console: attaching them goes back to the stick.
+    vmouse.mouse_available = (style & HidNpadStyleTag_NpadJoyDual) != 0;
+    if (vmouse.mouse_mode && !vmouse.mouse_available)
+        switch_set_mouse_mode(vmouse, false);
+#endif
+
     if (!frame.connected || intercepted) {
         vmouse.pressed = false;
         if (vmouse.cursor)
@@ -869,6 +960,15 @@ static SwitchControllerFrame switch_poll_controller(EmuEnvState &emuenv, PadStat
     six_axis.poll(emuenv, pad);
     u64 held = frame.held;
 
+#ifdef __SWITCH2__
+    if (vmouse.enabled && vmouse.mouse_mode) {
+        switch_poll_joycon_mouse(vmouse, held, emuenv.cfg.switch_swap_shoulders);
+        if (vmouse.cursor) {
+            vmouse.cursor->set_position(vmouse.x, vmouse.y);
+            vmouse.cursor->set_pressed(vmouse.pressed);
+        }
+    } else
+#endif
     if (vmouse.enabled) {
         // Full deflection crosses the screen in about a second and a half, which
         // is quick enough to be useful and slow enough to hit a menu entry.
@@ -947,10 +1047,10 @@ static SwitchControllerFrame switch_poll_controller(EmuEnvState &emuenv, PadStat
 
     const bool rear_zl = !rear_triggers && emuenv.cfg.switch_rear_touch == "zl" && (held & nx_trigger_l);
     const bool rear_zr = !rear_triggers && emuenv.cfg.switch_rear_touch == "zr" && (held & nx_trigger_r);
-    emuenv.touch.touchscreen_port = (rear_zl || rear_zr) && !vmouse.enabled
+    emuenv.touch.touchscreen_port = (rear_zl || rear_zr) && !vmouse.uses_stick()
         ? SCE_TOUCH_PORT_BACK
         : SCE_TOUCH_PORT_FRONT;
-    emuenv.touch.touchscreen_both = !rear_triggers && emuenv.cfg.switch_rear_touch == "both" && !vmouse.enabled;
+    emuenv.touch.touchscreen_both = !rear_triggers && emuenv.cfg.switch_rear_touch == "both" && !vmouse.uses_stick();
     if (!rear_triggers && emuenv.cfg.switch_rear_touch != "zl")
         set_ext(nx_trigger_l, SCE_CTRL_L2);
     if (!rear_triggers && emuenv.cfg.switch_rear_touch != "zr")
@@ -962,7 +1062,7 @@ static SwitchControllerFrame switch_poll_controller(EmuEnvState &emuenv, PadStat
 
     HidAnalogStickState left = padGetStickPos(&pad, 0);
     const HidAnalogStickState right = padGetStickPos(&pad, 1);
-    if (vmouse.enabled)
+    if (vmouse.uses_stick())
         left = HidAnalogStickState{};
 
     std::lock_guard<std::mutex> lock(emuenv.ctrl.mutex);
@@ -1466,7 +1566,7 @@ static std::vector<overlay::list_row> build_cheat_rows(EmuEnvState &emuenv, cons
 
 static std::shared_ptr<overlay::pause_overlay> show_switch_quick_menu(EmuEnvState &emuenv,
     app::AppSessionController &controller, SwitchTouchTracker &touch_tracker, int selection,
-    bool virtual_mouse) {
+    int virtual_mouse) {
     if (!emuenv.renderer || !emuenv.renderer->overlay_manager)
         return {};
     controller.set_pause_reason(app::AppSessionPauseReason::Menu, true);
@@ -1735,7 +1835,7 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
                     emuenv->renderer->async_flip_requested.store(true, std::memory_order_release);
             }
 #ifdef __SWITCH2__
-            // A TV resolution change (docked) resizes the window too.
+            // A TV resolution change (docked) or frame generation's 120 Hz output resizes the window too.
             if (nx2DisplayUpdate() && emuenv->renderer)
                 emuenv->renderer->async_flip_requested.store(true, std::memory_order_release);
 #endif
@@ -1779,7 +1879,7 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
                     menu_repeat_frames = 0;
                     quick_menu_overlay = show_switch_quick_menu(
                         *emuenv, *session_controller, touch_tracker, quick_menu_selection,
-                        virtual_mouse.enabled);
+                        virtual_mouse.menu_mode());
                     quick_menu_open = static_cast<bool>(quick_menu_overlay);
                 }
             } else if (quick_menu_open) {
@@ -1911,10 +2011,24 @@ SwitchRunResult run_game(const std::string &title_id, NWindow *nwindow) {
                             break;
                         }
                         case QUICK_MENU_VIRTUAL_MOUSE:
+#ifdef __SWITCH2__
+                            // Off, the stick, then the Joy-Con mouse when both Joy-Cons are off the console.
+                            if (!virtual_mouse.enabled) {
+                                set_virtual_mouse(true);
+                            } else if (!virtual_mouse.mouse_mode && virtual_mouse.mouse_available) {
+                                switch_set_mouse_mode(virtual_mouse, true);
+                                if (!virtual_mouse.mouse_mode)
+                                    set_virtual_mouse(false);
+                            } else {
+                                switch_set_mouse_mode(virtual_mouse, false);
+                                set_virtual_mouse(false);
+                            }
+#else
                             set_virtual_mouse(!virtual_mouse.enabled);
+#endif
                             if (quick_menu_overlay)
                                 quick_menu_overlay->set_switch_menu_virtual_mouse(
-                                    virtual_mouse.enabled);
+                                    virtual_mouse.menu_mode());
                             break;
                         case QUICK_MENU_TROPHIES:
                             // Guest threads are suspended by the Menu pause

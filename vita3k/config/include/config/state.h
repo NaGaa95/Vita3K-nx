@@ -80,6 +80,7 @@ struct Config {
         bool switch_lsfg_enabled = false;
         float switch_lsfg_flow_scale = VITA3K_DEFAULT_LSFG_FLOW_SCALE;
         bool switch_lsfg_performance = true;
+        bool switch_lsfg_120hz = false;
         int modules_mode = ModulesMode::AUTOMATIC;
         std::vector<std::string> lle_modules = {};
         std::string audio_backend = "SDL";

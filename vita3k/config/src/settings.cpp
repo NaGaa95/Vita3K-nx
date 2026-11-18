@@ -39,6 +39,7 @@ void copy_global_to_current(Config::CurrentConfig &current, const Config &cfg) {
     current.switch_lsfg_enabled = cfg.switch_lsfg_enabled;
     current.switch_lsfg_flow_scale = cfg.switch_lsfg_flow_scale;
     current.switch_lsfg_performance = cfg.switch_lsfg_performance;
+    current.switch_lsfg_120hz = cfg.switch_lsfg_120hz;
     current.modules_mode = cfg.modules_mode;
     current.lle_modules = cfg.lle_modules;
     current.backend_renderer = cfg.backend_renderer;
@@ -96,6 +97,7 @@ void copy_current_to_global(Config &cfg, const Config::CurrentConfig &current) {
     cfg.switch_lsfg_enabled = current.switch_lsfg_enabled;
     cfg.switch_lsfg_flow_scale = current.switch_lsfg_flow_scale;
     cfg.switch_lsfg_performance = current.switch_lsfg_performance;
+    cfg.switch_lsfg_120hz = current.switch_lsfg_120hz;
     cfg.modules_mode = current.modules_mode;
     cfg.lle_modules = current.lle_modules;
     cfg.backend_renderer = current.backend_renderer;
@@ -215,6 +217,8 @@ bool load_custom_config(Config::CurrentConfig &out, const fs::path &config_path,
             out.switch_lsfg_flow_scale = value.as_float(VITA3K_DEFAULT_LSFG_FLOW_SCALE);
         if (const auto value = cpu.attribute("switch-lsfg-performance"); !value.empty())
             out.switch_lsfg_performance = value.as_bool(true);
+        if (const auto value = cpu.attribute("switch-lsfg-120hz"); !value.empty())
+            out.switch_lsfg_120hz = value.as_bool(false);
     }
 
     if (!config_child.child("gpu").empty()) {
@@ -314,6 +318,7 @@ bool save_custom_config(const Config::CurrentConfig &cc, const fs::path &config_
     cpu_child.append_attribute("switch-lsfg-enabled") = cc.switch_lsfg_enabled;
     cpu_child.append_attribute("switch-lsfg-flow-scale") = cc.switch_lsfg_flow_scale;
     cpu_child.append_attribute("switch-lsfg-performance") = cc.switch_lsfg_performance;
+    cpu_child.append_attribute("switch-lsfg-120hz") = cc.switch_lsfg_120hz;
 
     auto gpu_child = config_child.append_child("gpu");
     gpu_child.append_attribute("backend-renderer") = cc.backend_renderer.c_str();

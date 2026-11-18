@@ -6,6 +6,7 @@
 #include <renderer/vulkan/state.h>
 
 #include <dialog/state.h>
+#include <util/log.h>
 
 #include <algorithm>
 #include <atomic>
@@ -18,6 +19,10 @@
 #include <vector>
 
 #include "lsfg_bridge.h"
+
+#ifdef __SWITCH2__
+#include <nx2_platform.h>
+#endif
 
 #ifdef __SWITCH__
 extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName);
@@ -52,6 +57,8 @@ struct SessionState
   unsigned high_fps_slow_samples = 0;
   bool previous_requested = false;
   std::atomic_int rate_decision{-1};
+  bool high_refresh_requested = false;
+  bool output_120hz = false;
 };
 
 SessionState s_state;
@@ -124,6 +131,35 @@ bool SourceIsHighRateLocked()
   return s_state.source_samples >= 8 && s_state.source_interval_ns > 0.0 &&
          s_state.source_interval_ns < 30'000'000.0;
 }
+
+// A 50/60 FPS game is doubled only on a 120 Hz display.
+bool DisplayDoublesHighRateLocked()
+{
+#ifdef __SWITCH2__
+  return nx2DisplayRefreshRate() >= 120;
+#else
+  return false;
+#endif
+}
+
+// Docked 120 Hz while LSFG doubles a 50/60 FPS game; held until LSFG is off so a slowdown can't flip the TV mode.
+// True when the refresh rate changed.
+bool RequestHighRefreshLocked(bool request)
+{
+#ifdef __SWITCH2__
+  request = request && s_state.output_120hz;
+  if (s_state.high_refresh_requested == request)
+    return false;
+  s_state.high_refresh_requested = request;
+  const bool changed = nx2DisplaySetFrameGeneration(request);
+  if (changed)
+    nx2DisplayReapply();
+  return changed;
+#else
+  (void)request;
+  return false;
+#endif
+}
 }  // namespace
 
 bool is_dll_installed()
@@ -135,7 +171,7 @@ bool is_dll_installed()
   return true;
 }
 
-void begin_session(bool requested, float flow_scale, bool performance_mode)
+void begin_session(bool requested, float flow_scale, bool performance_mode, bool output_120hz)
 {
   std::lock_guard lock{s_state.mutex};
 
@@ -150,6 +186,7 @@ void begin_session(bool requested, float flow_scale, bool performance_mode)
   s_state.state = nullptr;
   s_state.flow_scale = flow_scale >= 1.0f ? 1.0f : flow_scale == 0.5f ? 0.5f : 0.25f;
   s_state.performance_mode = performance_mode;
+  s_state.output_120hz = output_120hz;
   ResetRateTrackingLocked();
 
   const bool dll_installed = is_dll_installed();
@@ -172,6 +209,7 @@ void begin_session(bool requested, float flow_scale, bool performance_mode)
 void end_session()
 {
   std::lock_guard lock{s_state.mutex};
+  RequestHighRefreshLocked(false);
   DestroyRuntimeLocked();
   s_state.enabled.store(false, std::memory_order_release);
   s_state.available.store(false, std::memory_order_release);
@@ -298,6 +336,8 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
 
   if (!enabled || !compatible)
   {
+    if (!enabled)
+      RequestHighRefreshLocked(false);
     if (!enabled && s_state.runtime)
     {
       DestroyRuntimeLocked();
@@ -311,7 +351,11 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
   if (s_state.rate_decision < 0 && s_state.source_samples >= 8)
     s_state.rate_decision = SourceIsHighRateLocked() ? 1 : 0;
 
-  if (s_state.rate_decision == 1)
+  // The new mode can resize the window: start the runtime once the swapchain follows.
+  if (s_state.rate_decision == 1 && RequestHighRefreshLocked(true))
+    return PresentNormally(state, present_info);
+
+  if (s_state.rate_decision == 1 && !DisplayDoublesHighRateLocked())
   {
     s_state.status = "Frame generation On (native 50/60 FPS protected)";
     if (source_interval >= 31'500'000)
@@ -363,6 +407,7 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
     s_state.runtime = lsfg_nx_create(&create_info);
     if (!s_state.runtime)
     {
+      LOG_ERROR("LSFG: initialization failed");
       s_state.enabled.store(false, std::memory_order_release);
       s_state.available.store(false, std::memory_order_release);
       s_state.status = "LSFG initialization failed";
@@ -375,6 +420,7 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
   VkResult result = VK_ERROR_INITIALIZATION_FAILED;
   if (!lsfg_nx_present(s_state.runtime, queue, &raw_present_info, &result))
   {
+    LOG_ERROR("LSFG: the bridge rejected the swapchain");
     s_state.status = "LSFG rejected the active swapchain";
     s_state.enabled.store(false, std::memory_order_release);
     s_state.available.store(false, std::memory_order_release);
@@ -385,6 +431,7 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
 
   if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR)
   {
+    LOG_ERROR("LSFG: presentation failed ({})", vk::to_string(static_cast<vk::Result>(result)));
     s_state.status = "LSFG presentation failed; recreating the swapchain";
     s_state.enabled.store(false, std::memory_order_release);
     s_state.available.store(false, std::memory_order_release);
@@ -403,12 +450,6 @@ bool is_enabled()
   return s_state.enabled.load(std::memory_order_acquire);
 }
 
-bool is_high_fps_passthrough()
-{
-  return s_state.enabled.load(std::memory_order_acquire) &&
-         s_state.rate_decision.load(std::memory_order_acquire) == 1;
-}
-
 bool request_enabled(bool enabled)
 {
   std::lock_guard lock{s_state.mutex};
@@ -419,6 +460,8 @@ bool request_enabled(bool enabled)
   }
 
   s_state.enabled.store(enabled, std::memory_order_release);
+  if (!enabled)
+    RequestHighRefreshLocked(false);
   s_state.status = enabled ? "Measuring the game's native frame rate" :
                              "Available; currently Off";
   return true;
