@@ -12,6 +12,10 @@ Vita3K is an experimental PlayStation Vita emulator for Windows, Linux, macOS an
 * [Wiki](https://github.com/Vita3K/Vita3K/wiki) (information for developers)
 * [Discord server](https://discord.gg/MaWhJVH) (recommended)
 
+## Nintendo Switch and Switch 2
+
+This fork runs Vita3K on the Nintendo Switch and the Nintendo Switch 2 (kaiHEN). Each release carries both builds: `Vita3K.nro` for the Switch and `Vita3K-NX2.nro` for the Switch 2, to put in `sdmc:/switch/vita3k/`.
+
 ## Compatibility
 
 The emulator currently runs most homebrew programs and commercial games.
