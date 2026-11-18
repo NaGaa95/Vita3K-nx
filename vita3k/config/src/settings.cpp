@@ -212,7 +212,7 @@ bool load_custom_config(Config::CurrentConfig &out, const fs::path &config_path,
         if (const auto value = cpu.attribute("switch-lsfg-enabled"); !value.empty())
             out.switch_lsfg_enabled = value.as_bool();
         if (const auto value = cpu.attribute("switch-lsfg-flow-scale"); !value.empty())
-            out.switch_lsfg_flow_scale = value.as_float(0.25f);
+            out.switch_lsfg_flow_scale = value.as_float(VITA3K_DEFAULT_LSFG_FLOW_SCALE);
         if (const auto value = cpu.attribute("switch-lsfg-performance"); !value.empty())
             out.switch_lsfg_performance = value.as_bool(true);
     }

@@ -148,7 +148,7 @@ void begin_session(bool requested, float flow_scale, bool performance_mode)
   s_state.extent = {};
   s_state.images.clear();
   s_state.state = nullptr;
-  s_state.flow_scale = flow_scale == 0.5f ? 0.5f : 0.25f;
+  s_state.flow_scale = flow_scale >= 1.0f ? 1.0f : flow_scale == 0.5f ? 0.5f : 0.25f;
   s_state.performance_mode = performance_mode;
   ResetRateTrackingLocked();
 
@@ -342,7 +342,7 @@ vk::Result present(VKState& state, const vk::PresentInfoKHR& present_info)
     s_state.initialization_attempted = true;
 
     float flow_scale = s_state.flow_scale;
-    if (flow_scale != 0.25f && flow_scale != 0.5f)
+    if (flow_scale != 0.25f && flow_scale != 0.5f && flow_scale != 1.0f)
       flow_scale = 0.25f;
 
     const LsfgNxCreateInfo create_info{

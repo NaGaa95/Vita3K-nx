@@ -78,7 +78,7 @@ struct Config {
         int preempt_on_wake_us = 1000;
         int guest_cores = 3;
         bool switch_lsfg_enabled = false;
-        float switch_lsfg_flow_scale = 0.25f;
+        float switch_lsfg_flow_scale = VITA3K_DEFAULT_LSFG_FLOW_SCALE;
         bool switch_lsfg_performance = true;
         int modules_mode = ModulesMode::AUTOMATIC;
         std::vector<std::string> lle_modules = {};

@@ -140,6 +140,13 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
 
 #define VITA3K_DEFAULT_SPIRV_SHADER false
 
+// LSFG's optical-flow resolution: 0.25 (quarter), 0.5 (half) or 1 (full). Half by default on the Switch 2.
+#ifdef __SWITCH2__
+#define VITA3K_DEFAULT_LSFG_FLOW_SCALE 0.5f
+#else
+#define VITA3K_DEFAULT_LSFG_FLOW_SCALE 0.25f
+#endif
+
 #define CONFIG_INDIVIDUAL(code)                                                                         \
     code(bool, "initial-setup", false, initial_setup)                                                   \
     code(bool, "gdbstub", false, gdbstub)                                                               \
@@ -197,7 +204,7 @@ using PhysicalKeyCode = input::PhysicalKeyCode;
     code(int, "log-level", VITA3K_DEFAULT_LOG_LEVEL, log_level)                                         \
     code(bool, "cpu-opt", true, cpu_opt)                                                                \
     code(bool, "switch-lsfg-enabled", false, switch_lsfg_enabled)                                       \
-    code(float, "switch-lsfg-flow-scale", 0.25f, switch_lsfg_flow_scale)                                \
+    code(float, "switch-lsfg-flow-scale", VITA3K_DEFAULT_LSFG_FLOW_SCALE, switch_lsfg_flow_scale)                                \
     code(bool, "switch-lsfg-performance", true, switch_lsfg_performance)                                \
     code(std::string, "pref-path", std::string{}, vita_fs_path)                                         \
     code(bool, "discord-rich-presence", true, discord_rich_presence)                                    \

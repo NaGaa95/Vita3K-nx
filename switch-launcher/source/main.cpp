@@ -383,7 +383,12 @@ static const Choice C_launcherLanguage[] = { {"System","system"}, {"English","en
   {"Português","pt"}, {"简体中文","zh-Hans"}, {"繁體中文","zh-Hant"} };
 static const Choice C_gridColumns[] = { {"3","3"}, {"4","4"}, {"5","5"}, {"6","6"}, {"7","7"}, {"8","8"} };
 static const Choice C_gridRows[] = { {"1","1"}, {"2","2"}, {"3","3"} };
-static const Choice C_lsfgFlow[] = { {"Quarter","0.25"}, {"Half","0.5"} };
+static const Choice C_lsfgFlow[] = { {"Quarter","0.25"}, {"Half","0.5"}, {"Full","1"} };
+#ifdef __SWITCH2__
+#define LSFG_DEFAULT_FLOW "0.5"
+#else
+#define LSFG_DEFAULT_FLOW "0.25"
+#endif
 // SCE_SYSTEM_PARAM_LANG_* (0-indexed, matches vita3k util/system.h).
 static const Choice C_syslang[]  = {
   {"Japanese","0"}, {"English (US)","1"}, {"French","2"}, {"Spanish","3"}, {"German","4"},
@@ -407,7 +412,7 @@ enum { SCR_FRAMEGEN, SCR_EMULATION, SCR_GRAPHICS, SCR_AUDIO, SCR_SYSTEM, SCR_NET
 static const Opt S_framegen[] = {
   O_CHOICE("LSFG 2x (Vulkan only)", "switch-lsfg-enabled", C_bool, "false"),
   O_CHOICEG("Flow resolution", "switch-lsfg-flow-scale", C_lsfgFlow,
-            "0.25", "switch-lsfg-enabled", "false"),
+            LSFG_DEFAULT_FLOW, "switch-lsfg-enabled", "false"),
   O_CHOICEG("Performance mode", "switch-lsfg-performance", C_bool,
             "true", "switch-lsfg-enabled", "false"),
   O_STATUS("Lossless.dll", "lsfg-dll"),
@@ -528,6 +533,8 @@ static void commitAll() {
     for (int i = 0; i < g_screens[s].n; i++) {
       const Opt &o = g_screens[s].opts[i];
       if (o.key && (o.type == OT_CHOICE || o.type == OT_RANGE || o.type == OT_TEXT || o.type == OT_MULTI)) {
+        // Both consoles share launcher.ini and default to different LSFG flows: keep it unset until chosen.
+        if (!strcmp(o.key, "switch-lsfg-flow-scale") && !storeHas(*g_active, o.key)) continue;
         std::string v = iniGet(o.key, o.def);
         iniSet(o.key, v.c_str());
       }
@@ -2592,7 +2599,7 @@ static const SettingHelpEntry SETTING_HELP[] = {
 #endif
   {"file-loading-delay","Compatibility","Adds a delay to file reads for games that depend on storage timing. 0 ms disables it."},
   {"switch-lsfg-enabled","Frame generation","Prepares Vulkan LSFG 2x support for this game. Open the in-game quick menu with L + R + Plus to turn generated frames on or off. It does not increase emulation speed."},
-  {"switch-lsfg-flow-scale","Frame generation quality","Sets the optical-flow resolution. Quarter is recommended on Switch; Half can improve motion detail but costs more GPU time and memory."},
+  {"switch-lsfg-flow-scale","Frame generation quality","Sets the optical-flow resolution. Quarter uses the least GPU time and memory and suits the Switch; Half keeps more motion detail and is the Switch 2 default; Full keeps the most and costs the most."},
   {"switch-lsfg-performance","Frame generation performance","Uses LSFG's lighter performance-oriented path. Disable it only when image quality matters more than GPU headroom."},
   {"backend-renderer","Display backend","Chooses the Switch renderer. Vulkan (NVK) is recommended and supports LSFG. OpenGL uses native NVC0, while Zink runs OpenGL on NVK as an additional compatibility path."},
   {"switch-gl-thread","Graphics","Runs OpenGL commands on a Mesa worker thread. Applies on next game launch."},
