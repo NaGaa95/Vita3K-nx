@@ -589,6 +589,9 @@ std::optional<uint32_t> ThreadState::run_guest(std::unique_lock<std::mutex> &loc
         switch (exit.kind) {
         case GuestExit::Kind::import: {
             current_import_nid.store(exit.value, std::memory_order_relaxed);
+#ifdef __SWITCH__
+            cpu->import_serial.fetch_add(1, std::memory_order_relaxed);
+#endif
             cpu->write_call_result(kernel.call_import(*cpu, exit.value, id));
             current_import_nid.store(0, std::memory_order_relaxed);
             cpu->clear_exclusive();
@@ -621,8 +624,14 @@ std::optional<uint32_t> ThreadState::run_guest(std::unique_lock<std::mutex> &loc
         if (const std::optional<Address> fault = cpu->take_abort())
             dispatch_abort(*fault);
         lock.lock();
-        if (exit.debugger_stop)
+        if (exit.debugger_stop) {
+            // Breakpoints are written into guest code as BKPT, so a BKPT the game runs itself stops the
+            // thread the same way, and then nothing resumes it
+            if (!step && !kernel.debugger.owns_breakpoint(cpu->get_pc()))
+                LOG_ERROR("Thread {} ({}) trapped on a guest breakpoint at {} (lr {}). Nothing can resume it.",
+                    id, name, log_hex(cpu->get_pc()), log_hex(cpu->get_lr()));
             debugger_hold = true;
+        }
         if (exit.kind == GuestExit::Kind::returned)
             return exit.value;
         // A thread that doesn't run here anymore parks again at the top
