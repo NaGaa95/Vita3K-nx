@@ -806,7 +806,6 @@ struct SwitchSixAxis {
             acquire(style, attributes);
         }
         int handle_index = -1;
-        bool right_joycon = false;
         if (style & HidNpadStyleTag_NpadHandheld)
             handle_index = 0;
         else if (style & HidNpadStyleTag_NpadFullKey)
@@ -823,12 +822,10 @@ struct SwitchSixAxis {
                 handle_index = preferred;
             else if (available(fallback))
                 handle_index = fallback;
-            right_joycon = handle_index == 3;
         } else if (style & HidNpadStyleTag_NpadJoyLeft) {
             handle_index = 4;
         } else if (style & HidNpadStyleTag_NpadJoyRight) {
             handle_index = 5;
-            right_joycon = true;
         }
 
         if (handle_index < 0 || !active[handle_index]) {
@@ -850,33 +847,29 @@ struct SwitchSixAxis {
             return;
         }
 
-        // Convert libnx axes (right, down, into screen) to SDL axes (right, up, out).
-        // Handheld input also cancels Vita3K's gamepad rotation to match the console.
-        // Convert acceleration from g to m/s^2 and angular velocity from rev/s to rad/s.
+        // Horizon: x right, y top, z out of the face; acceleration is gravity in g, angular
+        // velocity in rev/s. Both sensors turn by the same rotation (the console held up, or a
+        // controller held flat, is the Vita held up), or the motion filter's tilt correction
+        // fights the gyro.
         const bool handheld = handle_index == 0;
-        const auto send = [&](int type, const HidVector &source, float scale) {
+        const auto send = [&](int type, const HidVector &v) {
+            // SDL gamepad axes: right, up, towards the player.
+            const float x = v.x;
+            const float y = handheld ? v.z : -v.y;
+            const float z = handheld ? -v.y : -v.z;
+            // SDL takes the lift in m/s^2, opposite to gravity, and rad/s.
+            constexpr float radians_per_revolution = 6.28318530717958647692f;
+            const float scale = type == SDL_SENSOR_ACCEL ? -SDL_STANDARD_GRAVITY : radians_per_revolution;
             SDL_GamepadSensorEvent event{};
             event.type = SDL_EVENT_GAMEPAD_SENSOR_UPDATE;
             event.sensor_timestamp = SDL_GetTicksNS();
-            event.data[0] = source.x * scale;
-            event.data[1] = (handheld ? -source.z : -source.y) * scale;
-            event.data[2] = (handheld ? source.y : -source.z) * scale;
-            // Correct handheld yaw without changing pitch or accelerometer tilt.
-            if (handheld && type == SDL_SENSOR_GYRO)
-                event.data[2] = -event.data[2];
-            if (right_joycon) {
-                if (type == SDL_SENSOR_ACCEL)
-                    event.data[0] = -event.data[0];
-                event.data[1] = -event.data[1];
-            }
-            // The shared gamepad mapping sends SDL Y to the Vita roll axis.
-            if (type == SDL_SENSOR_GYRO)
-                event.data[1] = -event.data[1];
+            event.data[0] = x * scale;
+            event.data[1] = y * scale;
+            event.data[2] = z * scale;
             handle_motion_event(emuenv, type, event);
         };
-        send(SDL_SENSOR_ACCEL, sensor.acceleration, SDL_STANDARD_GRAVITY);
-        constexpr float radians_per_revolution = 6.28318530717958647692f;
-        send(SDL_SENSOR_GYRO, sensor.angular_velocity, radians_per_revolution);
+        send(SDL_SENSOR_ACCEL, sensor.acceleration);
+        send(SDL_SENSOR_GYRO, sensor.angular_velocity);
     }
 };
 
