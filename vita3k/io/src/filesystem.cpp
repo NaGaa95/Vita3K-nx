@@ -25,6 +25,8 @@
 #include <new>
 
 #ifdef __SWITCH__
+#include <sys/stat.h>
+
 SharedFilePtr open_shared_file(const fs::path &path, int flags) {
     // One writable host stream permits later guest writers without reopening a live reader.
     const auto host_path = path.generic_string();
@@ -46,6 +48,15 @@ static int64_t read_host_file(SharedFile &shared, void *data, size_t size, int64
     if (ftello(file) == offset || fseeko(file, offset, SEEK_SET) == 0) {
         const auto bytes = fread(data, 1, size, file);
         result = bytes == 0 && ferror(file) ? -1 : static_cast<int64_t>(bytes);
+    }
+    // Horizon fails a read at or past the end of the file, where the Vita reads nothing (NFS Most
+    // Wanted's streamer reads past the end of its dialogue files).
+    if (result < 0) {
+        struct stat info{};
+        if (fstat(fileno(file), &info) == 0 && offset >= info.st_size) {
+            clearerr(file);
+            result = 0;
+        }
     }
     return result;
 }
